@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  INSTAGRAM
+  FACEBOOK
+  TIKTOK
+  LINKEDIN
+  YOUTUBE
+  X
+}
+
+enum ReportStatus {
+  DRAFT
+  NEEDS_REVIEW
+  APPROVED
+  EXPORTED
+}
+
+enum BlockType {
+  TEXT
+  KPI
+  CHART
+  PLATFORM_ANALYTICS
+  MEDIA
+  NOTES
+  RECOMMENDATIONS
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String?
+  passwordHash String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  reports      Report[]
+  sessions     Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model Client {
+  id          String              @id @default(cuid())
+  name        String
+  active      Boolean             @default(true)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  connections SocialConnection[]
+  reports     Report[]
+}
+
+model SocialConnection {
+  id              String   @id @default(cuid())
+  clientId        String
+  platform        Platform
+  externalAccountId String
+  displayName     String
+  encryptedToken  String
+  tokenExpiresAt  DateTime?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime @default(now())
+  client          Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, platform, externalAccountId])
+}
+
+model Report {
+  id          String       @id @default(cuid())
+  clientId    String
+  createdById String
+  title       String
+  periodStart DateTime
+  periodEnd   DateTime
+  status      ReportStatus @default(DRAFT)
+  isBlank     Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  createdBy   User         @relation(fields: [createdById], references: [id])
+  blocks      ReportBlock[]
+}
+
+model ReportBlock {
+  id        String    @id @default(cuid())
+  reportId  String
+  type      BlockType
+  position  Int
+  content   Json
+  report    Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, position])
+}

@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+coverage/
+.env
+.env.local
+.env.*.local
+!.env.example
+uploads/
+generated-reports/
+.DS_Store
+*.log
