@@ -6,6 +6,10 @@ import { createReportDraft, ReportBlockType } from "@/lib/report-template";
 import { getSessionUser } from "@/lib/session";
 import { dateValue, requiredText } from "@/lib/validators";
 
+const reportBlockTypes = ["text", "kpi", "chart", "platformAnalytics", "media", "notes", "recommendations"] as const;
+type EditableBlockType = (typeof reportBlockTypes)[number];
+type EditableBlock = { type: EditableBlockType; title: string; content: Record<string, unknown> };
+
 function toDatabaseBlockType(type: ReportBlockType): BlockType {
   const map: Record<ReportBlockType, BlockType> = {
     text: BlockType.TEXT,
@@ -17,6 +21,17 @@ function toDatabaseBlockType(type: ReportBlockType): BlockType {
     recommendations: BlockType.RECOMMENDATIONS,
   };
   return map[type];
+}
+
+function editableBlocks(value: unknown): EditableBlock[] {
+  if (!Array.isArray(value) || value.length > 60) throw new Error("blocks must contain 60 items or fewer.");
+  return value.map((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error("Each block must be an object.");
+    const { type, title, content } = block as Record<string, unknown>;
+    if (typeof type !== "string" || !reportBlockTypes.includes(type as EditableBlockType)) throw new Error("Each block type is invalid.");
+    if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error("Each block content must be an object.");
+    return { type: type as EditableBlockType, title: requiredText(title, "block title"), content: content as Record<string, unknown> };
+  });
 }
 
 async function workspaceUser(request: NextRequest) {
@@ -49,11 +64,42 @@ export async function POST(request: NextRequest) {
         periodEnd: dateValue(body.periodEnd, "periodEnd"),
         status: draft.status,
         isBlank: draft.isBlank,
-        blocks: { create: draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: block.content as Prisma.InputJsonValue })) },
+        blocks: { create: draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) },
       },
       include: { blocks: { orderBy: { position: "asc" } } },
     });
     return NextResponse.json({ report }, { status: 201 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });
+  }
+}
+
+export async function PATCH(request: NextRequest) {
+  const actor = await workspaceUser(request);
+  const internalAccess = hasInternalApiAccess(request);
+  if (!internalAccess && !actor) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    const reportId = requiredText(body.id, "id", 64);
+    const existing = await db.report.findUnique({ where: { id: reportId }, select: { createdById: true } });
+    if (!existing) return NextResponse.json({ error: "Report not found." }, { status: 404 });
+    if (!internalAccess && existing.createdById !== actor?.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+    const blocks = editableBlocks(body.blocks);
+    const title = requiredText(body.title, "title");
+    const report = await db.report.update({
+      where: { id: reportId },
+      data: {
+        title,
+        isBlank: body.isBlank === true,
+        blocks: {
+          deleteMany: {},
+          create: blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })),
+        },
+      },
+      include: { blocks: { orderBy: { position: "asc" } } },
+    });
+    return NextResponse.json({ report });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });
   }

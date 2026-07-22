@@ -8,7 +8,7 @@ export function getRuntimeConfiguration() {
   return {
     configured: missing.length === 0,
     missing,
-    metaConfigured: Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET && process.env.META_REDIRECT_URI),
+    metaConfigured: Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET && process.env.META_REDIRECT_URI && process.env.META_TOKEN_ENCRYPTION_KEY),
     googleConfigured: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REDIRECT_URI),
   };
 }

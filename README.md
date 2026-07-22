@@ -120,3 +120,7 @@ Publish signed webhook events for: analytics sync completed/failed, report draft
 3. Create the Google Cloud OAuth application for the agency Workspace account.
 4. Configure PostgreSQL, MinIO, backups, and production environment secrets.
 5. Implement database migrations, session/auth flows, background workers, and provider APIs before turning on real client accounts.
+
+
+Terminal 1: npm run dev
+Terminal 2: npx ngrok http 3000
