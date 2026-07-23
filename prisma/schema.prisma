@@ -65,21 +65,55 @@ model Client {
   reports     Report[]
 }
 
-model SocialConnection {
-  id              String   @id @default(cuid())
-  clientId        String
-  platform        Platform
+model MetaProfile {
+  id            String        @id @default(cuid())
+  displayName   String
+  createdById   String
+  tokenExpiresAt DateTime?
+  lastSyncedAt  DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  accounts      MetaAccount[]
+
+  @@index([createdById])
+}
+
+model MetaAccount {
+  id                String        @id @default(cuid())
+  profileId         String
+  platform          Platform
   externalAccountId String
-  displayName     String
-  encryptedToken  String
-  tokenExpiresAt  DateTime?
-  lastSyncedAt    DateTime?
-  createdAt       DateTime @default(now())
-  client          Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  posts           SocialPost[]
+  displayName       String
+  encryptedToken    String
+  tokenExpiresAt    DateTime?
+  lastSyncedAt      DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  profile           MetaProfile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  assignments       SocialConnection[]
+
+  @@unique([profileId, platform, externalAccountId])
+  @@index([platform, externalAccountId])
+}
+
+model SocialConnection {
+  id               String        @id @default(cuid())
+  clientId         String
+  sourceAccountId  String?
+  platform         Platform
+  externalAccountId String
+  displayName      String
+  encryptedToken   String
+  tokenExpiresAt   DateTime?
+  lastSyncedAt     DateTime?
+  createdAt        DateTime      @default(now())
+  client           Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  sourceAccount    MetaAccount?  @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
+  posts            SocialPost[]
   insightSnapshots SocialInsightSnapshot[]
 
   @@unique([clientId, platform, externalAccountId])
+  @@index([sourceAccountId])
 }
 
 model SocialPost {
