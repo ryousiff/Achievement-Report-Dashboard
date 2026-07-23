@@ -76,8 +76,42 @@ model SocialConnection {
   lastSyncedAt    DateTime?
   createdAt       DateTime @default(now())
   client          Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  posts           SocialPost[]
+  insightSnapshots SocialInsightSnapshot[]
 
   @@unique([clientId, platform, externalAccountId])
+}
+
+model SocialPost {
+  id             String   @id @default(cuid())
+  connectionId   String
+  externalPostId String
+  caption        String?
+  mediaType      String
+  mediaUrl       String?
+  thumbnailUrl   String?
+  permalink      String?
+  publishedAt    DateTime
+  metrics        Json
+  syncedAt       DateTime @updatedAt
+  connection     SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, externalPostId])
+  @@index([connectionId, publishedAt])
+}
+
+model SocialInsightSnapshot {
+  id           String   @id @default(cuid())
+  connectionId String
+  metric       String
+  periodStart  DateTime
+  periodEnd    DateTime
+  value        Float
+  capturedAt   DateTime @default(now())
+  connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, metric, periodStart, periodEnd])
+  @@index([connectionId, periodStart, periodEnd])
 }
 
 model Report {
