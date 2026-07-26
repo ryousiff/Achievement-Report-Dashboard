@@ -28,7 +28,7 @@ export async function syncClientInstagramPosts(clientId: string) {
       if (!item.timestamp || !item.media_type) continue;
       let insightMetrics: Record<string, number> = {};
       try {
-        const insights = await graph<{ data?: MetaInsight[] }>(`${item.id}/insights`, token, { metric: "views,reach,saved,shares,total_interactions" });
+        const insights = await graph<{ data?: MetaInsight[] }>(`${item.id}/insights`, token, { metric: "views,reach,saved,shares,total_interactions,follows" });
         insightMetrics = Object.fromEntries((insights.data ?? []).flatMap((insight) => insight.name && typeof insight.values?.[0]?.value === "number" ? [[insight.name, insight.values[0].value]] : []));
       } catch {
         insightMetrics = {};

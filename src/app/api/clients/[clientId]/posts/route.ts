@@ -10,7 +10,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const posts = await db.socialPost.findMany({ where: { connection: { clientId }, publishedAt: { gte: since } }, orderBy: { publishedAt: "desc" }, take: 100 });
   const ranked = posts.map((post) => {
     const metrics = post.metrics as Record<string, number>;
-    return { ...post, score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) };
+    return { ...post, score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
   }).sort((left, right) => right.score - left.score);
   return NextResponse.json({ posts: ranked });
 }
