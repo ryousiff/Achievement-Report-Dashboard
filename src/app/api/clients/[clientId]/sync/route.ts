@@ -10,7 +10,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const client = await db.client.findUnique({ where: { id: clientId }, select: { id: true } });
   if (!client) return NextResponse.json({ error: "Client not found." }, { status: 404 });
   try {
-    return NextResponse.json(await syncClientInstagramPosts(client.id));
+    const result = await syncClientInstagramPosts(client.id);
+    return NextResponse.json(result, { status: result.results.some((item) => item.status === "failed") ? 207 : 200 });
   } catch {
     return NextResponse.json({ error: "Unable to synchronize Meta posts. Confirm the account connection and permissions." }, { status: 502 });
   }

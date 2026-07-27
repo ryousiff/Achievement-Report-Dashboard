@@ -41,29 +41,53 @@ async function syncDailyFollows(connectionId: string, accountId: string, token: 
   } catch {}
 }
 
-export async function syncClientInstagramPosts(clientId: string) {
-  const connections = await db.socialConnection.findMany({ where: { clientId, platform: Platform.INSTAGRAM }, select: { id: true, externalAccountId: true, encryptedToken: true } });
-  let synced = 0;
+export type ConnectionSyncResult = { connectionId: string; displayName: string; status: "success" | "failed"; posts: number; durationMs: number; error?: string };
+export type ClientSyncResult = { connections: number; posts: number; joinedExisting: boolean; results: ConnectionSyncResult[] };
+
+const activeClientSyncs = new Map<string, Promise<ClientSyncResult>>();
+
+function syncError(error: unknown) {
+  return error instanceof Error && error.message === "Meta sync request failed." ? "تعذر الاتصال بـ Meta. تحققي من صلاحية الربط." : "تعذر تحديث هذا الحساب.";
+}
+
+async function runClientSync(clientId: string): Promise<ClientSyncResult> {
+  const connections = await db.socialConnection.findMany({ where: { clientId, platform: Platform.INSTAGRAM }, select: { id: true, displayName: true, externalAccountId: true, encryptedToken: true } });
   const since = new Date();
   since.setMonth(since.getMonth() - 3);
+  const results: ConnectionSyncResult[] = [];
 
   for (const connection of connections) {
-    const token = decryptToken(connection.encryptedToken);
-    const media = await graph<{ data?: MetaMedia[] }>(`${connection.externalAccountId}/media`, token, { fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count", since: String(Math.floor(since.valueOf() / 1000)), limit: "100" });
-    for (const item of media.data ?? []) {
-      if (!item.timestamp || !item.media_type) continue;
-      const insightMetrics = await postInsights(item.id, token);
-      const metrics: Record<string, number> = { likes: item.like_count ?? 0, comments: item.comments_count ?? 0, ...insightMetrics };
-      metrics.total_interactions ??= metrics.likes + metrics.comments + (metrics.saved ?? 0) + (metrics.shares ?? 0);
-      await db.socialPost.upsert({
-        where: { connectionId_externalPostId: { connectionId: connection.id, externalPostId: item.id } },
-        create: { connectionId: connection.id, externalPostId: item.id, caption: item.caption, mediaType: item.media_type, mediaUrl: item.media_url, thumbnailUrl: item.thumbnail_url, permalink: item.permalink, publishedAt: new Date(item.timestamp), metrics },
-        update: { caption: item.caption, mediaType: item.media_type, mediaUrl: item.media_url, thumbnailUrl: item.thumbnail_url, permalink: item.permalink, publishedAt: new Date(item.timestamp), metrics },
-      });
-      synced += 1;
+    const startedAt = Date.now();
+    try {
+      const token = decryptToken(connection.encryptedToken);
+      const media = await graph<{ data?: MetaMedia[] }>(`${connection.externalAccountId}/media`, token, { fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count", since: String(Math.floor(since.valueOf() / 1000)), limit: "100" });
+      let posts = 0;
+      for (const item of media.data ?? []) {
+        if (!item.timestamp || !item.media_type) continue;
+        const insightMetrics = await postInsights(item.id, token);
+        const metrics: Record<string, number> = { likes: item.like_count ?? 0, comments: item.comments_count ?? 0, ...insightMetrics };
+        metrics.total_interactions ??= metrics.likes + metrics.comments + (metrics.saved ?? 0) + (metrics.shares ?? 0);
+        await db.socialPost.upsert({
+          where: { connectionId_externalPostId: { connectionId: connection.id, externalPostId: item.id } },
+          create: { connectionId: connection.id, externalPostId: item.id, caption: item.caption, mediaType: item.media_type, mediaUrl: item.media_url, thumbnailUrl: item.thumbnail_url, permalink: item.permalink, publishedAt: new Date(item.timestamp), metrics },
+          update: { caption: item.caption, mediaType: item.media_type, mediaUrl: item.media_url, thumbnailUrl: item.thumbnail_url, permalink: item.permalink, publishedAt: new Date(item.timestamp), metrics },
+        });
+        posts += 1;
+      }
+      await syncDailyFollows(connection.id, connection.externalAccountId, token, since);
+      await db.socialConnection.update({ where: { id: connection.id }, data: { lastSyncedAt: new Date() } });
+      results.push({ connectionId: connection.id, displayName: connection.displayName, status: "success", posts, durationMs: Date.now() - startedAt });
+    } catch (error) {
+      results.push({ connectionId: connection.id, displayName: connection.displayName, status: "failed", posts: 0, durationMs: Date.now() - startedAt, error: syncError(error) });
     }
-    await syncDailyFollows(connection.id, connection.externalAccountId, token, since);
-    await db.socialConnection.update({ where: { id: connection.id }, data: { lastSyncedAt: new Date() } });
   }
-  return { connections: connections.length, posts: synced };
+  return { connections: connections.length, posts: results.reduce((total, result) => total + result.posts, 0), joinedExisting: false, results };
+}
+
+export async function syncClientInstagramPosts(clientId: string): Promise<ClientSyncResult> {
+  const existing = activeClientSyncs.get(clientId);
+  if (existing) return { ...(await existing), joinedExisting: true };
+  const sync = runClientSync(clientId).finally(() => activeClientSyncs.delete(clientId));
+  activeClientSyncs.set(clientId, sync);
+  return sync;
 }
