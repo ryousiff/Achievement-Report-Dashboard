@@ -97,6 +97,7 @@ export async function resolveInstagramUrl(clientId: string, getConnection: () =>
       } catch {
         // Insights may be unavailable for some media types; keep basic metrics.
       }
+      metrics.total_interactions ??= (metrics.likes ?? 0) + (metrics.comments ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0);
       return { id: `instagram-${item.id}`, externalPostId: item.id, caption: item.caption ?? null, mediaType: item.media_type ?? "IMAGE", mediaUrl: item.media_url ?? null, thumbnailUrl: item.thumbnail_url ?? item.media_url ?? null, permalink: item.permalink ?? null, publishedAt: item.timestamp ? new Date(item.timestamp).toISOString() : new Date().toISOString(), metrics, score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
     }
 

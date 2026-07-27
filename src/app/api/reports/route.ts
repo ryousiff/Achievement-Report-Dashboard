@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { hasInternalApiAccess } from "@/lib/internal-api";
 import { createReportDraft, ReportBlockType } from "@/lib/report-template";
+import { buildStandardReportBlocks } from "@/lib/report-data";
+import { syncClientInstagramPosts } from "@/lib/meta-sync";
 import { getSessionUser } from "@/lib/session";
 import { dateValue, requiredText } from "@/lib/validators";
 
@@ -55,16 +57,22 @@ export async function POST(request: NextRequest) {
     const createdById = actor?.id ?? requiredText(body.createdById, "createdById", 64);
     const template = body.template === "blank" ? "blank" : "standard";
     const draft = createReportDraft(template);
+    const periodStart = dateValue(body.periodStart, "periodStart");
+    const periodEnd = dateValue(body.periodEnd, "periodEnd");
+    if (template === "standard") {
+      try { await syncClientInstagramPosts(clientId); } catch {}
+    }
+    const populatedBlocks = template === "standard" ? await buildStandardReportBlocks(clientId, periodStart, periodEnd) : [];
     const report = await db.report.create({
       data: {
         clientId,
         createdById,
         title: requiredText(body.title, "title"),
-        periodStart: dateValue(body.periodStart, "periodStart"),
-        periodEnd: dateValue(body.periodEnd, "periodEnd"),
+        periodStart,
+        periodEnd,
         status: draft.status,
         isBlank: draft.isBlank,
-        blocks: { create: draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) },
+        blocks: { create: template === "standard" ? populatedBlocks.map((block, position) => ({ position, type: block.type, content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) : draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) },
       },
       include: { blocks: { orderBy: { position: "asc" } } },
     });
@@ -92,6 +100,7 @@ export async function PATCH(request: NextRequest) {
       data: {
         title,
         isBlank: body.isBlank === true,
+        status: body.status === "APPROVED" ? "APPROVED" : undefined,
         blocks: {
           deleteMany: {},
           create: blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })),
