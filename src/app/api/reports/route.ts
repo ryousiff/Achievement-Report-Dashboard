@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import { hasInternalApiAccess } from "@/lib/internal-api";
 import { createReportDraft, ReportBlockType } from "@/lib/report-template";
 import { buildStandardReportBlocks } from "@/lib/report-data";
-import { syncClientInstagramPosts } from "@/lib/meta-sync";
+import { enqueueClientSync } from "@/lib/sync-queue";
 import { getSessionUser } from "@/lib/session";
 import { dateValue, requiredText } from "@/lib/validators";
 
@@ -34,6 +34,20 @@ function editableBlocks(value: unknown): EditableBlock[] {
     if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error("Each block content must be an object.");
     return { type: type as EditableBlockType, title: requiredText(title, "block title"), content: content as Record<string, unknown> };
   });
+}
+
+async function readiness(reportId: string, blocks: EditableBlock[]) {
+  const report = await db.report.findUnique({ where: { id: reportId }, select: { clientId: true } });
+  if (!report) return ["Report not found."];
+  const issues: string[] = [];
+  const media = blocks.filter((block) => block.type === "media");
+  if (media.some((block) => !Array.isArray(block.content.mediaItems) || block.content.mediaItems.length === 0)) issues.push("One or more required media sections are empty.");
+  if (blocks.some((block) => Array.isArray(block.content.kpis) && block.content.kpis.some((item) => typeof item === "object" && item && ((item as Record<string, unknown>).available === false || (item as Record<string, unknown>).value === "غير متاح")))) issues.push("One or more critical metrics are unavailable.");
+  const recommendations = blocks.find((block) => block.type === "notes" || block.type === "recommendations");
+  if (!recommendations || typeof recommendations.content.body !== "string" || !recommendations.content.body.trim()) issues.push("Recommendations are missing.");
+  const connection = await db.socialConnection.findFirst({ where: { clientId: report.clientId, platform: "INSTAGRAM" }, select: { lastSuccessfulSyncAt: true } });
+  if (!connection?.lastSuccessfulSyncAt || Date.now() - connection.lastSuccessfulSyncAt.valueOf() > 24 * 60 * 60 * 1000) issues.push("Client data has not been synchronized in the last 24 hours.");
+  return issues;
 }
 
 async function workspaceUser(request: NextRequest) {
@@ -67,9 +81,8 @@ export async function POST(request: NextRequest) {
       const report = await db.report.create({ data: { clientId, createdById, title: requiredText(body.title, "title"), periodStart, periodEnd, status: "DRAFT", isBlank: source.isBlank, blocks: { create: source.blocks.map((block, position) => { const content = block.content as Record<string, unknown>; const kpis = Array.isArray(content.kpis) ? content.kpis.map((item) => typeof item === "object" && item ? { ...(item as Record<string, unknown>), value: "0" } : item) : content.kpis; return { position, type: block.type, content: { ...content, mediaItems: Array.isArray(content.mediaItems) ? [] : content.mediaItems, kpis } as Prisma.InputJsonValue }; }) } }, include: { blocks: { orderBy: { position: "asc" } } } });
       return NextResponse.json({ report }, { status: 201 });
     }
-    if (template === "standard") {
-      try { await syncClientInstagramPosts(clientId); } catch {}
-    }
+    const hasSyncedPosts = template === "standard" && (await db.socialPost.count({ where: { connection: { clientId } } })) > 0;
+    const syncQueued = template === "standard" && !hasSyncedPosts ? await enqueueClientSync(clientId) : [];
     const populatedBlocks = template === "standard" ? await buildStandardReportBlocks(clientId, periodStart, periodEnd) : [];
     const report = await db.report.create({
       data: {
@@ -84,7 +97,7 @@ export async function POST(request: NextRequest) {
       },
       include: { blocks: { orderBy: { position: "asc" } } },
     });
-    return NextResponse.json({ report }, { status: 201 });
+    return NextResponse.json({ report, syncQueued: syncQueued.length > 0 }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });
   }
@@ -104,12 +117,19 @@ export async function PATCH(request: NextRequest) {
 
     const blocks = editableBlocks(body.blocks);
     const title = requiredText(body.title, "title");
+    const orientation = body.orientation === "portrait" ? "portrait" : body.orientation === "landscape" ? "landscape" : undefined;
+    const approving = body.status === "APPROVED";
+    const overrideReason = typeof body.overrideReason === "string" ? body.overrideReason.trim() : "";
+    const issues = approving ? await readiness(reportId, blocks) : [];
+    if (approving && issues.length && !overrideReason) return NextResponse.json({ error: "Report is not ready for approval.", readiness: { ready: false, issues } }, { status: 409 });
     const report = await db.report.update({
       where: { id: reportId },
       data: {
         title,
         isBlank: body.isBlank === true,
-        status: body.status === "APPROVED" ? "APPROVED" : undefined,
+        orientation,
+        approvalOverrideReason: approving && overrideReason ? overrideReason : undefined,
+        status: approving ? "APPROVED" : undefined,
         blocks: {
           deleteMany: {},
           create: blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })),
@@ -117,7 +137,11 @@ export async function PATCH(request: NextRequest) {
       },
       include: { blocks: { orderBy: { position: "asc" } } },
     });
-    return NextResponse.json({ report });
+    if (approving) {
+      const count = await db.reportVersion.count({ where: { reportId } });
+      await db.reportVersion.create({ data: { reportId, number: count + 1, snapshot: { title: report.title, orientation: report.orientation, blocks: report.blocks } as Prisma.InputJsonValue } });
+    }
+    return NextResponse.json({ report, readiness: { ready: issues.length === 0, issues } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });
   }

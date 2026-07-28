@@ -1,4 +1,28 @@
 services:
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://kaan:change-me-before-production@postgres:5432/kaan_reports
+      MINIO_ENDPOINT: minio
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+      - minio
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: npm run worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://kaan:change-me-before-production@postgres:5432/kaan_reports
+      MINIO_ENDPOINT: minio
+    depends_on:
+      - postgres
+
   postgres:
     image: postgres:16.8-alpine
     restart: unless-stopped

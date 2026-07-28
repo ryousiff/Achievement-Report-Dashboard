@@ -33,6 +33,19 @@ enum BlockType {
   RECOMMENDATIONS
 }
 
+enum SyncJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum SyncRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
 model User {
   id           String    @id @default(cuid())
   email        String    @unique
@@ -58,6 +71,7 @@ model Session {
 model Client {
   id          String              @id @default(cuid())
   name        String
+  logoUrl     String?
   active      Boolean             @default(true)
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
@@ -105,12 +119,18 @@ model SocialConnection {
   displayName      String
   encryptedToken   String
   tokenExpiresAt   DateTime?
-  lastSyncedAt     DateTime?
-  createdAt        DateTime      @default(now())
-  client           Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  sourceAccount    MetaAccount?  @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
-  posts            SocialPost[]
-  insightSnapshots SocialInsightSnapshot[]
+  lastSyncedAt          DateTime?
+  lastSuccessfulSyncAt  DateTime?
+  lastFailedSyncAt      DateTime?
+  lastFailureReason     String?
+  syncLockedUntil       DateTime?
+  createdAt             DateTime      @default(now())
+  client                Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  sourceAccount         MetaAccount?  @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
+  posts                 SocialPost[]
+  insightSnapshots      SocialInsightSnapshot[]
+  syncJobs              SyncJob[]
+  syncRuns              SyncRun[]
 
   @@unique([clientId, platform, externalAccountId])
   @@index([sourceAccountId])
@@ -127,6 +147,7 @@ model SocialPost {
   permalink      String?
   publishedAt    DateTime
   metrics        Json
+  metricAvailability Json?
   syncedAt       DateTime @updatedAt
   connection     SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
@@ -148,6 +169,45 @@ model SocialInsightSnapshot {
   @@index([connectionId, periodStart, periodEnd])
 }
 
+model SyncJob {
+  id           String        @id @default(cuid())
+  connectionId String
+  status       SyncJobStatus @default(QUEUED)
+  attempts     Int           @default(0)
+  maxAttempts  Int           @default(5)
+  runAfter     DateTime      @default(now())
+  lockedAt     DateTime?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  lastError    String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  runs         SyncRun[]
+
+  @@index([status, runAfter])
+  @@index([connectionId, status])
+}
+
+model SyncRun {
+  id           String        @id @default(cuid())
+  jobId        String
+  connectionId String
+  status       SyncRunStatus @default(RUNNING)
+  startedAt    DateTime      @default(now())
+  finishedAt   DateTime?
+  durationMs   Int?
+  postsSynced  Int           @default(0)
+  errorCode    String?
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+  job          SyncJob       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, createdAt])
+  @@index([jobId])
+}
+
 model Report {
   id          String       @id @default(cuid())
   clientId    String
@@ -156,12 +216,39 @@ model Report {
   periodStart DateTime
   periodEnd   DateTime
   status      ReportStatus @default(DRAFT)
-  isBlank     Boolean      @default(false)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  createdBy   User         @relation(fields: [createdById], references: [id])
-  blocks      ReportBlock[]
+  isBlank               Boolean      @default(false)
+  orientation           String       @default("landscape")
+  approvalOverrideReason String?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  client                Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  createdBy             User         @relation(fields: [createdById], references: [id])
+  blocks                ReportBlock[]
+  versions              ReportVersion[]
+  exports               ReportExport[]
+}
+
+model ReportVersion {
+  id        String   @id @default(cuid())
+  reportId  String
+  number    Int
+  snapshot  Json
+  createdAt DateTime @default(now())
+  report    Report   @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@unique([reportId, number])
+  @@index([reportId, createdAt])
+}
+
+model ReportExport {
+  id          String   @id @default(cuid())
+  reportId    String
+  orientation String
+  status      String   @default("EXPORTED")
+  createdAt   DateTime @default(now())
+  report      Report   @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, createdAt])
 }
 
 model ReportBlock {

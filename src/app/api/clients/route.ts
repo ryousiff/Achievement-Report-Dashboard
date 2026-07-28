@@ -11,7 +11,7 @@ async function hasWorkspaceAccess(request: NextRequest) {
 export async function GET(request: NextRequest) {
   if (!(await hasWorkspaceAccess(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const archived = request.nextUrl.searchParams.get("archived") === "true";
-  const clients = await db.client.findMany({ where: { active: !archived }, include: { connections: { where: { sourceAccountId: { not: null } }, select: { platform: true, displayName: true, lastSyncedAt: true, tokenExpiresAt: true, sourceAccountId: true } }, _count: { select: { reports: true } } }, orderBy: { name: "asc" } });
+  const clients = await db.client.findMany({ where: { active: !archived }, include: { connections: { where: { sourceAccountId: { not: null } }, select: { platform: true, displayName: true, lastSyncedAt: true, lastSuccessfulSyncAt: true, lastFailedSyncAt: true, lastFailureReason: true, tokenExpiresAt: true, sourceAccountId: true, syncJobs: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, attempts: true, runAfter: true, lastError: true } }, syncRuns: { orderBy: { createdAt: "desc" }, take: 3, select: { status: true, startedAt: true, finishedAt: true, postsSynced: true, durationMs: true, errorMessage: true } } } }, _count: { select: { reports: true } } }, orderBy: { name: "asc" } });
   return NextResponse.json({ clients });
 }
 

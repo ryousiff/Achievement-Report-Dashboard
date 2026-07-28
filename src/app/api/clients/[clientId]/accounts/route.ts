@@ -2,6 +2,7 @@ import { Platform } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/session";
+import { decryptToken } from "@/lib/token-encryption";
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
   const user = await getSessionUser(request);
@@ -12,7 +13,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   if (new Set(accountIds).size !== accountIds.length) return NextResponse.json({ error: "An account can only be selected once." }, { status: 400 });
 
   const [client, accounts] = await Promise.all([
-    db.client.findUnique({ where: { id: clientId }, select: { id: true } }),
+    db.client.findUnique({ where: { id: clientId }, select: { id: true, logoUrl: true } }),
     db.metaAccount.findMany({ where: { id: { in: accountIds }, profile: { createdById: user.id } } }),
   ]);
   if (!client) return NextResponse.json({ error: "Client not found." }, { status: 404 });
@@ -30,5 +31,16 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       update: { sourceAccountId: account.id, displayName: account.displayName, encryptedToken: account.encryptedToken, tokenExpiresAt: account.tokenExpiresAt, lastSyncedAt: account.lastSyncedAt },
     })),
   ]);
+  const instagram = accounts.find((account) => account.platform === Platform.INSTAGRAM);
+  if (instagram && !client.logoUrl) {
+    try {
+      const url = new URL(`https://graph.facebook.com/v23.0/${instagram.externalAccountId}`);
+      url.searchParams.set("fields", "profile_picture_url");
+      url.searchParams.set("access_token", decryptToken(instagram.encryptedToken));
+      const response = await fetch(url, { cache: "no-store" });
+      const data = await response.json() as { profile_picture_url?: unknown };
+      if (response.ok && typeof data.profile_picture_url === "string" && data.profile_picture_url.startsWith("https://")) await db.client.update({ where: { id: clientId }, data: { logoUrl: data.profile_picture_url } });
+    } catch {}
+  }
   return NextResponse.json({ ok: true });
 }

@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createMetaAuthorizationUrl, createMetaState } from "@/lib/meta";
+import { metaConnector } from "@/lib/connectors";
+import { ConnectorError } from "@/lib/connectors";
 import { getSessionUser } from "@/lib/session";
 
 export async function GET(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
-    return NextResponse.redirect(createMetaAuthorizationUrl(createMetaState(user.id)));
-  } catch {
-    return NextResponse.json({ error: "Meta OAuth has not been configured." }, { status: 503 });
+    return NextResponse.redirect(metaConnector.createAuthorizationUrl(user.id));
+  } catch (error) {
+    const status = error instanceof ConnectorError && error.code === "not_configured" ? 503 : 500;
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Meta OAuth error." }, { status });
   }
 }
