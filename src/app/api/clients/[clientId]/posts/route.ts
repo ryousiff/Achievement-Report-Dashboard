@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 import { completeDailySeries } from "@/lib/report-data";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  if (!(await getSessionUser(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await requireFeature(request, "view_reports"))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
   const startValue = request.nextUrl.searchParams.get("periodStart");
   const endValue = request.nextUrl.searchParams.get("periodEnd");

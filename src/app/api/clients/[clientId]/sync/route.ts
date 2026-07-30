@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { enqueueClientSync } from "@/lib/sync-queue";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  const user = await getSessionUser(request);
+  const user = await requireFeature(request, "edit_report");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
   const client = await db.client.findUnique({ where: { id: clientId }, select: { id: true } });

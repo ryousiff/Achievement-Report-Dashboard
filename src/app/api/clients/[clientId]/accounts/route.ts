@@ -1,11 +1,11 @@
 import { Platform } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 import { decryptToken } from "@/lib/token-encryption";
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  const user = await getSessionUser(request);
+  const user = await requireFeature(request, "assign_accounts");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
   const { accountIds } = await request.json() as { accountIds?: unknown };

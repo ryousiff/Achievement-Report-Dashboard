@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     const user = await db.user.findUnique({ where: { email: emailValue(body.email) } });
     if (!user?.passwordHash || !(await verifyPassword(passwordValue(body.password), user.passwordHash))) return NextResponse.json({ error: "Invalid email or password." }, { status: 401 });
     const { token, expiresAt } = await createSession(user.id);
-    const response = NextResponse.json({ user: { id: user.id, email: user.email, name: user.name } });
+    const response = NextResponse.json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } });
     setSessionCookie(response, token, expiresAt);
     return response;
   } catch {

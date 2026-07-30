@@ -16,6 +16,12 @@ enum Platform {
   X
 }
 
+enum Role {
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
 enum ReportStatus {
   DRAFT
   NEEDS_REVIEW
@@ -47,14 +53,18 @@ enum SyncRunStatus {
 }
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
-  name         String?
-  passwordHash String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  reports      Report[]
-  sessions     Session[]
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  name                String?
+  passwordHash        String?
+  role                Role      @default(EDITOR)
+  googleRefreshToken  String?
+  googleTokenExpiresAt DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  reports             Report[]
+  sessions            Session[]
+  auditLogs           AuditLog[]
 }
 
 model Session {
@@ -69,14 +79,15 @@ model Session {
 }
 
 model Client {
-  id          String              @id @default(cuid())
-  name        String
-  logoUrl     String?
-  active      Boolean             @default(true)
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
-  connections SocialConnection[]
-  reports     Report[]
+  id            String              @id @default(cuid())
+  name          String
+  logoUrl       String?
+  driveFolderId String?
+  active        Boolean             @default(true)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  connections   SocialConnection[]
+  reports       Report[]
 }
 
 model MetaProfile {
@@ -245,6 +256,7 @@ model ReportExport {
   reportId    String
   orientation String
   status      String   @default("EXPORTED")
+  fileUrl     String?
   createdAt   DateTime @default(now())
   report      Report   @relation(fields: [reportId], references: [id], onDelete: Cascade)
 
@@ -260,4 +272,29 @@ model ReportBlock {
   report    Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)
 
   @@unique([reportId, position])
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  moduleId  String
+  key       String
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([moduleId, key])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  resource   String
+  resourceId String?
+  details    Json?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([resource, resourceId])
+  @@index([createdAt])
 }

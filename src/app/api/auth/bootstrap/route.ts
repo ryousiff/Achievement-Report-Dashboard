@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { Role } from "@prisma/client";
 import { emailValue, passwordValue } from "@/lib/auth-input";
 import { db } from "@/lib/db";
 import { hashPassword } from "@/lib/passwords";
@@ -13,7 +14,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json() as Record<string, unknown>;
-    const user = await db.user.create({ data: { email: emailValue(body.email), name: requiredText(body.name, "name"), passwordHash: await hashPassword(passwordValue(body.password)) }, select: { id: true, email: true, name: true } });
+    const user = await db.user.create({ data: { email: emailValue(body.email), name: requiredText(body.name, "name"), role: Role.ADMIN, passwordHash: await hashPassword(passwordValue(body.password)) }, select: { id: true, email: true, name: true, role: true } });
     return NextResponse.json({ user }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });

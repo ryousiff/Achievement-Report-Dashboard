@@ -1,11 +1,12 @@
-import { BlockType, Prisma } from "@prisma/client";
+import { BlockType, Prisma, Role } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { hasInternalApiAccess } from "@/lib/internal-api";
+import { hasFeature, requireFeature } from "@/lib/access";
 import { createReportDraft, ReportBlockType } from "@/lib/report-template";
 import { buildStandardReportBlocks } from "@/lib/report-data";
 import { enqueueClientSync } from "@/lib/sync-queue";
-import { getSessionUser } from "@/lib/session";
+
 import { dateValue, requiredText } from "@/lib/validators";
 
 const reportBlockTypes = ["text", "kpi", "chart", "platformAnalytics", "media", "notes", "recommendations"] as const;
@@ -50,19 +51,15 @@ async function readiness(reportId: string, blocks: EditableBlock[]) {
   return issues;
 }
 
-async function workspaceUser(request: NextRequest) {
-  return getSessionUser(request);
-}
-
 export async function GET(request: NextRequest) {
-  if (!hasInternalApiAccess(request) && !(await workspaceUser(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!hasInternalApiAccess(request) && !(await requireFeature(request, "view_reports"))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const clientId = request.nextUrl.searchParams.get("clientId");
   const reports = await db.report.findMany({ where: clientId ? { clientId } : undefined, include: { client: { select: { name: true } }, blocks: { orderBy: { position: "asc" } } }, orderBy: { updatedAt: "desc" }, take: 100 });
   return NextResponse.json({ reports });
 }
 
 export async function POST(request: NextRequest) {
-  const actor = await workspaceUser(request);
+  const actor = await requireFeature(request, "create_report");
   const internalAccess = hasInternalApiAccess(request);
   if (!internalAccess && !actor) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
@@ -104,7 +101,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
-  const actor = await workspaceUser(request);
+  const actor = await requireFeature(request, "edit_report");
   const internalAccess = hasInternalApiAccess(request);
   if (!internalAccess && !actor) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
@@ -118,7 +115,9 @@ export async function PATCH(request: NextRequest) {
     const blocks = editableBlocks(body.blocks);
     const title = requiredText(body.title, "title");
     const orientation = body.orientation === "portrait" ? "portrait" : body.orientation === "landscape" ? "landscape" : undefined;
+    const userRole = actor?.role ?? Role.ADMIN;
     const approving = body.status === "APPROVED";
+    if (approving && !hasFeature(userRole, "approve_report")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     const overrideReason = typeof body.overrideReason === "string" ? body.overrideReason.trim() : "";
     const issues = approving ? await readiness(reportId, blocks) : [];
     if (approving && issues.length && !overrideReason) return NextResponse.json({ error: "Report is not ready for approval.", readiness: { ready: false, issues } }, { status: 409 });

@@ -1,15 +1,11 @@
 import { Platform } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 import { decryptToken } from "@/lib/token-encryption";
 
-async function authorized(request: NextRequest) {
-  return Boolean(await getSessionUser(request));
-}
-
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  const user = await getSessionUser(request);
+  const user = await requireFeature(request, "manage_clients");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
   const { action } = await request.json() as { action?: unknown };
@@ -31,7 +27,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 }
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  if (!(await authorized(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const user = await requireFeature(request, "manage_clients");
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
   const { active, logoUrl } = await request.json() as { active?: unknown; logoUrl?: unknown };
   if (typeof active !== "boolean" && logoUrl !== null && typeof logoUrl !== "string") return NextResponse.json({ error: "Provide a valid client update." }, { status: 400 });
@@ -42,7 +39,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  if (!(await authorized(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const user = await requireFeature(request, "manage_clients");
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (request.nextUrl.searchParams.get("confirm") !== "true") return NextResponse.json({ error: "Permanent deletion must be confirmed." }, { status: 400 });
   const { clientId } = await params;
   const client = await db.client.findUnique({ where: { id: clientId }, select: { id: true, active: true } });

@@ -23,12 +23,12 @@ export function setSessionCookie(response: NextResponse, token: string, expiresA
 export async function getSessionUser(request: NextRequest) {
   const token = request.cookies.get(sessionCookieName)?.value;
   if (!token) return null;
-  const session = await db.session.findUnique({ where: { tokenHash: tokenHash(token) }, include: { user: { select: { id: true, email: true, name: true } } } });
+  const session = await db.session.findUnique({ where: { tokenHash: tokenHash(token) }, include: { user: { select: { id: true, email: true, name: true, role: true, googleRefreshToken: true } } } });
   if (!session || session.expiresAt <= new Date()) {
     if (session) await db.session.delete({ where: { id: session.id } });
     return null;
   }
-  return session.user;
+  return { ...session.user, googleConnected: Boolean(session.user.googleRefreshToken) };
 }
 
 export async function clearSession(request: NextRequest, response: NextResponse) {

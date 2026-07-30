@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 import { ConnectorError, getConnector } from "@/lib/connectors";
 
+function requiredFeatureForPlatform(platform: string) {
+  if (platform === "meta") return "connect_meta";
+  if (platform === "google") return "export_report";
+  return "manage_settings";
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ platform: string }> }) {
-  const user = await getSessionUser(request);
+  const { platform } = await params;
+  const user = await requireFeature(request, requiredFeatureForPlatform(platform));
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { platform } = await params;
   const connector = getConnector(platform);
   if (!connector) return NextResponse.json({ error: "Unsupported platform." }, { status: 400 });
 

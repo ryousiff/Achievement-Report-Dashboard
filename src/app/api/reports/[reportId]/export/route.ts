@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ reportId: string }> }) {
-  if (!(await getSessionUser(request))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const user = await requireFeature(request, "export_report");
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { reportId } = await params;
   const { orientation } = await request.json() as { orientation?: unknown };
   const report = await db.report.findUnique({ where: { id: reportId }, select: { id: true, status: true } });

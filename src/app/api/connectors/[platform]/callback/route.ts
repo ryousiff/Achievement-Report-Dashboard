@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 import { getConnector } from "@/lib/connectors";
+
+function requiredFeatureForPlatform(platform: string) {
+  if (platform === "meta") return "connect_meta";
+  if (platform === "google") return "export_report";
+  return "manage_settings";
+}
 
 function redirectToDashboard(platform: string, result: "connected" | "error") {
   const dashboardUrl = process.env.NEXTAUTH_URL || "https://slideshow-bluish-coveting.ngrok-free.dev";
@@ -20,7 +26,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   if (error || !state || !code) return redirectToDashboard(platform, "error");
 
   try {
-    const user = await getSessionUser(request);
+    const user = await requireFeature(request, requiredFeatureForPlatform(platform));
     if (!user) return redirectToDashboard(platform, "error");
     await connector.handleCallback(code, state, user.id);
     return redirectToDashboard(platform, "connected");

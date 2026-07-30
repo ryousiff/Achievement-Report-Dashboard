@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Platform } from "@prisma/client";
 import { db } from "@/lib/db";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 import { resolveInstagramUrl } from "@/lib/instagram-url";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  const user = await getSessionUser(request);
+  const user = await requireFeature(request, "edit_report");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
   const { url } = await request.json() as { url?: string };

@@ -27,6 +27,7 @@
   "private": true,
   "dependencies": {
     "@prisma/client": "6.9.0",
+    "googleapis": "^173.0.0",
     "lucide-react": "0.468.0",
     "next": "15.5.20",
     "react": "19.1.1",

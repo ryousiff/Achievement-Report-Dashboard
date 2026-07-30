@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { metaConnector } from "@/lib/connectors";
-import { getSessionUser } from "@/lib/session";
+import { requireFeature } from "@/lib/access";
 
 function redirectToWorkspace(result: "connected" | "error") {
   const dashboardUrl = process.env.NEXTAUTH_URL || "https://slideshow-bluish-coveting.ngrok-free.dev";
@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
   if (error || !state || !code) return redirectToWorkspace("error");
 
   try {
-    const sessionUser = await getSessionUser(request);
+    const sessionUser = await requireFeature(request, "connect_meta");
     if (!sessionUser) return redirectToWorkspace("error");
     await metaConnector.handleCallback(code, state, sessionUser.id);
     return redirectToWorkspace("connected");
