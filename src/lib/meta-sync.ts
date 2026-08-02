@@ -45,15 +45,15 @@ async function postInsights(postId: string, token: string) {
   return { metrics, availability };
 }
 
-async function syncDailyFollows(connectionId: string, accountId: string, token: string, since: Date) {
+async function syncDailyAccountMetric(connectionId: string, accountId: string, token: string, metric: "follows" | "reach", since: Date) {
   try {
-    const insights = await graph<{ data?: MetaInsight[] }>(`${accountId}/insights`, token, { metric: "follows", period: "day", since: String(Math.floor(since.valueOf() / 1000)), until: String(Math.floor(Date.now() / 1000)) });
+    const insights = await graph<{ data?: MetaInsight[] }>(`${accountId}/insights`, token, { metric, period: "day", since: String(Math.floor(since.valueOf() / 1000)), until: String(Math.floor(Date.now() / 1000)) });
     for (const insight of insights.data ?? []) for (const item of insight.values ?? []) {
       if (typeof item.value !== "number" || !item.end_time) continue;
       const periodEnd = new Date(item.end_time);
       const periodStart = new Date(periodEnd);
       periodStart.setUTCDate(periodStart.getUTCDate() - 1);
-      await db.socialInsightSnapshot.upsert({ where: { connectionId_metric_periodStart_periodEnd: { connectionId, metric: "follows", periodStart, periodEnd } }, create: { connectionId, metric: "follows", periodStart, periodEnd, value: item.value }, update: { value: item.value } });
+      await db.socialInsightSnapshot.upsert({ where: { connectionId_metric_periodStart_periodEnd: { connectionId, metric, periodStart, periodEnd } }, create: { connectionId, metric, periodStart, periodEnd, value: item.value }, update: { value: item.value } });
     }
   } catch (error) { if (error instanceof MetaSyncError && error.code === "rate_limited") throw error; }
 }
@@ -90,7 +90,8 @@ export async function syncInstagramConnection(connectionId: string) {
     cursor = media.paging?.cursors?.after;
     pages += 1;
   } while (cursor && pages < 50);
-  await syncDailyFollows(connectionId, connection.externalAccountId, token, since);
+  await syncDailyAccountMetric(connectionId, connection.externalAccountId, token, "follows", since);
+  await syncDailyAccountMetric(connectionId, connection.externalAccountId, token, "reach", since);
   return { posts };
 }
 

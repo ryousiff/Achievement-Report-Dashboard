@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "Arabic-first social media achievement reporting dashboard for Kaan Agency.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "concurrently -n next,worker -c blue,magenta \"next dev\" \"npm:worker\"",
+    "dev:next": "next dev",
     "build": "next build",
     "start": "node .next/standalone/server.js",
     "lint": "next lint",
@@ -38,6 +39,7 @@
     "@types/node": "24.1.0",
     "@types/react": "19.1.8",
     "@types/react-dom": "19.1.6",
+    "concurrently": "^10.0.4",
     "eslint": "9.32.0",
     "eslint-config-next": "15.5.20",
     "prisma": "6.9.0",

@@ -1,22 +1,17 @@
 import { ReportStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { requireFeature } from "@/lib/access";
-import { activeClientsCount, completedReportsThisMonthCount, connectedAccounts, connectedInstagramAccountsCount, recentReports, reportsNeedingReviewCount, reachSeries } from "@/lib/dashboard";
+import { activeClientsCount, completedReportsThisMonthCount, connectedAccounts, connectedInstagramAccountsCount, recentReports, reportsNeedingReviewCount } from "@/lib/dashboard";
 
 export async function GET(request: NextRequest) {
   const user = await requireFeature(request, "view_dashboard");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const searchParams = request.nextUrl.searchParams;
-  const days = Number(searchParams.get("days") ?? 30);
-  const clientId = searchParams.get("clientId");
-
-  const [activeClients, needsReview, completedThisMonth, instagramAccounts, reach, recent, accounts] = await Promise.all([
+  const [activeClients, needsReview, completedThisMonth, instagramAccounts, recent, accounts] = await Promise.all([
     activeClientsCount(),
     reportsNeedingReviewCount(),
     completedReportsThisMonthCount(),
     connectedInstagramAccountsCount(),
-    reachSeries(Number.isFinite(days) ? days : 30),
     recentReports(5),
     connectedAccounts(),
   ]);
@@ -28,7 +23,6 @@ export async function GET(request: NextRequest) {
       completedThisMonth,
       instagramAccounts,
     },
-    reach,
     recent: recent.map((report) => ({
       id: report.id,
       title: report.title,

@@ -47,11 +47,22 @@ export async function reportPosts(clientId: string, periodStart: Date, periodEnd
   });
 }
 
+export async function periodAccountMetricTotal(clientId: string, metric: "reach" | "follows", periodStart: Date, periodEnd: Date) {
+  const snapshots = await db.socialInsightSnapshot.findMany({ where: { connection: { clientId }, metric, periodEnd: { gte: periodStart, lte: periodEnd } }, select: { value: true } });
+  if (snapshots.length === 0) return null;
+  return snapshots.reduce((sum, snapshot) => sum + snapshot.value, 0);
+}
+
 export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date): Promise<ReportBlock[]> {
   const posts = await reportPosts(clientId, periodStart, periodEnd);
   const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
   const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
-  const hasReach = hasMetric("reach");
+  // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
+  // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
+  // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
+  const accountReach = await periodAccountMetricTotal(clientId, "reach", periodStart, periodEnd);
+  const hasReach = accountReach !== null || hasMetric("reach");
+  if (accountReach !== null) totals.reach = accountReach;
   const engagementRate = hasReach && totals.reach > 0 ? `${((totals.total_interactions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
   const topBy = (metric: ReportMetric) => [...posts].sort((left, right) => value(right.metrics, metric) - value(left.metrics, metric)).filter((post) => value(post.metrics, metric) > 0).slice(0, 4);
   const topInteractions = topBy("total_interactions");

@@ -65,19 +65,29 @@ export async function connectedAccounts() {
 export async function reachSeries(days = 30) {
   const periodEnd = new Date();
   const periodStart = startOfToday(days - 1);
-  const posts = await db.socialPost.findMany({
-    where: { publishedAt: { gte: periodStart, lte: periodEnd } },
-    select: { publishedAt: true, metrics: true, metricAvailability: true },
+  // Prefer Meta's account-level daily reach snapshots (unique accounts reached per day) over summing per-post reach,
+  // which double-counts people reached by more than one post and inflates totals vs. Meta's own numbers.
+  const snapshots = await db.socialInsightSnapshot.findMany({
+    where: { metric: "reach", periodEnd: { gte: periodStart, lte: periodEnd } },
+    select: { periodEnd: true, value: true },
   });
-  const entries = posts
-    .filter((post) => (post.metricAvailability as Record<string, string> | null)?.reach === "returned" || typeof (post.metrics as Record<string, number>).reach === "number")
-    .map((post) => {
-      const day = post.publishedAt.toISOString().slice(0, 10);
-      const metrics = post.metrics as Record<string, number>;
-      return [day, metrics.reach ?? 0] as [string, number];
-    });
   const dayTotals = new Map<string, number>();
-  for (const [day, value] of entries) dayTotals.set(day, (dayTotals.get(day) ?? 0) + value);
+  if (snapshots.length > 0) {
+    for (const snapshot of snapshots) { const day = snapshot.periodEnd.toISOString().slice(0, 10); dayTotals.set(day, (dayTotals.get(day) ?? 0) + snapshot.value); }
+  } else {
+    const posts = await db.socialPost.findMany({
+      where: { publishedAt: { gte: periodStart, lte: periodEnd } },
+      select: { publishedAt: true, metrics: true, metricAvailability: true },
+    });
+    const entries = posts
+      .filter((post) => (post.metricAvailability as Record<string, string> | null)?.reach === "returned" || typeof (post.metrics as Record<string, number>).reach === "number")
+      .map((post) => {
+        const day = post.publishedAt.toISOString().slice(0, 10);
+        const metrics = post.metrics as Record<string, number>;
+        return [day, metrics.reach ?? 0] as [string, number];
+      });
+    for (const [day, value] of entries) dayTotals.set(day, (dayTotals.get(day) ?? 0) + value);
+  }
   const series = completeDailySeries(periodStart, periodEnd, [...dayTotals.entries()]);
   return { labels: series.map(([day]) => day), values: series.map(([, value]) => value) };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { type FormEvent, useEffect, useState } from "react";
-import { AlertCircle, ArrowDown, ArrowUp, BarChart3, CheckCircle2, CircleUserRound, Eye, Facebook, FileText, Image as ImageIcon, Instagram, LayoutDashboard, Link2, Plus, RefreshCw, Save, Settings, StickyNote, Trash2, Type, Users, X } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, BarChart3, CheckCircle2, Eye, Facebook, FileText, Image as ImageIcon, Instagram, LayoutDashboard, Link2, LogOut, Plus, RefreshCw, Save, Settings, ShieldCheck, StickyNote, Trash2, Type, UserPlus, Users, X } from "lucide-react";
 
 type Language = "AR" | "EN";
 type View = "dashboard" | "reports" | "clients" | "accounts" | "settings";
@@ -59,7 +59,6 @@ export default function Home() {
   const [language, setLanguage] = useState<Language>("AR");
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [blank, setBlank] = useState(false);
-  const [notice, setNotice] = useState(true);
   const [serviceReady, setServiceReady] = useState<boolean | null>(null);
   const [toast, setToast] = useState("");
   const [generatingReport, setGeneratingReport] = useState(false);
@@ -86,12 +85,19 @@ export default function Home() {
   useEffect(() => { const result = new URLSearchParams(window.location.search).get("google"); if (!result) return; setToast(result === "connected" ? (rtl ? "تم ربط حساب Google." : "Google account connected.") : (rtl ? "تعذر ربط Google. راجعي سجلات الخادم." : "Google connection failed. Check server logs.")); window.history.replaceState({}, "", window.location.pathname); }, [t]);
   useEffect(() => { fetch("/api/health").then((response) => response.json()).then((data: { status?: string }) => setServiceReady(data.status === "ok")).catch(() => setServiceReady(false)); }, []);
   const refreshClients = async () => { const response = await fetch("/api/clients"); if (!response.ok) return; const data = await response.json() as { clients?: WorkspaceClient[] }; const clients = data.clients ?? []; setWorkspaceClients(clients); setSelectedClientId((current) => clients.some((client) => client.id === current) ? current : clients[0]?.id ?? null); };
+  const waitForClientSync = async (clientId: string, attempt = 0): Promise<void> => {
+    const response = await fetch("/api/clients");
+    const data = response.ok ? await response.json() as { clients?: WorkspaceClient[] } : { clients: [] };
+    const client = data.clients?.find((item) => item.id === clientId);
+    const active = client?.connections?.some((connection) => connection.syncJobs?.some((job) => job.status === "QUEUED" || job.status === "RUNNING"));
+    if (active && attempt < 60) { await new Promise((resolve) => setTimeout(resolve, 3000)); return waitForClientSync(clientId, attempt + 1); }
+  };
   const refreshReportData = async () => {
     if (reportStatus === "APPROVED") throw new Error("التقرير المعتمد محفوظ كنسخة نهائية. انسخي التقرير للفترة التالية لإجراء التحديثات.");
     if (!reportMetadata.clientId) throw new Error("لم يتم اختيار عميل للتقرير.");
     const syncResponse = await fetch(`/api/clients/${reportMetadata.clientId}/sync`, { method: "POST" });
     if (!syncResponse.ok) throw new Error("تعذر وضع مزامنة Meta في قائمة الانتظار. تأكدي من اتصال الحساب.");
-    if (syncResponse.status === 202) return "queued";
+    if (syncResponse.status === 202) await waitForClientSync(reportMetadata.clientId);
     const postsResponse = await fetch(`/api/clients/${reportMetadata.clientId}/posts?periodStart=${reportMetadata.periodStart}&periodEnd=${reportMetadata.periodEnd}`);
     if (!postsResponse.ok) throw new Error("تعذر جلب المنشورات المحدثة.");
     const data = await postsResponse.json() as { posts?: MediaPost[]; followerSeries?: number[]; followerLabels?: string[]; hasFollowerData?: boolean };
@@ -160,11 +166,11 @@ export default function Home() {
     <aside className="sidebar"><div className="brand"><span className="brand-mark">K</span><span>KAAN <small>ACHIEVEMENT REPORTS</small></span></div><div className="nav-group"><div className="nav-title">{t.workspace}</div>{navItems.slice(0, 3).map(({ id, icon: Icon, label }) => <button className={`nav-item ${view === id ? "active" : ""}`} key={id} onClick={() => { setView(id); if (id === "reports") setSelectedReportId(null); }}><Icon className="nav-icon" size={18} /><span>{label}</span></button>)}</div><div className="nav-group"><div className="nav-title">{t.management}</div>{navItems.slice(3).map(({ id, icon: Icon, label }) => <button className={`nav-item ${view === id ? "active" : ""}`} key={id} onClick={() => setView(id)}><Icon className="nav-icon" size={18} /><span>{label}</span></button>)}</div><div className="sidebar-foot">Kaan Agency<br />{t.internalReports}</div></aside>
     <main className="main"><header className="topbar"><div className="crumb"><b>{view === "dashboard" ? t.dashboard : view === "reports" ? t.reports : t[view]}</b>{view === "reports" && blocks.length > 0 && ` / ${reportMetadata.title}`}</div><div className="profile"><button className="lang" onClick={() => setLanguage(rtl ? "EN" : "AR")}>{rtl ? "English" : "العربية"}</button><span>{user.name ?? user.email}</span><div className="avatar">{rtl ? "ر" : "R"}</div></div></header>
       {toast && <div className="toast"><CheckCircle2 size={17} />{toast}</div>}
-      {view === "dashboard" && <Dashboard t={t} serviceReady={serviceReady} notice={notice} setNotice={setNotice} startTemplate={openReportSetup} openReports={() => { setSelectedReportId(null); setView("reports"); }} setToast={setToast} />}
+      {view === "dashboard" && <Dashboard t={t} serviceReady={serviceReady} startTemplate={openReportSetup} openReports={() => { setSelectedReportId(null); setView("reports"); }} openAccounts={() => setView("accounts")} />}
       {view === "reports" && (selectedReportId ? <ReportBuilder t={t} reportTitle={reportMetadata.title} reportPeriod={reportMetadata.periodType} reportStatus={reportStatus} saveState={saveState} blocks={blocks} blank={blank} user={user} reportId={draftId} setView={setView} startTemplate={openReportSetup} addBlock={addBlock} onSave={saveDraft} onPreview={() => setPreviewOpen(true)} onRefreshData={refreshReportData} onApprove={approveDraft} onDuplicate={duplicateReport} lastSyncedAt={lastSyncedAt} openKpiPicker={() => { setKpiTargetBlockId(null); setKpiPickerOpen(true); }} openKpiForBlock={(id) => { setKpiTargetBlockId(id); setKpiPickerOpen(true); }} openMediaForBlock={setMediaTargetBlockId} updateBlock={updateBlock} updatePageNote={updatePageNote} updateSummary={updateSummary} updateKpi={updateKpi} updateChart={updateChart} updateMediaDisplay={updateMediaDisplay} removeMediaItem={removeMediaItem} removeBlock={removeBlock} moveBlock={moveBlock} setToast={setToast} /> : <ReportsList t={t} clients={workspaceClients} onCreate={openReportSetup} onOpen={(id) => void loadReport(id)} /> )}
       {view === "clients" && <ClientWorkspace t={t} clients={workspaceClients} selectedClientId={selectedClientId} onSelect={setSelectedClientId} onRefresh={refreshClients} onCreated={async (client) => { await refreshClients(); setSelectedClientId(client.id); }} />}
       {view === "accounts" && <ConnectedAccounts t={t} clients={workspaceClients} onRefresh={refreshClients} />}
-      {view !== "dashboard" && view !== "reports" && view !== "clients" && view !== "accounts" && <section className="empty-page card"><CircleUserRound size={35} /><h1>{t[view]}</h1><p>{t.comingSoon}</p><button className="btn primary" onClick={() => setView("dashboard")}>{t.dashboard}</button></section>}
+      {view === "settings" && <SettingsPage t={t} user={user} onSignOut={async () => { await fetch("/api/auth/logout", { method: "POST" }); setUser(null); }} setToast={setToast} />}
     </main>
     {generatingReport && <div className="generating-backdrop" role="status" aria-live="polite"><section className="generating-dialog"><RefreshCw size={30} /><h2>جارٍ إنشاء التقرير</h2><p>نزامن بيانات Meta ونرتب مؤشرات الفترة وأفضل المنشورات.</p></section></div>}
     {kpiPickerOpen && <KpiPicker t={t} periodType={reportMetadata.periodType} onClose={() => setKpiPickerOpen(false)} onAdd={addKpiBlock} />}{mediaTargetBlockId !== null && reportMetadata.clientId && <MediaLibrary clientId={reportMetadata.clientId} periodStart={reportMetadata.periodStart} periodEnd={reportMetadata.periodEnd} defaultSort={mediaSectionConfig(blocks.find((block) => block.id === mediaTargetBlockId)?.title ?? "").sort} existingItems={blocks.find((block) => block.id === mediaTargetBlockId)?.mediaItems ?? []} onClose={() => setMediaTargetBlockId(null)} onSelect={(items) => { updateMediaItems(mediaTargetBlockId, items); setMediaTargetBlockId(null); }} />}
@@ -174,8 +180,8 @@ export default function Home() {
   </div>;
 }
 
-function Dashboard({ t, serviceReady, notice, setNotice, startTemplate, openReports, setToast }: { t: Dictionary; serviceReady: boolean | null; notice: boolean; setNotice: (value: boolean) => void; startTemplate: (type: "standard" | "blank") => void | Promise<void>; openReports: () => void; setToast: (value: string) => void }) {
-  const [data, setData] = useState<{ stats: { activeClients: number; needsReview: number; completedThisMonth: number; instagramAccounts: number }; reach: { labels: string[]; values: number[] }; accounts: Array<{ id: string; platform: string; displayName: string; clientName: string; lastSuccessfulSyncAt: string | null }>; recent: Array<{ id: string; title: string; clientName: string; status: string; updatedAt: string }> } | null>(null);
+function Dashboard({ t, serviceReady, startTemplate, openReports, openAccounts }: { t: Dictionary; serviceReady: boolean | null; startTemplate: (type: "standard" | "blank") => void | Promise<void>; openReports: () => void; openAccounts: () => void }) {
+  const [data, setData] = useState<{ stats: { activeClients: number; needsReview: number; completedThisMonth: number; instagramAccounts: number }; accounts: Array<{ id: string; platform: string; displayName: string; clientName: string; lastSuccessfulSyncAt: string | null }>; recent: Array<{ id: string; title: string; clientName: string; status: string; updatedAt: string }> } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -194,53 +200,37 @@ function Dashboard({ t, serviceReady, notice, setNotice, startTemplate, openRepo
 
   const formatValue = (value: number) => value.toLocaleString();
 
-  const chartPath = (values: number[]) => {
-    if (values.length === 0) return "";
-    const width = 700; const height = 220; const padding = 24;
-    const max = Math.max(...values, 1);
-    const points = values.map((value, index) => {
-      const x = padding + (index / Math.max(values.length - 1, 1)) * (width - 2 * padding);
-      const y = height - padding - ((value / max) * (height - 2 * padding));
-      return [x, y];
-    });
-    return points.map(([x, y], index) => `${index === 0 ? "M" : "L"} ${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-  };
-
-  const chartLabels = (labels: string[]) => {
-    if (labels.length === 0) return [];
-    if (labels.length <= 5) return labels;
-    const step = Math.floor((labels.length - 1) / 4);
-    return [labels[0], labels[step], labels[step * 2], labels[step * 3], labels[labels.length - 1]];
-  };
-
   const accounts = data?.accounts ?? [];
   const recent = data?.recent ?? [];
-  const reach = data?.reach ?? { labels: [], values: [] };
   const stats = data?.stats ?? { activeClients: 0, needsReview: 0, completedThisMonth: 0, instagramAccounts: 0 };
 
-  return <><section className="hero"><div><h1>{t.greeting}</h1><p>{t.overview}{serviceReady === false && ` ${t.configuration}`}</p></div><div className="actions"><button className="btn quiet" onClick={() => startTemplate("blank")}><Plus size={16} />{t.blank}</button><button className="btn primary" onClick={() => startTemplate("standard")}><FileText size={16} />{t.create}</button></div></section>{notice && <div className="notice"><span><strong>{t.connectStart}</strong> {t.connectText}</span><button className="btn accent" onClick={() => { setNotice(false); setToast(t.metaConnected); }}><Link2 size={16} />{t.connectMeta}</button></div>}<section className="metric-grid"><Metric label={t.activeClients} value={loading ? "..." : formatValue(stats.activeClients)} change={t.thisMonth} Icon={Users} /><Metric label={t.reviewReports} value={loading ? "..." : formatValue(stats.needsReview)} change={t.reviewNeeded} Icon={AlertCircle} warn /><Metric label={t.instagramAccounts} value={loading ? "..." : formatValue(stats.instagramAccounts)} change={t.lastSync} Icon={Instagram} /><Metric label={t.completedReports} value={loading ? "..." : formatValue(stats.completedThisMonth)} change={t.compared} Icon={CheckCircle2} /></section><section className="content-grid"><div className="card"><div className="card-title"><div><h2>{t.reach}</h2><p>{t.reachDesc}</p></div><select aria-label={t.period} disabled={loading}><option>{t.period}</option></select></div><div className="chart">{reach.values.length > 0 ? <svg viewBox="0 0 700 220" preserveAspectRatio="none"><path d={chartPath(reach.values)} fill="none" stroke="#3c0b5e" strokeWidth="3" /></svg> : <p>{loading ? "جارٍ تحميل الرسم..." : "لا توجد بيانات وصول متاحة."}</p>}</div><div className="chart-labels">{chartLabels(reach.labels).map((label) => <span key={label}>{label}</span>)}</div></div><div className="card"><div className="card-title"><div><h2>{t.connected}</h2><p>{t.isolated}</p></div><button className="btn quiet" onClick={() => setToast(t.accountView)}>{t.manage}</button></div>{accounts.map((account) => <Connection key={account.id} name={account.clientName} handle={account.displayName} Icon={account.platform === "INSTAGRAM" ? Instagram : Facebook} connected={Boolean(account.lastSuccessfulSyncAt)} label={account.lastSuccessfulSyncAt ? t.connectedStatus : t.disconnected} onClick={() => setToast(t.accountView)} />)}{accounts.length === 0 && <p>{loading ? "جارٍ تحميل الحسابات..." : "لا توجد حسابات متصلة."}</p>}<button className="btn quiet full-width" onClick={() => setToast(t.accountView)}><Plus size={16} />{t.connectAccount}</button></div></section><section className="card report-list"><div className="card-title"><div><h2>{t.recent}</h2><p>{t.recentDesc}</p></div><button className="btn quiet" onClick={openReports}>{t.showAll}</button></div>{recent.map((report) => <Report key={report.id} title={report.title} subtitle={`${report.clientName} · ${report.updatedAt ? new Date(report.updatedAt).toLocaleDateString() : ""}`} status={statusLabel(report.status)} onOpen={openReports} open={t.open} />)}{recent.length === 0 && <p>{loading ? "جارٍ تحميل التقارير..." : "لا توجد تقارير حديثة."}</p>}</section></>;
+  return <><section className="hero"><div><h1>{t.greeting}</h1><p>{t.overview}{serviceReady === false && ` ${t.configuration}`}</p></div><div className="actions"><button className="btn quiet" onClick={() => startTemplate("blank")}><Plus size={16} />{t.blank}</button><button className="btn primary" onClick={() => startTemplate("standard")}><FileText size={16} />{t.create}</button></div></section><section className="metric-grid"><Metric label={t.activeClients} value={loading ? "..." : formatValue(stats.activeClients)} change={t.thisMonth} Icon={Users} /><Metric label={t.reviewReports} value={loading ? "..." : formatValue(stats.needsReview)} change={t.reviewNeeded} Icon={AlertCircle} warn /><Metric label={t.instagramAccounts} value={loading ? "..." : formatValue(stats.instagramAccounts)} change={t.lastSync} Icon={Instagram} /><Metric label={t.completedReports} value={loading ? "..." : formatValue(stats.completedThisMonth)} change={t.compared} Icon={CheckCircle2} /></section><section className="card"><div className="card-title"><div><h2>{t.connected}</h2><p>{t.isolated}</p></div><button className="btn quiet" onClick={openAccounts}>{t.manage}</button></div>{accounts.map((account) => <Connection key={account.id} name={account.clientName} handle={account.displayName} Icon={account.platform === "INSTAGRAM" ? Instagram : Facebook} connected={Boolean(account.lastSuccessfulSyncAt)} label={account.lastSuccessfulSyncAt ? t.connectedStatus : t.disconnected} onClick={openAccounts} />)}{accounts.length === 0 && <p>{loading ? "جارٍ تحميل الحسابات..." : "لا توجد حسابات متصلة."}</p>}<button className="btn quiet full-width" onClick={openAccounts}><Plus size={16} />{t.connectAccount}</button></section><section className="card report-list"><div className="card-title"><div><h2>{t.recent}</h2><p>{t.recentDesc}</p></div><button className="btn quiet" onClick={openReports}>{t.showAll}</button></div>{recent.map((report) => <Report key={report.id} title={report.title} subtitle={`${report.clientName} · ${report.updatedAt ? new Date(report.updatedAt).toLocaleDateString() : ""}`} status={statusLabel(report.status)} onOpen={openReports} open={t.open} />)}{recent.length === 0 && <p>{loading ? "جارٍ تحميل التقارير..." : "لا توجد تقارير حديثة."}</p>}</section></>;
 }
 
-type ReportListItem = { id: string; title: string; clientName: string; status: string; updatedAt: string };
+type ReportListItem = { id: string; title: string; clientId: string; clientName: string; status: string; updatedAt: string };
 
 function ReportsList({ t, clients, onCreate, onOpen }: { t: Dictionary; clients: WorkspaceClient[]; onCreate: (type: "standard" | "blank") => void; onOpen: (id: string) => void }) {
   const arabic = t.dashboard === "الرئيسية";
   const [reports, setReports] = useState<ReportListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("all");
+  const [clientFilter, setClientFilter] = useState("all");
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [error, setError] = useState("");
   const statusLabel = (status: string) => {
     if (status === "NEEDS_REVIEW") return t.needsReview;
     if (status === "DRAFT") return arabic ? "مسودة" : "Draft";
     return t.complete;
   };
-  useEffect(() => {
+  const loadReports = () => {
     setLoading(true);
-    fetch("/api/reports")
+    return fetch("/api/reports")
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
-        const items = (data?.reports ?? []).map((report: { id: string; title: string; client: { name: string }; status: string; updatedAt: string }) => ({
+        const items = (data?.reports ?? []).map((report: { id: string; title: string; clientId: string; client: { name: string }; status: string; updatedAt: string }) => ({
           id: report.id,
           title: report.title,
+          clientId: report.clientId,
           clientName: report.client?.name ?? "",
           status: report.status,
           updatedAt: report.updatedAt,
@@ -248,9 +238,21 @@ function ReportsList({ t, clients, onCreate, onOpen }: { t: Dictionary; clients:
         setReports(items);
       })
       .finally(() => setLoading(false));
-  }, []);
-  const filtered = filter === "all" ? reports : reports.filter((report) => filter === "review" ? report.status === "NEEDS_REVIEW" : report.status === "APPROVED" || report.status === "EXPORTED");
-  return <section className="report-list-page"><section className="hero"><div><h1>{t.reports}</h1><p>{arabic ? "جميع التقارير مرتبة حسب آخر تحديث." : "All reports sorted by last update."}</p></div><div className="actions"><button className="btn quiet" onClick={() => onCreate("blank")}><Plus size={16} />{t.blank}</button><button className="btn primary" onClick={() => onCreate("standard")}><FileText size={16} />{t.create}</button></div></section><div className="report-filters"><select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">{arabic ? "الكل" : "All"}</option><option value="review">{t.needsReview}</option><option value="complete">{t.complete}</option></select></div><section className="card report-list"><div className="report-list-head"><span>{arabic ? "التقرير" : "Report"}</span><span>{arabic ? "الحالة" : "Status"}</span><span>{arabic ? "آخر تحديث" : "Updated"}</span><span></span></div>{loading ? <p>{arabic ? "جارٍ تحميل التقارير..." : "Loading reports..."}</p> : filtered.map((report) => <div className="report-row" key={report.id}><div><b>{report.title}</b><small>{report.clientName}</small></div><span className="status">{statusLabel(report.status)}</span><span>{new Date(report.updatedAt).toLocaleDateString()}</span><button className="btn quiet compact" onClick={() => onOpen(report.id)}>{t.open}</button></div>)}{!loading && filtered.length === 0 && <p>{arabic ? "لا توجد تقارير مطابقة." : "No matching reports."}</p>}</section></section>;
+  };
+  useEffect(() => { void loadReports(); }, []);
+  const deleteReport = async (report: ReportListItem) => {
+    if (!window.confirm(arabic ? `حذف "${report.title}" نهائياً؟ لا يمكن استعادته.` : `Delete "${report.title}" permanently? This cannot be undone.`)) return;
+    setDeleting(report.id); setError("");
+    const response = await fetch(`/api/reports?id=${report.id}&confirm=true`, { method: "DELETE" });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) setError(data.error ?? (arabic ? "تعذر حذف التقرير." : "Unable to delete the report."));
+    else await loadReports();
+    setDeleting(null);
+  };
+  const filtered = reports
+    .filter((report) => filter === "all" || (filter === "review" ? report.status === "NEEDS_REVIEW" : report.status === "APPROVED" || report.status === "EXPORTED"))
+    .filter((report) => clientFilter === "all" || report.clientId === clientFilter);
+  return <section className="report-list-page"><section className="hero"><div><h1>{t.reports}</h1><p>{arabic ? "جميع التقارير مرتبة حسب آخر تحديث." : "All reports sorted by last update."}</p></div><div className="actions"><button className="btn quiet" onClick={() => onCreate("blank")}><Plus size={16} />{t.blank}</button><button className="btn primary" onClick={() => onCreate("standard")}><FileText size={16} />{t.create}</button></div></section>{error && <div className="notice">{error}</div>}<div className="report-filters"><select value={clientFilter} onChange={(event) => setClientFilter(event.target.value)}><option value="all">{arabic ? "جميع العملاء" : "All clients"}</option>{clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select><select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">{arabic ? "الكل" : "All"}</option><option value="review">{t.needsReview}</option><option value="complete">{t.complete}</option></select></div><section className="card report-list"><div className="report-list-head"><span>{arabic ? "التقرير" : "Report"}</span><span>{arabic ? "الحالة" : "Status"}</span><span>{arabic ? "آخر تحديث" : "Updated"}</span><span></span></div>{loading ? <p>{arabic ? "جارٍ تحميل التقارير..." : "Loading reports..."}</p> : filtered.map((report) => <div className="report-row" key={report.id}><div><b>{report.title}</b><small>{report.clientName}</small></div><span className="status">{statusLabel(report.status)}</span><span>{new Date(report.updatedAt).toLocaleDateString()}</span><div className="report-row-actions"><button className="btn quiet compact" onClick={() => onOpen(report.id)}>{t.open}</button>{report.status !== "APPROVED" && report.status !== "EXPORTED" && <button className="btn quiet compact danger-button" disabled={deleting === report.id} aria-label={arabic ? "حذف التقرير" : "Delete report"} onClick={() => void deleteReport(report)}><Trash2 size={14} /></button>}</div></div>)}{!loading && filtered.length === 0 && <p>{arabic ? "لا توجد تقارير مطابقة." : "No matching reports."}</p>}</section></section>;
 }
 
 function ReportBuilder({ t, reportTitle, reportPeriod, reportStatus, saveState, blocks, blank, user, reportId, setView, startTemplate, addBlock, onSave, onPreview, onRefreshData, onApprove, onDuplicate, lastSyncedAt, openKpiPicker, openKpiForBlock, openMediaForBlock, updateBlock, updatePageNote, updateSummary, updateKpi, updateChart, updateMediaDisplay, removeMediaItem, removeBlock, moveBlock, setToast }: { t: Dictionary; reportTitle: string; reportPeriod: ReportPeriod; reportStatus: "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED"; saveState: "idle" | "saving" | "saved" | "failed"; blocks: Block[]; blank: boolean; user: WorkspaceUser | null; reportId: string | null; setView: (view: View) => void; startTemplate: (type: "standard" | "blank") => void | Promise<void>; addBlock: (kind: Exclude<BlockKind, "kpi">) => void; onSave: () => Promise<void>; onPreview: () => void; onRefreshData: () => Promise<string>; onApprove: () => Promise<void>; onDuplicate: () => Promise<void>; lastSyncedAt: string | null; openKpiPicker: () => void; openKpiForBlock: (id: number) => void; openMediaForBlock: (id: number) => void; updateBlock: (id: number, field: "title" | "body", value: string) => void; updatePageNote: (id: number, value: string | undefined) => void; updateSummary: (id: number, field: keyof MonthlySummary, value: string) => void; updateKpi: (blockId: number, kpiId: string, field: "label" | "value" | "change" | "display", value: string) => void; updateChart: (id: number, field: keyof ChartConfig, value: string) => void; updateMediaDisplay: (id: number, display: string[]) => void; removeMediaItem: (blockId: number, itemId: string) => void; removeBlock: (id: number) => void; moveBlock: (id: number, direction: number) => void; setToast: (value: string) => void }) {
@@ -260,7 +262,8 @@ function ReportBuilder({ t, reportTitle, reportPeriod, reportStatus, saveState, 
   const refresh = async () => { setRefreshing(true); try { const syncedAt = await onRefreshData(); setToast(syncedAt === "queued" ? "تم وضع مزامنة Meta في قائمة الانتظار. حدّثي التقرير بعد اكتمالها." : `تم تحديث البيانات · ${new Date(syncedAt).toLocaleString()}`); } catch (error) { setToast(error instanceof Error ? error.message : "فشل تحديث البيانات."); } setRefreshing(false); };
   const syncLabel = lastSyncedAt ? `آخر تحديث: ${new Date(lastSyncedAt).toLocaleString()}` : null;
   const [exporting, setExporting] = useState(false);
-  const canExportSlides = user?.role !== "VIEWER" && (reportStatus === "APPROVED" || reportStatus === "EXPORTED");
+  // TODO: re-enable once Google Slides export is fully verified.
+  const canExportSlides = false && user?.role !== "VIEWER" && (reportStatus === "APPROVED" || reportStatus === "EXPORTED");
   const exportSlides = async () => {
     if (!reportId) return;
     if (!user?.googleConnected) { window.location.href = "/api/connectors/google"; return; }
@@ -490,8 +493,120 @@ function ConnectedAccounts({ t, clients, onRefresh }: { t: Dictionary; clients: 
   const selected = (client: WorkspaceClient, platform: "INSTAGRAM" | "FACEBOOK") => client.connections?.find((connection) => connection.platform === platform)?.sourceAccountId ?? "";
   const syncHealth = (client: WorkspaceClient) => { const connection = client.connections?.find((item) => item.platform === "INSTAGRAM"); if (!connection) return { label: "لا يوجد حساب Instagram معيّن", state: "warn" }; if (connection.lastFailureReason) return { label: `فشلت آخر مزامنة: ${connection.lastFailureReason}`, state: "warn" }; if (!connection.lastSuccessfulSyncAt) return { label: "لم تتم مزامنة ناجحة بعد", state: "warn" }; const age = Date.now() - new Date(connection.lastSuccessfulSyncAt).valueOf(); if (connection.tokenExpiresAt && new Date(connection.tokenExpiresAt).valueOf() - Date.now() < 7 * 24 * 60 * 60 * 1000) return { label: "رمز Meta قريب من الانتهاء", state: "warn" }; return age > 24 * 60 * 60 * 1000 ? { label: "البيانات بحاجة إلى تحديث", state: "warn" } : { label: `آخر مزامنة ناجحة ${new Date(connection.lastSuccessfulSyncAt).toLocaleString()}`, state: "good" }; };
   const assign = async (client: WorkspaceClient, platform: "INSTAGRAM" | "FACEBOOK", accountId: string) => { const otherPlatform = platform === "INSTAGRAM" ? "FACEBOOK" : "INSTAGRAM"; const accountIds = [accountId, selected(client, otherPlatform)].filter(Boolean); setSaving(client.id); setError(""); const response = await fetch(`/api/clients/${client.id}/accounts`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accountIds }) }); const data = await response.json() as { error?: string }; if (!response.ok) setError(data.error ?? "تعذر حفظ تعيين الحسابات."); await Promise.all([onRefresh(), refreshProfiles()]); setSaving(null); };
-  const sync = async (clientId: string) => { setSyncing(clientId); setError(""); try { const response = await fetch(`/api/clients/${clientId}/sync`, { method: "POST" }); const result = await response.json() as { jobs?: Array<{ id: string }>; error?: string }; if (!response.ok) { setError(result.error ?? "تعذر وضع التحديث في قائمة الانتظار."); return; } setError(`تم وضع ${result.jobs?.length ?? 0} مزامنة في قائمة الانتظار.`); await onRefresh(); await refreshProfiles(); } catch { setError("تعذر الاتصال بخدمة التحديث."); } finally { setSyncing(null); } };
+  const pollSyncStatus = async (clientId: string, attempt = 0): Promise<void> => {
+    const response = await fetch("/api/clients");
+    const data = response.ok ? await response.json() as { clients?: WorkspaceClient[] } : { clients: [] };
+    const client = data.clients?.find((item) => item.id === clientId);
+    const active = client?.connections?.some((connection) => connection.syncJobs?.some((job) => job.status === "QUEUED" || job.status === "RUNNING"));
+    await Promise.all([onRefresh(), refreshProfiles()]);
+    if (active && attempt < 60) { await new Promise((resolve) => setTimeout(resolve, 3000)); return pollSyncStatus(clientId, attempt + 1); }
+    if (active) { setError("لا تزال المزامنة قيد التشغيل. تحققي من صحة البيانات بعد قليل."); return; }
+    const failedConnection = client?.connections?.find((connection) => connection.lastFailureReason && connection.lastFailedSyncAt && (!connection.lastSuccessfulSyncAt || new Date(connection.lastFailedSyncAt) > new Date(connection.lastSuccessfulSyncAt)));
+    setError(failedConnection ? `اكتملت المزامنة مع أخطاء: ${failedConnection.lastFailureReason}` : "اكتملت المزامنة بنجاح.");
+  };
+  const sync = async (clientId: string) => { setSyncing(clientId); setError(""); try { const response = await fetch(`/api/clients/${clientId}/sync`, { method: "POST" }); const result = await response.json() as { jobs?: Array<{ id: string }>; error?: string }; if (!response.ok) { setError(result.error ?? "تعذر وضع التحديث في قائمة الانتظار."); return; } if (!result.jobs?.length) { setError("لا توجد حسابات مؤهلة للمزامنة لهذا العميل."); await Promise.all([onRefresh(), refreshProfiles()]); return; } setError(`تم وضع ${result.jobs.length} مزامنة في قائمة الانتظار. جارٍ التحديث...`); await pollSyncStatus(clientId); } catch { setError("تعذر الاتصال بخدمة التحديث."); } finally { setSyncing(null); } };
   return <section><div className="hero"><div><h1>{t.accounts}</h1><p>اربطي ملف Meta واحداً لـ Kaan، ثم عيّني حساب إنستغرام وفيسبوك الاختياري لكل عميل.</p></div><a className="btn accent" href="/api/connectors/meta"><Link2 size={16} />ربط ملف Meta جديد</a></div>{error && <div className="notice">{error}</div>}<section className="meta-profiles">{profiles.length === 0 ? <div className="card meta-profile-empty"><h2>لا يوجد ملف Meta متصل</h2><p>اربطي ملف Kaan أولاً ليتم عرض جميع الصفحات وحسابات إنستغرام التي تديرينها.</p></div> : profiles.map((profile) => <article className="card meta-profile" key={profile.id}><div className="card-title"><div><h2>{profile.displayName}</h2><p>{profile.accounts.length} حساب متاح للتعيين · {profile.lastSyncedAt ? `آخر تحديث ${new Date(profile.lastSyncedAt).toLocaleString()}` : "تم الربط"}</p></div><span className="connected"><CheckCircle2 size={12} />ملف متصل</span></div><div className="profile-accounts">{profile.accounts.map((account) => <span className="profile-account" key={account.id}>{account.platform === "INSTAGRAM" ? <Instagram size={15} /> : <Facebook size={15} />}{account.displayName}{account.assignments.length > 0 && <small>مُعيّن</small>}</span>)}</div></article>)}</section><h2 className="assignment-title">تعيين الحسابات للعملاء</h2><div className="accounts-grid">{clients.map((client) => <article className="card account-client" key={client.id}><div className="card-title"><div><h2>{client.name}</h2><p>إنستغرام مطلوب · فيسبوك اختياري</p></div></div><span className={`sync-health ${syncHealth(client).state}`}>{syncHealth(client).label}</span><DataHealth connection={client.connections?.find((item) => item.platform === "INSTAGRAM")} />{(["INSTAGRAM", "FACEBOOK"] as const).map((platform) => <label className="account-assignment" key={platform}><span className={`platform ${platform === "INSTAGRAM" ? "instagram" : "future"}`}>{platform === "INSTAGRAM" ? <Instagram size={18} /> : <Facebook size={18} />}</span><span>{platform === "INSTAGRAM" ? "إنستغرام" : "فيسبوك (اختياري)"}</span><select value={selected(client, platform)} disabled={saving === client.id} onChange={(event) => void assign(client, platform, event.target.value)}><option value="">{platform === "INSTAGRAM" ? "اختاري حساب إنستغرام" : "لا ندير فيسبوك لهذا العميل"}</option>{accounts.filter((account) => account.platform === platform).map((account) => <option key={account.id} value={account.id} disabled={account.assignments.some((assignment) => assignment.clientId !== client.id)}>{account.displayName} — {account.profileName}</option>)}</select></label>)}<button className="btn primary full-width" disabled={syncing === client.id || !selected(client, "INSTAGRAM")} onClick={() => void sync(client.id)}><RefreshCw size={15} />{syncing === client.id ? "جارٍ التحديث..." : t.refresh}</button>{syncResults[client.id] && <div className="sync-result"><b>{syncResults[client.id].joinedExisting ? "تم الانضمام إلى تحديث جارٍ" : `تم تحديث ${syncResults[client.id].posts} منشور`}</b>{syncResults[client.id].results.map((result) => <small className={result.status} key={result.connectionId}>{result.displayName}: {result.status === "success" ? `${result.posts} منشور · ${(result.durationMs / 1000).toFixed(1)} ث` : result.error}</small>)}</div>}</article>)}</div></section>;
+}
+
+type SettingsUser = { id: string; email: string; name: string | null; role: "ADMIN" | "EDITOR" | "VIEWER"; createdAt: string };
+
+function SettingsPage({ t, user, onSignOut, setToast }: { t: Dictionary; user: WorkspaceUser; onSignOut: () => Promise<void>; setToast: (value: string) => void }) {
+  const arabic = t.dashboard === "الرئيسية";
+  const isAdmin = user.role === "ADMIN";
+  const [tab, setTab] = useState<"account" | "users" | "integrations">("account");
+  const tabs = [
+    { id: "account" as const, label: arabic ? "الحساب" : "Account" },
+    ...(isAdmin ? [{ id: "users" as const, label: arabic ? "المستخدمون والأدوار" : "Users & roles" }] : []),
+    { id: "integrations" as const, label: arabic ? "التكاملات" : "Integrations" },
+  ];
+  return <section className="settings-page">
+    <section className="hero"><div><h1>{t.settings}</h1><p>{arabic ? "إدارة حسابك، فريق العمل، والتكاملات المتصلة بالمنصة." : "Manage your account, team access, and connected integrations."}</p></div></section>
+    <div className="settings-tabs">{tabs.map((item) => <button key={item.id} className={`settings-tab ${tab === item.id ? "active" : ""}`} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
+    {tab === "account" && <AccountSettings t={t} user={user} onSignOut={onSignOut} />}
+    {tab === "users" && isAdmin && <UsersSettings t={t} setToast={setToast} />}
+    {tab === "integrations" && <IntegrationsSettings t={t} user={user} />}
+  </section>;
+}
+
+function AccountSettings({ t, user, onSignOut }: { t: Dictionary; user: WorkspaceUser; onSignOut: () => Promise<void> }) {
+  const arabic = t.dashboard === "الرئيسية";
+  const roleLabel: Record<string, string> = { ADMIN: arabic ? "مدير" : "Admin", EDITOR: arabic ? "محرر" : "Editor", VIEWER: arabic ? "مشاهد" : "Viewer" };
+  const [signingOut, setSigningOut] = useState(false);
+  return <section className="card settings-card">
+    <div className="card-title"><div><h2>{arabic ? "معلومات الحساب" : "Account details"}</h2><p>{arabic ? "بيانات تسجيل الدخول الحالية." : "Your current sign-in details."}</p></div></div>
+    <div className="settings-field"><span>{arabic ? "الاسم" : "Name"}</span><b>{user.name ?? "—"}</b></div>
+    <div className="settings-field"><span>{arabic ? "البريد الإلكتروني" : "Email"}</span><b>{user.email}</b></div>
+    <div className="settings-field"><span>{arabic ? "الدور" : "Role"}</span><b>{roleLabel[user.role] ?? user.role}</b></div>
+    <button className="btn quiet danger-button" disabled={signingOut} onClick={async () => { setSigningOut(true); await onSignOut(); }}><LogOut size={16} />{signingOut ? (arabic ? "جارٍ تسجيل الخروج..." : "Signing out...") : (arabic ? "تسجيل الخروج" : "Sign out")}</button>
+  </section>;
+}
+
+function UsersSettings({ t, setToast }: { t: Dictionary; setToast: (value: string) => void }) {
+  const arabic = t.dashboard === "الرئيسية";
+  const [users, setUsers] = useState<SettingsUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [role, setRole] = useState<"ADMIN" | "EDITOR" | "VIEWER">("EDITOR");
+  const [submitting, setSubmitting] = useState(false);
+  const [updating, setUpdating] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const roleLabel: Record<string, string> = { ADMIN: arabic ? "مدير" : "Admin", EDITOR: arabic ? "محرر" : "Editor", VIEWER: arabic ? "مشاهد" : "Viewer" };
+  const loadUsers = () => { setLoading(true); return fetch("/api/users").then((response) => response.ok ? response.json() : null).then((data: { users?: SettingsUser[] } | null) => setUsers(data?.users ?? [])).finally(() => setLoading(false)); };
+  useEffect(() => { void loadUsers(); }, []);
+  const addUser = async () => {
+    if (!name.trim() || !email.trim() || password.length < 8) { setError(arabic ? "أدخلي الاسم والبريد وكلمة مرور لا تقل عن 8 أحرف." : "Enter name, email, and a password of at least 8 characters."); return; }
+    setSubmitting(true); setError("");
+    const response = await fetch("/api/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim(), email: email.trim(), password, role }) });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) setError(data.error ?? (arabic ? "تعذر إنشاء المستخدم." : "Unable to create the user."));
+    else { setName(""); setEmail(""); setPassword(""); setRole("EDITOR"); setToast(arabic ? "تم إنشاء المستخدم." : "User created."); await loadUsers(); }
+    setSubmitting(false);
+  };
+  const changeRole = async (id: string, nextRole: string) => {
+    setUpdating(id); setError("");
+    const response = await fetch("/api/users", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, role: nextRole }) });
+    const data = await response.json() as { error?: string };
+    if (!response.ok) setError(data.error ?? (arabic ? "تعذر تحديث الدور." : "Unable to update the role."));
+    else await loadUsers();
+    setUpdating(null);
+  };
+  return <section className="settings-users">
+    <section className="card settings-card">
+      <div className="card-title"><div><h2>{arabic ? "دعوة مستخدم جديد" : "Invite a new user"}</h2><p>{arabic ? "أنشئي حساباً جديداً وحدّدي دوره." : "Create a new account and set its role."}</p></div></div>
+      <div className="settings-invite-form">
+        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={arabic ? "الاسم" : "Name"} />
+        <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder={arabic ? "البريد الإلكتروني" : "Email"} type="email" />
+        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder={arabic ? "كلمة المرور" : "Password"} type="password" />
+        <select value={role} onChange={(event) => setRole(event.target.value as typeof role)}><option value="ADMIN">{roleLabel.ADMIN}</option><option value="EDITOR">{roleLabel.EDITOR}</option><option value="VIEWER">{roleLabel.VIEWER}</option></select>
+        <button className="btn primary" disabled={submitting} onClick={() => void addUser()}><UserPlus size={16} />{submitting ? (arabic ? "جارٍ الإنشاء..." : "Creating...") : (arabic ? "إنشاء" : "Create")}</button>
+      </div>
+      {error && <small className="client-error">{error}</small>}
+    </section>
+    <section className="card settings-card">
+      <div className="card-title"><div><h2>{arabic ? "المستخدمون" : "Users"}</h2><p>{arabic ? "غيّري دور أي مستخدم في أي وقت." : "Change any user's role at any time."}</p></div></div>
+      {loading ? <p>{arabic ? "جارٍ تحميل المستخدمين..." : "Loading users..."}</p> : <div className="settings-user-list">{users.map((item) => <div className="settings-user-row" key={item.id}><div><b>{item.name ?? item.email}</b><small>{item.email}</small></div><select value={item.role} disabled={updating === item.id} onChange={(event) => void changeRole(item.id, event.target.value)}><option value="ADMIN">{roleLabel.ADMIN}</option><option value="EDITOR">{roleLabel.EDITOR}</option><option value="VIEWER">{roleLabel.VIEWER}</option></select></div>)}</div>}
+    </section>
+  </section>;
+}
+
+function IntegrationsSettings({ t, user }: { t: Dictionary; user: WorkspaceUser }) {
+  const arabic = t.dashboard === "الرئيسية";
+  const [profiles, setProfiles] = useState<MetaProfile[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { fetch("/api/meta-accounts").then((response) => response.ok ? response.json() : null).then((data: { profiles?: MetaProfile[] } | null) => setProfiles(data?.profiles ?? [])).finally(() => setLoading(false)); }, []);
+  const accountsCount = profiles.reduce((sum, profile) => sum + profile.accounts.length, 0);
+  return <section className="settings-users">
+    <section className="card settings-card">
+      <div className="card-title"><div><h2><ShieldCheck size={16} /> Google</h2><p>{arabic ? "مطلوب لتصدير التقارير إلى Google Slides." : "Required to export reports to Google Slides."}</p></div></div>
+      <div className="settings-field"><span>{arabic ? "الحالة" : "Status"}</span><b className={user.googleConnected ? "success" : ""}>{user.googleConnected ? (arabic ? "متصل" : "Connected") : (arabic ? "غير متصل" : "Not connected")}</b></div>
+      <a className="btn quiet compact" href="/api/connectors/google"><Link2 size={14} />{user.googleConnected ? (arabic ? "إعادة الربط" : "Reconnect") : (arabic ? "ربط Google" : "Connect Google")}</a>
+    </section>
+    <section className="card settings-card">
+      <div className="card-title"><div><h2>Meta</h2><p>{arabic ? "مصدر بيانات إنستغرام وفيسبوك للتقارير." : "The Instagram and Facebook data source for reports."}</p></div></div>
+      <div className="settings-field"><span>{arabic ? "ملفات Meta متصلة" : "Connected Meta profiles"}</span><b>{loading ? "..." : profiles.length}</b></div>
+      <div className="settings-field"><span>{arabic ? "حسابات متاحة" : "Available accounts"}</span><b>{loading ? "..." : accountsCount}</b></div>
+      <a className="btn quiet compact" href="/api/connectors/meta"><Link2 size={14} />{arabic ? "ربط ملف Meta جديد" : "Connect a new Meta profile"}</a>
+    </section>
+  </section>;
 }
 
 function Metric({ label, value, change, Icon, warn = false }: { label: string; value: string; change: string; Icon: typeof Users; warn?: boolean }) { return <div className="metric"><div className="metric-label"><span>{label}</span><span className="metric-icon"><Icon size={15} /></span></div><div className="metric-value">{value}</div><div className={`metric-change ${warn ? "down" : ""}`}>{change}</div></div>; }

@@ -21,7 +21,7 @@ export function createGoogleAuthorizationUrl(userId: string) {
     hd: requiredDomain,
     scope: [
       "https://www.googleapis.com/auth/presentations",
-      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/drive",
       "https://www.googleapis.com/auth/userinfo.email",
       "https://www.googleapis.com/auth/userinfo.profile",
       "openid",

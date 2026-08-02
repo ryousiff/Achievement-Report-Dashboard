@@ -145,3 +145,18 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });
   }
 }
+
+export async function DELETE(request: NextRequest) {
+  const actor = await requireFeature(request, "edit_report");
+  const internalAccess = hasInternalApiAccess(request);
+  if (!internalAccess && !actor) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const reportId = request.nextUrl.searchParams.get("id");
+  if (!reportId) return NextResponse.json({ error: "id is required." }, { status: 400 });
+  if (request.nextUrl.searchParams.get("confirm") !== "true") return NextResponse.json({ error: "Permanent deletion must be confirmed." }, { status: 400 });
+  const existing = await db.report.findUnique({ where: { id: reportId }, select: { createdById: true, status: true } });
+  if (!existing) return NextResponse.json({ error: "Report not found." }, { status: 404 });
+  if (!internalAccess && existing.createdById !== actor?.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (existing.status === "APPROVED" || existing.status === "EXPORTED") return NextResponse.json({ error: "Approved or exported reports are frozen and cannot be deleted." }, { status: 409 });
+  await db.report.delete({ where: { id: reportId } });
+  return NextResponse.json({ ok: true });
+}
