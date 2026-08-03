@@ -6,6 +6,7 @@ import { hasFeature, requireFeature } from "@/lib/access";
 import { createReportDraft, ReportBlockType } from "@/lib/report-template";
 import { buildStandardReportBlocks } from "@/lib/report-data";
 import { enqueueClientSync } from "@/lib/sync-queue";
+import { getCoverage } from "@/lib/report-coverage";
 
 import { dateValue, requiredText } from "@/lib/validators";
 
@@ -38,7 +39,7 @@ function editableBlocks(value: unknown): EditableBlock[] {
 }
 
 async function readiness(reportId: string, blocks: EditableBlock[]) {
-  const report = await db.report.findUnique({ where: { id: reportId }, select: { clientId: true } });
+  const report = await db.report.findUnique({ where: { id: reportId }, select: { clientId: true, periodStart: true, periodEnd: true } });
   if (!report) return ["Report not found."];
   const issues: string[] = [];
   const media = blocks.filter((block) => block.type === "media");
@@ -46,8 +47,12 @@ async function readiness(reportId: string, blocks: EditableBlock[]) {
   if (blocks.some((block) => Array.isArray(block.content.kpis) && block.content.kpis.some((item) => typeof item === "object" && item && ((item as Record<string, unknown>).available === false || (item as Record<string, unknown>).value === "غير متاح")))) issues.push("One or more critical metrics are unavailable.");
   const recommendations = blocks.find((block) => block.type === "notes" || block.type === "recommendations");
   if (!recommendations || typeof recommendations.content.body !== "string" || !recommendations.content.body.trim()) issues.push("Recommendations are missing.");
-  const connection = await db.socialConnection.findFirst({ where: { clientId: report.clientId, platform: "INSTAGRAM" }, select: { lastSuccessfulSyncAt: true } });
+  const connection = await db.socialConnection.findFirst({ where: { clientId: report.clientId, platform: "INSTAGRAM" }, select: { id: true, lastSuccessfulSyncAt: true } });
   if (!connection?.lastSuccessfulSyncAt || Date.now() - connection.lastSuccessfulSyncAt.valueOf() > 24 * 60 * 60 * 1000) issues.push("Client data has not been synchronized in the last 24 hours.");
+  if (connection) {
+    const coverage = await getCoverage(connection.id, report.periodStart, report.periodEnd);
+    if (coverage.status !== "COMPLETE") issues.push(...coverage.warnings.slice(0, 3));
+  }
   return issues;
 }
 

@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import { db } from "@/lib/db";
-import { getGoogleAuthClient } from "@/lib/google";
+import { getGoogleAuthClient, GoogleReconnectRequiredError, hasExportScope } from "@/lib/google";
 
 const sharedDriveId = process.env.GOOGLE_SHARED_DRIVE_ID;
 
@@ -161,6 +161,9 @@ export async function exportReportToSlides(reportId: string, userId: string) {
   if (!user?.googleRefreshToken) throw new Error("Connect your Google account first.");
 
   const auth = await getGoogleAuthClient(user.googleRefreshToken);
+  // Someone who only ever completed Google *sign-in* (openid/email/profile) has a token, but it was never
+  // granted Drive/Slides scope — surface that the same way as an outright missing/revoked connection.
+  if (!hasExportScope(auth.credentials.scope)) throw new GoogleReconnectRequiredError("Connect Google Drive access to export reports.");
   const drive = google.drive({ version: "v3", auth });
   const slides = google.slides({ version: "v1", auth });
 

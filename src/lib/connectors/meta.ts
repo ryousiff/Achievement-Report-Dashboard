@@ -2,7 +2,7 @@ import { Platform } from "@prisma/client";
 import { db } from "@/lib/db";
 import { encryptToken } from "@/lib/token-encryption";
 import { createMetaAuthorizationUrl, createMetaState, exchangeMetaCode, fetchMetaPages, parseMetaState } from "@/lib/meta";
-import { syncInstagramConnection } from "@/lib/meta-sync";
+import { runIncrementalSync } from "@/lib/meta-sync";
 import { ConnectorError, type ExternalAccount, type SocialConnector, type SyncResult } from "./types";
 
 export const metaConnector: SocialConnector = {
@@ -96,7 +96,11 @@ export const metaConnector: SocialConnector = {
     if (!connection) throw new ConnectorError("Connection not found.", "request_failed");
 
     if (connection.platform === Platform.INSTAGRAM) {
-      const result = await syncInstagramConnection(connectionId);
+      // Note: for Instagram, src/lib/sync-queue.ts dispatches directly to the type-specific meta-sync
+      // functions (incremental/historical-backfill/insight-refresh/daily-account-insight) based on the
+      // SyncJob's type instead of calling this generic method. This fallback covers incremental sync only,
+      // for anything that still calls the connector interface directly.
+      const result = await runIncrementalSync(connectionId);
       return { posts: result.posts };
     }
 

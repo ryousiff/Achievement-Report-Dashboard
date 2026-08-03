@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireFeature } from "@/lib/access";
+import { GoogleReconnectRequiredError } from "@/lib/google";
 import { exportReportToSlides } from "@/lib/slides";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ reportId: string }> }) {
@@ -10,8 +11,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const result = await exportReportToSlides(reportId, user.id);
     return NextResponse.json(result);
   } catch (error) {
+    const reconnect = error instanceof GoogleReconnectRequiredError;
     const message = error instanceof Error ? error.message : "Unable to export to Google Slides.";
     console.error("SLIDES EXPORT ERROR:", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message, reconnect }, { status: reconnect ? 409 : 500 });
   }
 }

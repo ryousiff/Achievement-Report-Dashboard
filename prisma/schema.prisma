@@ -52,19 +52,39 @@ enum SyncRunStatus {
   FAILED
 }
 
+enum SyncJobType {
+  INCREMENTAL_MEDIA_SYNC
+  HISTORICAL_MEDIA_BACKFILL
+  RECENT_POST_INSIGHT_REFRESH
+  DAILY_ACCOUNT_INSIGHT_SYNC
+  STORY_SYNC
+}
+
+enum BackfillStatus {
+  NOT_STARTED
+  RUNNING
+  PARTIAL
+  COMPLETED
+  FAILED
+}
+
 model User {
-  id                  String    @id @default(cuid())
-  email               String    @unique
-  name                String?
-  passwordHash        String?
-  role                Role      @default(EDITOR)
-  googleRefreshToken  String?
-  googleTokenExpiresAt DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-  reports             Report[]
-  sessions            Session[]
-  auditLogs           AuditLog[]
+  id                     String     @id @default(cuid())
+  email                  String     @unique
+  name                   String?
+  passwordHash           String?
+  role                   Role       @default(EDITOR)
+  googleRefreshToken     String?
+  googleTokenExpiresAt   DateTime?
+  googleSubject          String?    @unique
+  googleEmail            String?
+  googleWorkspaceDomain  String?
+  googleIdentityLinkedAt DateTime?
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+  reports                Report[]
+  sessions               Session[]
+  auditLogs              AuditLog[]
 }
 
 model Session {
@@ -79,32 +99,32 @@ model Session {
 }
 
 model Client {
-  id            String              @id @default(cuid())
+  id            String             @id @default(cuid())
   name          String
   logoUrl       String?
   driveFolderId String?
-  active        Boolean             @default(true)
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
+  active        Boolean            @default(true)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
   connections   SocialConnection[]
   reports       Report[]
 }
 
 model MetaProfile {
-  id            String        @id @default(cuid())
-  displayName   String
-  createdById   String
+  id             String        @id @default(cuid())
+  displayName    String
+  createdById    String
   tokenExpiresAt DateTime?
-  lastSyncedAt  DateTime?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  accounts      MetaAccount[]
+  lastSyncedAt   DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  accounts       MetaAccount[]
 
   @@index([createdById])
 }
 
 model MetaAccount {
-  id                String        @id @default(cuid())
+  id                String             @id @default(cuid())
   profileId         String
   platform          Platform
   externalAccountId String
@@ -112,9 +132,9 @@ model MetaAccount {
   encryptedToken    String
   tokenExpiresAt    DateTime?
   lastSyncedAt      DateTime?
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
-  profile           MetaProfile   @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  profile           MetaProfile        @relation(fields: [profileId], references: [id], onDelete: Cascade)
   assignments       SocialConnection[]
 
   @@unique([profileId, platform, externalAccountId])
@@ -122,58 +142,86 @@ model MetaAccount {
 }
 
 model SocialConnection {
-  id               String        @id @default(cuid())
-  clientId         String
-  sourceAccountId  String?
-  platform         Platform
-  externalAccountId String
-  displayName      String
-  encryptedToken   String
-  tokenExpiresAt   DateTime?
-  lastSyncedAt          DateTime?
-  lastSuccessfulSyncAt  DateTime?
-  lastFailedSyncAt      DateTime?
-  lastFailureReason     String?
-  syncLockedUntil       DateTime?
-  createdAt             DateTime      @default(now())
-  client                Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  sourceAccount         MetaAccount?  @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
-  posts                 SocialPost[]
-  insightSnapshots      SocialInsightSnapshot[]
-  syncJobs              SyncJob[]
-  syncRuns              SyncRun[]
+  id                   String    @id @default(cuid())
+  clientId             String
+  sourceAccountId      String?
+  platform             Platform
+  externalAccountId    String
+  displayName          String
+  encryptedToken       String
+  tokenExpiresAt       DateTime?
+  lastSyncedAt         DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastFailedSyncAt     DateTime?
+  lastFailureReason    String?
+  syncLockedUntil      DateTime?
+  createdAt            DateTime  @default(now())
+
+  // Historical backfill state (separate from incremental sync above; see lastIncrementalSyncAt/lastIncrementalSyncError)
+  historicalBackfillStatus         BackfillStatus @default(NOT_STARTED)
+  historicalBackfillStart          DateTime?
+  historicalBackfillCursor         String?
+  historicalBackfillPageIndex      Int?
+  historicalBackfillStartedAt      DateTime?
+  historicalBackfillCompletedAt    DateTime?
+  historicalBackfillLastError      String?
+  historicalBackfillRetryCount     Int            @default(0)
+  historicalBackfillProcessedPosts Int            @default(0)
+
+  // Incremental sync state, distinct from the historical backfill above
+  lastIncrementalSyncAt    DateTime?
+  lastIncrementalSyncError String?
+
+  // Account-level daily insight coverage (reach/follows)
+  reachCoverageStart                 DateTime?
+  followsCoverageStart               DateTime?
+  accountInsightsLastSyncedAt        DateTime?
+  accountInsightsBackfillCompletedAt DateTime?
+  accountInsightsLastError           String?
+
+  // Stories placeholder (Part 4) — no sync pipeline exists yet, field reserved for future use
+  storyCoverageStart DateTime?
+
+  client           Client                  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  sourceAccount    MetaAccount?            @relation(fields: [sourceAccountId], references: [id], onDelete: SetNull)
+  posts            SocialPost[]
+  insightSnapshots SocialInsightSnapshot[]
+  syncJobs         SyncJob[]
+  syncRuns         SyncRun[]
 
   @@unique([clientId, platform, externalAccountId])
   @@index([sourceAccountId])
 }
 
 model SocialPost {
-  id             String   @id @default(cuid())
-  connectionId   String
-  externalPostId String
-  caption        String?
-  mediaType      String
-  mediaUrl       String?
-  thumbnailUrl   String?
-  permalink      String?
-  publishedAt    DateTime
-  metrics        Json
-  metricAvailability Json?
-  syncedAt       DateTime @updatedAt
-  connection     SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  id                      String           @id @default(cuid())
+  connectionId            String
+  externalPostId          String
+  caption                 String?
+  mediaType               String
+  mediaUrl                String?
+  thumbnailUrl            String?
+  permalink               String?
+  publishedAt             DateTime
+  metrics                 Json
+  metricAvailability      Json?
+  metricAvailabilityState Json?
+  lastInsightRefreshAt    DateTime?
+  syncedAt                DateTime         @updatedAt
+  connection              SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
   @@unique([connectionId, externalPostId])
   @@index([connectionId, publishedAt])
 }
 
 model SocialInsightSnapshot {
-  id           String   @id @default(cuid())
+  id           String           @id @default(cuid())
   connectionId String
   metric       String
   periodStart  DateTime
   periodEnd    DateTime
   value        Float
-  capturedAt   DateTime @default(now())
+  capturedAt   DateTime         @default(now())
   connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
   @@unique([connectionId, metric, periodStart, periodEnd])
@@ -181,38 +229,39 @@ model SocialInsightSnapshot {
 }
 
 model SyncJob {
-  id           String        @id @default(cuid())
+  id           String           @id @default(cuid())
   connectionId String
-  status       SyncJobStatus @default(QUEUED)
-  attempts     Int           @default(0)
-  maxAttempts  Int           @default(5)
-  runAfter     DateTime      @default(now())
+  type         SyncJobType      @default(INCREMENTAL_MEDIA_SYNC)
+  status       SyncJobStatus    @default(QUEUED)
+  attempts     Int              @default(0)
+  maxAttempts  Int              @default(5)
+  runAfter     DateTime         @default(now())
   lockedAt     DateTime?
   startedAt    DateTime?
   finishedAt   DateTime?
   lastError    String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
   connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   runs         SyncRun[]
 
   @@index([status, runAfter])
-  @@index([connectionId, status])
+  @@index([connectionId, type, status])
 }
 
 model SyncRun {
-  id           String        @id @default(cuid())
+  id           String           @id @default(cuid())
   jobId        String
   connectionId String
-  status       SyncRunStatus @default(RUNNING)
-  startedAt    DateTime      @default(now())
+  status       SyncRunStatus    @default(RUNNING)
+  startedAt    DateTime         @default(now())
   finishedAt   DateTime?
   durationMs   Int?
-  postsSynced  Int           @default(0)
+  postsSynced  Int              @default(0)
   errorCode    String?
   errorMessage String?
-  createdAt    DateTime      @default(now())
-  job          SyncJob       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  createdAt    DateTime         @default(now())
+  job          SyncJob          @relation(fields: [jobId], references: [id], onDelete: Cascade)
   connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
   @@index([connectionId, createdAt])
@@ -220,23 +269,23 @@ model SyncRun {
 }
 
 model Report {
-  id          String       @id @default(cuid())
-  clientId    String
-  createdById String
-  title       String
-  periodStart DateTime
-  periodEnd   DateTime
-  status      ReportStatus @default(DRAFT)
-  isBlank               Boolean      @default(false)
-  orientation           String       @default("landscape")
+  id                     String          @id @default(cuid())
+  clientId               String
+  createdById            String
+  title                  String
+  periodStart            DateTime
+  periodEnd              DateTime
+  status                 ReportStatus    @default(DRAFT)
+  isBlank                Boolean         @default(false)
+  orientation            String          @default("landscape")
   approvalOverrideReason String?
-  createdAt             DateTime     @default(now())
-  updatedAt             DateTime     @updatedAt
-  client                Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  createdBy             User         @relation(fields: [createdById], references: [id])
-  blocks                ReportBlock[]
-  versions              ReportVersion[]
-  exports               ReportExport[]
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+  client                 Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  createdBy              User            @relation(fields: [createdById], references: [id])
+  blocks                 ReportBlock[]
+  versions               ReportVersion[]
+  exports                ReportExport[]
 }
 
 model ReportVersion {
@@ -264,12 +313,12 @@ model ReportExport {
 }
 
 model ReportBlock {
-  id        String    @id @default(cuid())
-  reportId  String
-  type      BlockType
-  position  Int
-  content   Json
-  report    Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  id       String    @id @default(cuid())
+  reportId String
+  type     BlockType
+  position Int
+  content  Json
+  report   Report    @relation(fields: [reportId], references: [id], onDelete: Cascade)
 
   @@unique([reportId, position])
 }

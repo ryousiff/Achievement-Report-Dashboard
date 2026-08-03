@@ -15,6 +15,7 @@ export const features = [
   "view_audit",
   "manage_users",
   "manage_settings",
+  "run_historical_sync",
 ] as const;
 
 export type Feature = (typeof features)[number];
@@ -29,6 +30,8 @@ export const roleFeatures: Record<Role, Feature[]> = {
     "approve_report",
     "export_report",
     "manage_clients",
+    "connect_meta",
+    "assign_accounts",
   ],
   [Role.VIEWER]: [
     "view_dashboard",
