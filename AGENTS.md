@@ -26,3 +26,10 @@ A provider only exposes a working **Connect** flow when it is both `isConfigured
 2. Register it in `src/lib/connectors/registry.ts`.
 3. If it supports sync, the worker will pick it up automatically via `getConnectorForPlatform()`.
 4. Add the required environment keys to `.env.example` and `src/lib/env.ts`.
+
+# Sync scheduling
+
+- `npm run worker` (also started alongside `npm run dev`) drains queued `SyncJob`s **and** periodically checks whether the daily automatic sync is due, via `runDueDailyClientSync()` in `src/lib/sync-queue.ts`. When due, it calls `enqueueClientSync()` for every active client — a normal incremental sync (`INCREMENTAL_MEDIA_SYNC` / `DAILY_ACCOUNT_INSIGHT_SYNC`), never the deep historical backfill.
+- The due-check interval and the sync interval are configurable via `DAILY_CLIENT_SYNC_CHECK_INTERVAL_MS` (default 1h) and `DAILY_CLIENT_SYNC_INTERVAL_MS` (default 24h); see `getSchedulerConfig()` in `src/lib/env.ts`.
+- The daily trigger is guarded by an atomic claim on the `Setting` table (`moduleId: "scheduler"`), so a worker restart or running multiple worker instances can't double-trigger it.
+- **Historical Sync** (`POST /api/clients/:clientId/backfill`, `run_historical_sync` feature, admin-only) stays a separate, explicit, manual action for the initial deep backfill (15 months by default), recovering a partially-failed backfill, or re-syncing an older period — it is never triggered by the scheduler.

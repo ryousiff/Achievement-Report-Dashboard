@@ -2,8 +2,11 @@ import { BackfillStatus, Platform, SyncJobStatus, SyncJobType, SyncRunStatus } f
 import { db } from "@/lib/db";
 import { ConnectorError, getConnectorForPlatform } from "@/lib/connectors";
 import { runHistoricalBackfillChunk, runIncrementalSync, runRecentInsightRefresh } from "@/lib/meta-sync";
-import { getHistoricalBackfillConfig } from "@/lib/env";
+import { getHistoricalBackfillConfig, getSchedulerConfig } from "@/lib/env";
 import { logError, logEvent } from "@/lib/observability";
+
+const schedulerModuleId = "scheduler";
+const dailyClientSyncKey = "dailyClientSyncNextRunAt";
 
 const lockMs = 15 * 60 * 1000;
 
@@ -59,6 +62,42 @@ export async function enqueueHistoricalBackfill(connectionId: string) {
   }
   if (connection.historicalBackfillStatus === BackfillStatus.COMPLETED) throw new Error("Historical sync has already completed for this connection.");
   return enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+}
+
+/** Atomically claims the daily-auto-sync "slot" using the Setting table as a distributed lock, the same
+ * optimistic-claim shape as syncLockedUntil in processNextSyncJob below: the WHERE guard (value <= now) is
+ * re-checked per-transaction by Postgres's row-level locking, so if multiple worker processes (or a
+ * restarted worker racing its own previous instance) call this around the same time, only one of them
+ * ever sees count > 0 — the rest simply skip this cycle and try again on their next check. */
+async function claimDailyClientSyncWindow(intervalMs: number) {
+  const now = new Date();
+  await db.setting.createMany({ data: [{ moduleId: schedulerModuleId, key: dailyClientSyncKey, value: now.toISOString() }], skipDuplicates: true });
+  const claimed = await db.setting.updateMany({
+    where: { moduleId: schedulerModuleId, key: dailyClientSyncKey, value: { lte: now.toISOString() } },
+    data: { value: new Date(now.getTime() + intervalMs).toISOString() },
+  });
+  return claimed.count > 0;
+}
+
+/** Queues a normal incremental sync (never the deep historical backfill) for every active client — reuses
+ * enqueueClientSync, whose own per-(connection,type) hasActiveJob check already prevents duplicate
+ * SyncJob rows even if this were ever triggered more than once concurrently. */
+async function triggerDailyClientSync() {
+  const clients = await db.client.findMany({ where: { active: true }, select: { id: true } });
+  const results = await Promise.allSettled(clients.map((client) => enqueueClientSync(client.id)));
+  const failed = results.filter((result) => result.status === "rejected").length;
+  logEvent("sync.daily.triggered", { clients: clients.length, failed });
+  if (failed) logError("sync.daily.partial_failure", new Error(`${failed} of ${clients.length} clients failed to enqueue daily sync.`));
+  return results;
+}
+
+/** Called by the worker on a periodic check (see worker.ts); only actually enqueues jobs once per
+ * configured interval (default 24h), regardless of how often — or from how many worker processes — this
+ * is called. */
+export async function runDueDailyClientSync() {
+  const { dailyClientSyncIntervalMs } = getSchedulerConfig();
+  if (await claimDailyClientSyncWindow(dailyClientSyncIntervalMs)) return triggerDailyClientSync();
+  return null;
 }
 
 function delayFor(attempts: number, retryAfterMs?: number) {

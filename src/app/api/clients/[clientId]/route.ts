@@ -39,7 +39,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
-  const user = await requireFeature(request, "manage_clients");
+  const user = await requireFeature(request, "delete_clients");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (request.nextUrl.searchParams.get("confirm") !== "true") return NextResponse.json({ error: "Permanent deletion must be confirmed." }, { status: 400 });
   const { clientId } = await params;

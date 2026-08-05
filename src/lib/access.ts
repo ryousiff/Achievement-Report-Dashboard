@@ -10,6 +10,7 @@ export const features = [
   "approve_report",
   "export_report",
   "manage_clients",
+  "delete_clients",
   "connect_meta",
   "assign_accounts",
   "view_audit",

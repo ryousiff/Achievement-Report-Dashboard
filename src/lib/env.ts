@@ -24,6 +24,13 @@ export function getHistoricalBackfillConfig() {
   };
 }
 
+export function getSchedulerConfig() {
+  return {
+    dailyClientSyncIntervalMs: numberFromEnv("DAILY_CLIENT_SYNC_INTERVAL_MS", 24 * 60 * 60 * 1000),
+    dailyClientSyncCheckIntervalMs: numberFromEnv("DAILY_CLIENT_SYNC_CHECK_INTERVAL_MS", 60 * 60 * 1000),
+  };
+}
+
 export function getRuntimeConfiguration() {
   const missing = process.env.NODE_ENV === "production"
     ? requiredInProduction.filter((name) => !process.env[name])
