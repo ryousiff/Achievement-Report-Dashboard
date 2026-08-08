@@ -46,6 +46,7 @@ export function getRuntimeConfiguration() {
     linkedinConfigured: allSet("LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_REDIRECT_URI"),
     youtubeConfigured: allSet("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REDIRECT_URI"),
     xConfigured: allSet("X_CLIENT_ID", "X_CLIENT_SECRET", "X_REDIRECT_URI"),
+    metaBusinessConfigured: allSet("META_APP_ID", "META_APP_SECRET", "META_TOKEN_ENCRYPTION_KEY", "META_BUSINESS_ID"),
     providers: {
       meta: allSet("META_APP_ID", "META_APP_SECRET", "META_REDIRECT_URI", "META_TOKEN_ENCRYPTION_KEY"),
       tiktok: allSet("TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_REDIRECT_URI"),

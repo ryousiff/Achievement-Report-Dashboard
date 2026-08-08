@@ -79,7 +79,6 @@ export async function POST(request: NextRequest) {
     if (duplicateFromId) {
       const source = await db.report.findUnique({ where: { id: duplicateFromId }, include: { blocks: { orderBy: { position: "asc" } } } });
       if (!source) return NextResponse.json({ error: "Source report not found." }, { status: 404 });
-      if (!internalAccess && source.createdById !== actor?.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
       const report = await db.report.create({ data: { clientId, createdById, title: requiredText(body.title, "title"), periodStart, periodEnd, status: "DRAFT", isBlank: source.isBlank, blocks: { create: source.blocks.map((block, position) => { const content = block.content as Record<string, unknown>; const kpis = Array.isArray(content.kpis) ? content.kpis.map((item) => typeof item === "object" && item ? { ...(item as Record<string, unknown>), value: "0" } : item) : content.kpis; return { position, type: block.type, content: { ...content, mediaItems: Array.isArray(content.mediaItems) ? [] : content.mediaItems, kpis } as Prisma.InputJsonValue }; }) } }, include: { blocks: { orderBy: { position: "asc" } } } });
       return NextResponse.json({ report }, { status: 201 });
     }
@@ -112,9 +111,8 @@ export async function PATCH(request: NextRequest) {
   try {
     const body = await request.json() as Record<string, unknown>;
     const reportId = requiredText(body.id, "id", 64);
-    const existing = await db.report.findUnique({ where: { id: reportId }, select: { createdById: true, status: true } });
+    const existing = await db.report.findUnique({ where: { id: reportId }, select: { status: true } });
     if (!existing) return NextResponse.json({ error: "Report not found." }, { status: 404 });
-    if (!internalAccess && existing.createdById !== actor?.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     if (existing.status === "APPROVED") return NextResponse.json({ error: "Approved reports are frozen. Duplicate the report to make changes." }, { status: 409 });
 
     const blocks = editableBlocks(body.blocks);
@@ -158,9 +156,8 @@ export async function DELETE(request: NextRequest) {
   const reportId = request.nextUrl.searchParams.get("id");
   if (!reportId) return NextResponse.json({ error: "id is required." }, { status: 400 });
   if (request.nextUrl.searchParams.get("confirm") !== "true") return NextResponse.json({ error: "Permanent deletion must be confirmed." }, { status: 400 });
-  const existing = await db.report.findUnique({ where: { id: reportId }, select: { createdById: true, status: true } });
+  const existing = await db.report.findUnique({ where: { id: reportId }, select: { status: true } });
   if (!existing) return NextResponse.json({ error: "Report not found." }, { status: 404 });
-  if (!internalAccess && existing.createdById !== actor?.id) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   if (existing.status === "APPROVED" || existing.status === "EXPORTED") return NextResponse.json({ error: "Approved or exported reports are frozen and cannot be deleted." }, { status: 409 });
   await db.report.delete({ where: { id: reportId } });
   return NextResponse.json({ ok: true });
