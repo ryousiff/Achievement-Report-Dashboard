@@ -121,7 +121,20 @@ export function validateMetaSystemUserToken(debug: MetaTokenDebugInfo) {
   return issues;
 }
 
-async function fetchAllMetaBusinessAssets<T>(path: string, accessToken: string, fields: string): Promise<T[]> {
+export type MetaAssetDiscoveryStatus = "ACCESSIBLE" | "MISSING_PERMISSION" | "NOT_ASSIGNED_TO_SYSTEM_USER" | "PARTNER_ACCESS_INSUFFICIENT" | "TOKEN_PERMISSION_MISSING";
+export type MetaAssetDiscoveryResult<T> = { items: T[]; status: MetaAssetDiscoveryStatus; warning?: string };
+
+function classifyBusinessApiError(path: string, status: number, body: { error?: { message?: string; code?: number } } | null): MetaAssetDiscoveryStatus {
+  const message = body?.error?.message?.toLowerCase() ?? "";
+  const code = body?.error?.code;
+  if (status === 403 || code === 10 || code === 200 || code === 206 || message.includes("permission")) return "MISSING_PERMISSION";
+  if (message.includes("partner") || message.includes("shared") || message.includes("give") || message.includes("full control")) return "PARTNER_ACCESS_INSUFFICIENT";
+  if (message.includes("assigned") || message.includes("not assigned") || message.includes("does not have access")) return "NOT_ASSIGNED_TO_SYSTEM_USER";
+  if (status === 401 || code === 102 || code === 190 || message.includes("access token")) return "TOKEN_PERMISSION_MISSING";
+  return "MISSING_PERMISSION";
+}
+
+async function fetchMetaBusinessEdge<T>(path: string, accessToken: string, fields: string): Promise<MetaAssetDiscoveryResult<T>> {
   const results: T[] = [];
   let after: string | undefined;
   for (let page = 0; page < 20; page += 1) {
@@ -132,37 +145,45 @@ async function fetchAllMetaBusinessAssets<T>(path: string, accessToken: string, 
     if (after) url.searchParams.set("after", after);
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
-      const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
-      throw new Error(`Meta Business API request to ${path} failed with status ${response.status}${body?.error?.message ? `: ${body.error.message}` : ""}.`);
+      const body = await response.json().catch(() => null) as { error?: { message?: string; code?: number } } | null;
+      const status = classifyBusinessApiError(path, response.status, body);
+      const label = path.endsWith("owned_pages") || path.endsWith("client_pages") ? "الصفحات" : path.endsWith("owned_ad_accounts") || path.endsWith("client_ad_accounts") ? "حسابات الإعلانات" : path;
+      const warning = body?.error?.message
+        ? `${label}: ${body.error.message}`
+        : `${label}: ${status === "PARTNER_ACCESS_INSUFFICIENT" ? "لا يمكن الوصول إلى الأصول المشتركة دون صلاحيات كافية" : status === "NOT_ASSIGNED_TO_SYSTEM_USER" ? "لم يتم تعيين الأصول لمستخدم النظام" : "فشل في جلب الأصول من Business Manager"}`;
+      return { items: results, status, warning };
     }
     const data = await response.json() as { data?: T[]; paging?: { cursors?: { after?: string } } };
     results.push(...(data.data ?? []));
     after = data.paging?.cursors?.after;
     if (!after || !data.data?.length) break;
   }
-  return results;
+  return { items: results, status: "ACCESSIBLE" };
 }
 
-/** Pages owned directly by the Business Portfolio, plus Pages shared with it by partner businesses. */
+/** Pages owned directly by the Business Portfolio, plus Pages shared with it by partner businesses.
+ *  Shared/partner edges that fail are reported in `warnings` instead of aborting the whole discovery. */
 export async function fetchBusinessManagedPages(accessToken: string, businessId: string) {
   const fields = "id,name,access_token,instagram_business_account{id,username}";
   const [owned, shared] = await Promise.all([
-    fetchAllMetaBusinessAssets<MetaPage>(`/${businessId}/owned_pages`, accessToken, fields),
-    fetchAllMetaBusinessAssets<MetaPage>(`/${businessId}/client_pages`, accessToken, fields),
+    fetchMetaBusinessEdge<MetaPage>(`/${businessId}/owned_pages`, accessToken, fields),
+    fetchMetaBusinessEdge<MetaPage>(`/${businessId}/client_pages`, accessToken, fields),
   ]);
   const byId = new Map<string, MetaPage>();
-  for (const page of [...owned, ...shared]) byId.set(page.id, page);
-  return [...byId.values()];
+  for (const page of [...owned.items, ...shared.items]) byId.set(page.id, page);
+  const warnings = [owned.warning, shared.warning].filter(Boolean) as string[];
+  return { pages: [...byId.values()], warnings };
 }
 
 /** Ad accounts owned by or shared with the Business Portfolio. Informational only today — no sync pipeline yet. */
 export async function fetchBusinessAdAccounts(accessToken: string, businessId: string) {
   const fields = "id,name,account_id";
   const [owned, shared] = await Promise.all([
-    fetchAllMetaBusinessAssets<MetaAdAccount>(`/${businessId}/owned_ad_accounts`, accessToken, fields),
-    fetchAllMetaBusinessAssets<MetaAdAccount>(`/${businessId}/client_ad_accounts`, accessToken, fields),
+    fetchMetaBusinessEdge<MetaAdAccount>(`/${businessId}/owned_ad_accounts`, accessToken, fields),
+    fetchMetaBusinessEdge<MetaAdAccount>(`/${businessId}/client_ad_accounts`, accessToken, fields),
   ]);
   const byId = new Map<string, MetaAdAccount>();
-  for (const account of [...owned, ...shared]) byId.set(account.id, account);
-  return [...byId.values()];
+  for (const account of [...owned.items, ...shared.items]) byId.set(account.id, account);
+  const warnings = [owned.warning, shared.warning].filter(Boolean) as string[];
+  return { adAccounts: [...byId.values()], warnings };
 }

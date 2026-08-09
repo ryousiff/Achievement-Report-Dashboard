@@ -10,3 +10,4 @@ uploads/
 generated-reports/
 .DS_Store
 *.log
+tsconfig.tsbuildinfo
