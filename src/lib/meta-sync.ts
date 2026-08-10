@@ -328,23 +328,24 @@ export async function runIncrementalSync(connectionId: string) {
 
   let posts = 0;
 
-  // Owned media
+  // Owned media — keep a tight cap because we run this frequently.
   let ownedCursor: string | undefined;
   let ownedPages = 0;
-  const maxOwnedPages = 10;
+  const maxOwnedPages = 5;
   do {
-    const media = await fetchMediaPage(connection.externalAccountId, token, "media", ownedCursor, ownedSince, mediaFields, "50");
+    const media = await fetchMediaPage(connection.externalAccountId, token, "media", ownedCursor, ownedSince, mediaFields, "25");
     for (const item of media.data ?? []) posts += await processMediaItem(connectionId, token, item, MediaSource.OWNED);
     ownedCursor = media.paging?.cursors?.after;
     ownedPages += 1;
   } while (ownedCursor && ownedPages < maxOwnedPages);
 
-  // Accepted collaborative media (requires instagram_basic)
+  // Accepted collaborative media — narrower pages and fewer of them per incremental run to avoid
+  // burning through Meta's application call budget; historical backfill will catch older posts.
   let collabCursor: string | undefined;
   let collabPages = 0;
-  const maxCollabPages = 10;
+  const maxCollabPages = 3;
   do {
-    const media = await fetchMediaPage(connection.externalAccountId, token, "collaborative_media", collabCursor, collabSince, collaborativeMediaFields, "50");
+    const media = await fetchMediaPage(connection.externalAccountId, token, "collaborative_media", collabCursor, collabSince, collaborativeMediaFields, "25");
     for (const item of media.data ?? []) posts += await processMediaItem(connectionId, token, item, MediaSource.COLLABORATIVE);
     collabCursor = media.paging?.cursors?.after;
     collabPages += 1;

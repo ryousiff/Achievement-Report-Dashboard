@@ -231,8 +231,12 @@ export async function processNextSyncJob() {
     logError("sync.job.failed", error, { jobId: job.id, connectionId: job.connectionId, type: job.type, durationMs: Date.now() - startedAt });
     const retryable = isRetryable(error);
     const attempts = job.attempts + 1;
-    const failed = !retryable || attempts >= job.maxAttempts;
     const errorCode = error instanceof ConnectorError ? error.code : "sync_failed";
+    const isRateLimited = errorCode === "rate_limited";
+    // Rate-limited jobs (especially Meta #4 application limit) can take hours to clear, so give them
+    // more attempts instead of failing after the default 5.
+    const maxAttempts = isRateLimited && retryable ? Math.max(job.maxAttempts, attempts + 10) : job.maxAttempts;
+    const failed = !retryable || attempts >= maxAttempts;
     const retryAfter = error instanceof ConnectorError ? error.retryAfterMs : undefined;
     const now = new Date();
     const connectionUpdate: Record<string, unknown> = { syncLockedUntil: null };
@@ -240,9 +244,12 @@ export async function processNextSyncJob() {
     if (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL && failed) { connectionUpdate.historicalBackfillStatus = BackfillStatus.FAILED; connectionUpdate.historicalBackfillLastError = message; connectionUpdate.historicalBackfillRetryCount = { increment: 1 }; }
     if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL && failed) { connectionUpdate.collaborativeBackfillStatus = BackfillStatus.FAILED; connectionUpdate.collaborativeBackfillLastError = message; connectionUpdate.collaborativeBackfillRetryCount = { increment: 1 }; }
     if (job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC) connectionUpdate.accountInsightsLastError = message;
+    const jobUpdate = failed
+      ? { status: SyncJobStatus.FAILED, finishedAt: now, lockedAt: null, lastError: message }
+      : { status: SyncJobStatus.QUEUED, lockedAt: null, lastError: message, runAfter: new Date(Date.now() + delayFor(attempts, retryAfter)) };
     await db.$transaction([
       db.syncRun.update({ where: { id: run.id }, data: { status: SyncRunStatus.FAILED, finishedAt: now, durationMs: Date.now() - startedAt, errorCode, errorMessage: message } }),
-      db.syncJob.update({ where: { id: job.id }, data: failed ? { status: SyncJobStatus.FAILED, finishedAt: now, lockedAt: null, lastError: message } : { status: SyncJobStatus.QUEUED, lockedAt: null, lastError: message, runAfter: new Date(Date.now() + delayFor(attempts, retryAfter)) } }),
+      db.syncJob.update({ where: { id: job.id }, data: { ...jobUpdate, maxAttempts } }),
       db.socialConnection.update({ where: { id: job.connectionId }, data: connectionUpdate }),
     ]);
     return { id: job.id, status: failed ? "failed" : "retrying" };
