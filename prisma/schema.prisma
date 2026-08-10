@@ -74,6 +74,12 @@ enum MediaSource {
   COLLABORATIVE
 }
 
+enum InsightPeriodType {
+  DAY
+  WEEK
+  DAYS_28
+}
+
 model User {
   id                     String     @id @default(cuid())
   email                  String     @unique
@@ -189,9 +195,13 @@ model SocialConnection {
   lastIncrementalSyncAt    DateTime?
   lastIncrementalSyncError String?
 
-  // Account-level daily insight coverage (reach/follows)
+  // Account-level insight coverage.
+  // reachCoverageStart / reachWeekCoverageStart / reachDays28CoverageStart are the earliest periodEnd for which we have
+  // a daily / 7-day / 28-day reach snapshot.
   reachCoverageStart                 DateTime?
-  followsCoverageStart               DateTime?
+  reachWeekCoverageStart             DateTime?
+  reachDays28CoverageStart           DateTime?
+  followerCountCoverageStart         DateTime?
   accountInsightsLastSyncedAt        DateTime?
   accountInsightsBackfillCompletedAt DateTime?
   accountInsightsLastError           String?
@@ -234,17 +244,18 @@ model SocialPost {
 }
 
 model SocialInsightSnapshot {
-  id           String           @id @default(cuid())
+  id           String            @id @default(cuid())
   connectionId String
   metric       String
+  periodType   InsightPeriodType @default(DAY)
   periodStart  DateTime
   periodEnd    DateTime
   value        Float
-  capturedAt   DateTime         @default(now())
-  connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  capturedAt   DateTime          @default(now())
+  connection   SocialConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
-  @@unique([connectionId, metric, periodStart, periodEnd])
-  @@index([connectionId, periodStart, periodEnd])
+  @@unique([connectionId, metric, periodType, periodStart, periodEnd])
+  @@index([connectionId, periodType, periodStart, periodEnd])
 }
 
 model SyncJob {

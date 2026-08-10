@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { InsightPeriodType } from "@prisma/client";
 import { db } from "@/lib/db";
 import { requireFeature } from "@/lib/access";
 import { completeDailySeries } from "@/lib/report-data";
@@ -17,7 +18,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const metrics = post.metrics as Record<string, number>;
     return { ...post, isCollaborative: post.mediaSource === "COLLABORATIVE", score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
   }).sort((left, right) => right.score - left.score);
-  const snapshots = await db.socialInsightSnapshot.findMany({ where: { connection: { clientId }, metric: "follows", periodEnd: { gte: since, ...(until ? { lte: until } : {}) } }, orderBy: { periodEnd: "asc" } });
+  const snapshots = await db.socialInsightSnapshot.findMany({ where: { connection: { clientId }, metric: "follower_count", periodType: InsightPeriodType.DAY, periodEnd: { gte: since, ...(until ? { lte: until } : {}) } }, orderBy: { periodEnd: "asc" } });
   const followerEntries = [...snapshots.reduce((days, snapshot) => { const day = snapshot.periodEnd.toISOString().slice(0, 10); days.set(day, (days.get(day) ?? 0) + snapshot.value); return days; }, new Map<string, number>()).entries()];
   const postFollowerEntries = [...ranked.map((post) => ({ ...post, metrics: post.metrics as Record<string, number> })).filter((post) => (post.metrics.follows ?? 0) > 0).reduce((days, post) => { const day = post.publishedAt.toISOString().slice(0, 10); days.set(day, (days.get(day) ?? 0) + (post.metrics.follows ?? 0)); return days; }, new Map<string, number>()).entries()];
   const series = followerEntries.length > 0 ? followerEntries : postFollowerEntries;

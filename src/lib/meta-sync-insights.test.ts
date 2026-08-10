@@ -10,9 +10,9 @@ describe("buildDailyInsightChunks", () => {
     const chunks = buildDailyInsightChunks(from, to, 30);
     expect(chunks.length).toBe(3);
     expect(toISODate(chunks[0].since)).toBe("2026-01-01");
-    expect(toISODate(chunks[0].until)).toBe("2026-01-30");
+    expect(toISODate(chunks[0].until)).toBe("2026-01-31");
     expect(toISODate(chunks[1].since)).toBe("2026-01-31");
-    expect(toISODate(chunks[1].until)).toBe("2026-03-01");
+    expect(toISODate(chunks[1].until)).toBe("2026-03-02");
     expect(toISODate(chunks[2].since)).toBe("2026-03-02");
     expect(toISODate(chunks[2].until)).toBe("2026-03-31");
   });

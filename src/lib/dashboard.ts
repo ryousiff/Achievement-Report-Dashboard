@@ -1,4 +1,4 @@
-import { ReportStatus } from "@prisma/client";
+import { InsightPeriodType, ReportStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { completeDailySeries } from "@/lib/report-data";
 
@@ -78,7 +78,7 @@ export async function reachSeries(days = 30) {
   // Prefer Meta's account-level daily reach snapshots (unique accounts reached per day) over summing per-post reach,
   // which double-counts people reached by more than one post and inflates totals vs. Meta's own numbers.
   const snapshots = await db.socialInsightSnapshot.findMany({
-    where: { metric: "reach", periodEnd: { gte: periodStart, lte: periodEnd } },
+    where: { metric: "reach", periodType: InsightPeriodType.DAY, periodEnd: { gte: periodStart, lte: periodEnd } },
     select: { periodEnd: true, value: true },
   });
   const dayTotals = new Map<string, number>();

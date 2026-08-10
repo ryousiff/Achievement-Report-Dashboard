@@ -78,7 +78,7 @@ export class MetaSyncError extends ConnectorError {
   ) { super(message, metaCode, retryAfterMs); }
 }
 
-async function graph<T>(path: string, token: string, parameters: Record<string, string>) {
+export async function graph<T>(path: string, token: string, parameters: Record<string, string>) {
   const execute = async () => {
     const url = new URL(`${graphUrl}/${path}`);
     Object.entries({ ...parameters, access_token: token }).forEach(([key, value]) => url.searchParams.set(key, value));

@@ -1,7 +1,8 @@
-import { BackfillStatus, SyncJobStatus, SyncJobType } from "@prisma/client";
+import { BackfillStatus, InsightPeriodType, SyncJobStatus, SyncJobType } from "@prisma/client";
 import { db } from "@/lib/db";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
+import { periodAccountReach } from "@/lib/report-data";
 
 export type CoverageStatus = "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" | "FAILED";
 
@@ -9,12 +10,17 @@ export type MetricCoverage = { from: Date | null; to: Date | null; complete: boo
 
 export type PostInsightCoverage = { availableMetrics: string[]; missingMetrics: string[] };
 
+export type ReachCoverageStatus = "DAILY_COMPLETE" | "DAILY_PARTIAL" | "PERIOD_AVAILABLE" | "PERIOD_ESTIMATED" | "DAYS_28_AVAILABLE" | "PERIOD_UNAVAILABLE";
+
 export type ReportCoverage = {
   status: CoverageStatus;
   mediaCoverage: MetricCoverage;
   postInsightCoverage: PostInsightCoverage;
   reachCoverage: MetricCoverage;
+  reach28DayCoverage: MetricCoverage;
+  followerCountCoverage: MetricCoverage;
   followsCoverage: MetricCoverage;
+  reachStatus: ReachCoverageStatus;
   storyCoverage: { status: "NOT_COLLECTED" };
   historicalBackfillStatus: BackfillStatus;
   collaborativeBackfillStatus: BackfillStatus;
@@ -32,6 +38,13 @@ function toISODate(date: Date) {
 
 function startOfDayUTC(date: Date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function endOfDayUTC(date: Date) {
+  const d = startOfDayUTC(date);
+  d.setUTCDate(d.getUTCDate() + 1);
+  d.setUTCMilliseconds(d.getUTCMilliseconds() - 1);
+  return d;
 }
 
 function daysBetweenInclusive(from: Date, to: Date) {
@@ -54,11 +67,14 @@ function buildMissingRange(start: Date, end: Date, reason: string): { start: str
   return { start: toISODate(start), end: toISODate(end), reason };
 }
 
+
+
 export async function getCoverage(connectionId: string, periodStart: Date, periodEnd: Date): Promise<ReportCoverage> {
   const connection = await db.socialConnection.findUnique({
     where: { id: connectionId },
     select: {
       id: true,
+      clientId: true,
       historicalBackfillStatus: true,
       historicalBackfillStart: true,
       historicalBackfillLastError: true,
@@ -66,7 +82,9 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
       collaborativeBackfillStart: true,
       collaborativeBackfillLastError: true,
       reachCoverageStart: true,
-      followsCoverageStart: true,
+      reachWeekCoverageStart: true,
+      reachDays28CoverageStart: true,
+      followerCountCoverageStart: true,
       accountInsightsLastSyncedAt: true,
       accountInsightsBackfillCompletedAt: true,
       accountInsightsLastError: true,
@@ -79,7 +97,10 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     mediaCoverage: { from: null, to: null, complete: false },
     postInsightCoverage: { availableMetrics: [], missingMetrics: [] },
     reachCoverage: { from: null, to: null, complete: false },
+    reach28DayCoverage: { from: null, to: null, complete: false },
+    followerCountCoverage: { from: null, to: null, complete: false },
     followsCoverage: { from: null, to: null, complete: false },
+    reachStatus: "PERIOD_UNAVAILABLE",
     storyCoverage: { status: "NOT_COLLECTED" },
     historicalBackfillStatus: BackfillStatus.NOT_STARTED,
     collaborativeBackfillStatus: BackfillStatus.NOT_STARTED,
@@ -147,21 +168,61 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   }
 
   // Reach/follows daily snapshot coverage
-  async function insightCoverage(metric: "reach" | "follows") {
+  async function insightCoverage(metric: string, periodType: InsightPeriodType) {
     const snapshots = await db.socialInsightSnapshot.findMany({
-      where: { connectionId, metric, periodEnd: { gte: periodStart, lte: periodEnd } },
+      where: { connectionId, metric, periodType, periodEnd: { gte: startOfDayUTC(periodStart), lte: endOfDayUTC(periodEnd) } },
       select: { periodEnd: true },
     });
     const days = new Set(snapshots.map((snapshot) => toISODate(snapshot.periodEnd)));
     const expectedDays = daysBetweenInclusive(periodStart, periodEnd);
     const complete = days.size >= expectedDays;
-    const from = metric === "reach" ? connection!.reachCoverageStart : connection!.followsCoverageStart;
+    const from =
+      metric === "reach" && periodType === InsightPeriodType.DAY
+        ? connection!.reachCoverageStart
+        : metric === "reach" && periodType === InsightPeriodType.WEEK
+          ? connection!.reachWeekCoverageStart
+          : metric === "reach" && periodType === InsightPeriodType.DAYS_28
+            ? connection!.reachDays28CoverageStart
+            : metric === "follower_count"
+              ? connection!.followerCountCoverageStart
+              : null;
     const maxPeriodEnd = snapshots.length ? new Date(Math.max(...snapshots.map((snapshot) => snapshot.periodEnd.valueOf()))) : null;
     return { from, to: maxPeriodEnd, complete, days: days.size, expectedDays };
   }
 
-  const reach = await insightCoverage("reach");
-  const follows = await insightCoverage("follows");
+  const reachDaily = await insightCoverage("reach", InsightPeriodType.DAY);
+  const reach28Day = await insightCoverage("reach", InsightPeriodType.DAYS_28);
+  const followerCount = await insightCoverage("follower_count", InsightPeriodType.DAY);
+
+  // Is there a 7-day or 28-day Reach window ending at the end of this report period?
+  // These are the only legitimately API-provided unique-Reach values that may exist
+  // even when the full calendar month (30/31 days) does not.
+  const days28AtPeriodEnd = await db.socialInsightSnapshot.findMany({
+    take: 1,
+    where: {
+      connectionId,
+      metric: "reach",
+      periodType: InsightPeriodType.DAYS_28,
+      periodEnd: { gte: startOfDayUTC(periodEnd), lte: endOfDayUTC(periodEnd) },
+    },
+    select: { value: true },
+  });
+  const hasDays28AtPeriodEnd = days28AtPeriodEnd.length > 0;
+
+  // Use the same Reach resolver the report builder uses: total_value for <=30 days,
+  // overlapping-window estimate for 31 days. Never rely on summed daily snapshots.
+  const reach = await periodAccountReach(connection.clientId, periodStart, periodEnd);
+  let reachStatus: ReachCoverageStatus = "PERIOD_UNAVAILABLE";
+  let periodReachValue: number | null = reach.value;
+  if (reach.value !== null) {
+    reachStatus = reach.accuracy === "ESTIMATED" ? "PERIOD_ESTIMATED" : "PERIOD_AVAILABLE";
+  } else if (hasDays28AtPeriodEnd) {
+    reachStatus = "DAYS_28_AVAILABLE";
+  } else if (reachDaily.complete) {
+    reachStatus = "DAILY_COMPLETE";
+  } else if (reachDaily.days > 0) {
+    reachStatus = "DAILY_PARTIAL";
+  }
 
   // Post-level insight coverage for the requested period
   const posts = await db.socialPost.findMany({
@@ -220,29 +281,31 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     missingRanges.push(buildMissingRange(periodStart, periodEnd, "مزامنة المنشورات التعاونية غير مكتملة."));
   }
 
-  if (!reach.complete) {
-    if (!connection.reachCoverageStart) {
-      warnings.push("لا تتوفر بيانات وصول يومية للحساب في هذه الفترة.");
-      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات وصول يومية متزامنة."));
-    } else if (connection.reachCoverageStart > periodStart) {
-      const end = new Date(connection.reachCoverageStart.valueOf() - 1);
-      const cappedEnd = end > periodEnd ? periodEnd : end;
-      missingRanges.push(buildMissingRange(periodStart, cappedEnd, "بيانات الوصول اليومية غير متاحة قبل هذا التاريخ."));
-      warnings.push(`تغطية الوصول تبدأ من ${toISODate(connection.reachCoverageStart)}؛ قد تكون بداية الفترة غير مكتملة.`);
+  if (reachStatus === "PERIOD_UNAVAILABLE") {
+    if (reachDaily.days > 0) {
+      warnings.push("بيانات الوصول الفريدة لهذه الفترة غير مكتملة.");
+      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا يوجد Reach فريد للفترة بالكامل في Meta API؛ متاح فقط Reach يومي أو 28 يوم."));
     } else {
-      warnings.push("بيانات الوصول اليومية ناقصة لبعض أيام الفترة.");
+      warnings.push("لا تتوفر بيانات وصول للحساب في هذه الفترة.");
+      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات وصول متزامنة."));
     }
+  } else if (reachStatus === "PERIOD_ESTIMATED") {
+    warnings.push(reach.tooltip ?? "Reach قيمة تقديرية؛ Meta API لا يوفر نافذة وصول فريدة مباشرة لمدة 31 يوماً.");
+  } else if (reachStatus === "DAILY_PARTIAL") {
+    warnings.push("بيانات الوصول اليومية ناقصة لبعض أيام الفترة.");
+  } else if (reachStatus === "DAYS_28_AVAILABLE" && !periodReachValue) {
+    warnings.push("بيانات الوصول الفريدة للفترة بالكامل غير متاحة؛ متاح Reach لآخر 28 يوم فقط.");
   }
 
-  if (!follows.complete) {
-    if (!connection.followsCoverageStart) {
+  if (!followerCount.complete) {
+    if (!connection.followerCountCoverageStart) {
       warnings.push("لا تتوفر بيانات متابعين جدد يومية للحساب في هذه الفترة.");
       missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات متابعين يومية متزامنة."));
-    } else if (connection.followsCoverageStart > periodStart) {
-      const end = new Date(connection.followsCoverageStart.valueOf() - 1);
+    } else if (connection.followerCountCoverageStart > periodStart) {
+      const end = new Date(connection.followerCountCoverageStart.valueOf() - 1);
       const cappedEnd = end > periodEnd ? periodEnd : end;
       missingRanges.push(buildMissingRange(periodStart, cappedEnd, "بيانات المتابعين اليومية غير متاحة قبل هذا التاريخ."));
-      warnings.push(`تغطية المتابعين تبدأ من ${toISODate(connection.followsCoverageStart)}؛ قد تكون بداية الفترة غير مكتملة.`);
+      warnings.push(`تغطية المتابعين تبدأ من ${toISODate(connection.followerCountCoverageStart)}؛ قد تكون بداية الفترة غير مكتملة.`);
     } else {
       warnings.push("بيانات المتابعين اليومية ناقصة لبعض أيام الفترة.");
     }
@@ -254,7 +317,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
 
   // Final status
   let status: CoverageStatus;
-  const allComplete = mediaComplete && reach.complete && follows.complete && insightsComplete;
+  const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerCount.complete && insightsComplete;
 
   const anyBackfillFailed =
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
@@ -267,12 +330,12 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   } else if (activeBackfill && !mediaComplete) {
     status = "SYNCING";
     warnings.unshift("جارٍ تحميل البيانات التاريخية. أعدي فتح التقرير أو تحديث البيانات لاحقاً.");
-  } else if (activeInsights && (!reach.complete || !follows.complete)) {
+  } else if (activeInsights && reachStatus !== "PERIOD_AVAILABLE" && !followerCount.complete) {
     status = "SYNCING";
     warnings.unshift("جارٍ تحميل بيانات الوصول/المتابعين اليومية.");
   } else if (allComplete) {
     status = "COMPLETE";
-  } else if (hasAnyPost || reach.days > 0 || follows.days > 0 || postsInPeriod._count > 0) {
+  } else if (hasAnyPost || reachDaily.days > 0 || followerCount.days > 0 || postsInPeriod._count > 0) {
     status = "PARTIAL";
   } else {
     status = "UNAVAILABLE";
@@ -282,8 +345,11 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     status,
     mediaCoverage: { from: mediaFrom, to: mediaTo, complete: mediaComplete },
     postInsightCoverage: { availableMetrics, missingMetrics },
-    reachCoverage: { from: reach.from, to: reach.to, complete: reach.complete },
-    followsCoverage: { from: follows.from, to: follows.to, complete: follows.complete },
+    reachCoverage: { from: reachDaily.from, to: reachDaily.to, complete: reachDaily.complete },
+    reach28DayCoverage: { from: reach28Day.from, to: reach28Day.to, complete: reach28Day.complete },
+    followerCountCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },
+    followsCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },
+    reachStatus,
     storyCoverage: { status: "NOT_COLLECTED" },
     historicalBackfillStatus: connection.historicalBackfillStatus,
     collaborativeBackfillStatus: connection.collaborativeBackfillStatus,
