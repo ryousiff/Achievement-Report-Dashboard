@@ -1,7 +1,7 @@
 import { BackfillStatus, Platform, SyncJobStatus, SyncJobType, SyncRunStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ConnectorError, getConnectorForPlatform } from "@/lib/connectors";
-import { runHistoricalBackfillChunk, runIncrementalSync, runRecentInsightRefresh } from "@/lib/meta-sync";
+import { runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, runIncrementalSync, runRecentInsightRefresh } from "@/lib/meta-sync";
 import { getHistoricalBackfillConfig, getSchedulerConfig } from "@/lib/env";
 import { logError, logEvent } from "@/lib/observability";
 
@@ -36,14 +36,15 @@ async function enqueueJob(connectionId: string, type: SyncJobType, runAfter?: Da
 export async function enqueueClientSync(clientId: string) {
   const connections = await db.socialConnection.findMany({
     where: { clientId },
-    select: { id: true, platform: true, lastSuccessfulSyncAt: true, historicalBackfillStatus: true },
+    select: { id: true, platform: true, lastSuccessfulSyncAt: true, historicalBackfillStatus: true, collaborativeBackfillStatus: true },
   });
   const jobs = await Promise.all(connections.map(async (connection) => {
     const connector = getConnectorForPlatform(connection.platform);
     if (!connector || !connector.isImplemented) return null;
     if (connection.platform === Platform.INSTAGRAM) await enqueueJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC);
-    if (connection.platform === Platform.INSTAGRAM && connection.historicalBackfillStatus === BackfillStatus.NOT_STARTED && !connection.lastSuccessfulSyncAt) {
-      return enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+    if (connection.platform === Platform.INSTAGRAM && connection.historicalBackfillStatus === BackfillStatus.NOT_STARTED && connection.collaborativeBackfillStatus === BackfillStatus.NOT_STARTED && !connection.lastSuccessfulSyncAt) {
+      await enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+      return enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
     }
     return enqueueJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC);
   }));
@@ -54,14 +55,50 @@ export async function enqueueClientSync(clientId: string) {
  * backfill for a connection regardless of whether it already has data from the old 90-day sync. Safe to
  * call repeatedly: a job already QUEUED/RUNNING for this connection+type is reused, not duplicated. */
 export async function enqueueHistoricalBackfill(connectionId: string) {
-  const connection = await db.socialConnection.findUnique({ where: { id: connectionId }, select: { historicalBackfillStatus: true } });
+  const connection = await db.socialConnection.findUnique({
+    where: { id: connectionId },
+    select: { historicalBackfillStatus: true, collaborativeBackfillStatus: true },
+  });
   if (!connection) throw new Error("Connection not found.");
-  if (connection.historicalBackfillStatus === BackfillStatus.RUNNING) {
-    const active = await hasActiveJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+
+  const ownedIncomplete = connection.historicalBackfillStatus !== BackfillStatus.COMPLETED;
+  const collabIncomplete = connection.collaborativeBackfillStatus !== BackfillStatus.COMPLETED;
+  if (!ownedIncomplete && !collabIncomplete) throw new Error("Historical sync has already completed for this connection.");
+
+  if (ownedIncomplete) {
+    if (connection.historicalBackfillStatus === BackfillStatus.RUNNING) {
+      const active = await hasActiveJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+      if (active) return active;
+    }
+    return enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+  }
+
+  // Owned backfill is complete but the collaborative backfill is not — this is the migration path for
+  // connections that finished historical backfill before collaborative-media support existed.
+  if (connection.collaborativeBackfillStatus === BackfillStatus.RUNNING) {
+    const active = await hasActiveJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
     if (active) return active;
   }
-  if (connection.historicalBackfillStatus === BackfillStatus.COMPLETED) throw new Error("Historical sync has already completed for this connection.");
-  return enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+  return enqueueJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+}
+
+/** One-time migration helper for all existing Instagram connections: any connection whose owned backfill
+ * already finished but that has not yet completed a collaborative backfill becomes eligible for one without
+ * requiring an admin to disconnect and reconnect the account. */
+export async function reconcileAllHistoricalCollaborativeBackfills() {
+  const connections = await db.socialConnection.findMany({
+    where: { platform: Platform.INSTAGRAM, historicalBackfillStatus: BackfillStatus.COMPLETED, collaborativeBackfillStatus: { not: BackfillStatus.COMPLETED } },
+    select: { id: true, historicalBackfillStart: true },
+  });
+  const jobs = [];
+  for (const connection of connections) {
+    await db.socialConnection.update({
+      where: { id: connection.id },
+      data: { collaborativeBackfillStatus: BackfillStatus.NOT_STARTED, collaborativeBackfillStart: connection.historicalBackfillStart },
+    });
+    jobs.push(await enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL));
+  }
+  return jobs;
 }
 
 /** Atomically claims the daily-auto-sync "slot" using the Setting table as a distributed lock, the same
@@ -102,7 +139,9 @@ export async function runDueDailyClientSync() {
 
 function delayFor(attempts: number, retryAfterMs?: number) {
   const config = getHistoricalBackfillConfig();
-  const base = retryAfterMs ?? Math.min(60 * 60 * 1000, config.syncRetryBaseDelayMs * 2 ** Math.max(0, attempts - 1));
+  const base = retryAfterMs !== undefined
+    ? Math.min(60 * 60 * 1000, retryAfterMs * attempts) // rate-limited jobs back off in proportion to the platform's suggested wait
+    : Math.min(60 * 60 * 1000, config.syncRetryBaseDelayMs * 2 ** Math.max(0, attempts - 1));
   const jitter = base * (Math.random() * 0.4 - 0.2); // +/-20%
   return Math.max(1000, Math.round(base + jitter));
 }
@@ -124,6 +163,7 @@ async function recoverStaleJobs() {
 async function runJob(connectionId: string, platform: Platform, type: SyncJobType) {
   if (platform === Platform.INSTAGRAM) {
     if (type === SyncJobType.HISTORICAL_MEDIA_BACKFILL) return runHistoricalBackfillChunk(connectionId);
+    if (type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) return runHistoricalCollaborativeBackfillChunk(connectionId);
     if (type === SyncJobType.RECENT_POST_INSIGHT_REFRESH) return runRecentInsightRefresh(connectionId);
     if (type === SyncJobType.INCREMENTAL_MEDIA_SYNC) return runIncrementalSync(connectionId);
     if (type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC) {
@@ -181,6 +221,10 @@ export async function processNextSyncJob() {
       const updated = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { historicalBackfillStatus: true } });
       if (updated?.historicalBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
     }
+    if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) {
+      const updated = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { collaborativeBackfillStatus: true } });
+      if (updated?.collaborativeBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+    }
     return { id: job.id, status: "succeeded", posts: result.posts };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sync failed.";
@@ -194,6 +238,7 @@ export async function processNextSyncJob() {
     const connectionUpdate: Record<string, unknown> = { syncLockedUntil: null };
     if (job.type === SyncJobType.INCREMENTAL_MEDIA_SYNC) { connectionUpdate.lastFailedSyncAt = now; connectionUpdate.lastFailureReason = message; connectionUpdate.lastIncrementalSyncError = message; }
     if (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL && failed) { connectionUpdate.historicalBackfillStatus = BackfillStatus.FAILED; connectionUpdate.historicalBackfillLastError = message; connectionUpdate.historicalBackfillRetryCount = { increment: 1 }; }
+    if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL && failed) { connectionUpdate.collaborativeBackfillStatus = BackfillStatus.FAILED; connectionUpdate.collaborativeBackfillLastError = message; connectionUpdate.collaborativeBackfillRetryCount = { increment: 1 }; }
     if (job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC) connectionUpdate.accountInsightsLastError = message;
     await db.$transaction([
       db.syncRun.update({ where: { id: run.id }, data: { status: SyncRunStatus.FAILED, finishedAt: now, durationMs: Date.now() - startedAt, errorCode, errorMessage: message } }),

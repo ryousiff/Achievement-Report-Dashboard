@@ -15,7 +15,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const posts = await db.socialPost.findMany({ where: { connection: { clientId }, publishedAt: { gte: since, ...(until ? { lte: until } : {}) } }, orderBy: { publishedAt: "desc" }, take: 100 });
   const ranked = posts.map((post) => {
     const metrics = post.metrics as Record<string, number>;
-    return { ...post, score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
+    return { ...post, isCollaborative: post.mediaSource === "COLLABORATIVE", score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
   }).sort((left, right) => right.score - left.score);
   const snapshots = await db.socialInsightSnapshot.findMany({ where: { connection: { clientId }, metric: "follows", periodEnd: { gte: since, ...(until ? { lte: until } : {}) } }, orderBy: { periodEnd: "asc" } });
   const followerEntries = [...snapshots.reduce((days, snapshot) => { const day = snapshot.periodEnd.toISOString().slice(0, 10); days.set(day, (days.get(day) ?? 0) + snapshot.value); return days; }, new Map<string, number>()).entries()];

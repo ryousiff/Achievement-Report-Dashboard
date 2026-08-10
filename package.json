@@ -10,7 +10,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
-    "worker": "tsx src/worker.ts",
+    "worker": "tsx watch src/worker.ts",
     "test": "vitest run"
   },
   "repository": {

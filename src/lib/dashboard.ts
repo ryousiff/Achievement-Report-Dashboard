@@ -2,6 +2,16 @@ import { ReportStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { completeDailySeries } from "@/lib/report-data";
 
+export function deduplicateByExternalPostId<T extends { externalPostId?: string | null }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (!item.externalPostId) return true;
+    if (seen.has(item.externalPostId)) return false;
+    seen.add(item.externalPostId);
+    return true;
+  });
+}
+
 export function startOfToday(daysAgo = 0) {
   const date = new Date();
   date.setUTCDate(date.getUTCDate() - daysAgo);
@@ -77,9 +87,9 @@ export async function reachSeries(days = 30) {
   } else {
     const posts = await db.socialPost.findMany({
       where: { publishedAt: { gte: periodStart, lte: periodEnd } },
-      select: { publishedAt: true, metrics: true, metricAvailability: true },
+      select: { publishedAt: true, externalPostId: true, metrics: true, metricAvailability: true },
     });
-    const entries = posts
+    const entries = deduplicateByExternalPostId(posts)
       .filter((post) => (post.metricAvailability as Record<string, string> | null)?.reach === "returned" || typeof (post.metrics as Record<string, number>).reach === "number")
       .map((post) => {
         const day = post.publishedAt.toISOString().slice(0, 10);

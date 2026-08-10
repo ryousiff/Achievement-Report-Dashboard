@@ -55,6 +55,7 @@ enum SyncRunStatus {
 enum SyncJobType {
   INCREMENTAL_MEDIA_SYNC
   HISTORICAL_MEDIA_BACKFILL
+  HISTORICAL_COLLABORATIVE_BACKFILL
   RECENT_POST_INSIGHT_REFRESH
   DAILY_ACCOUNT_INSIGHT_SYNC
   STORY_SYNC
@@ -66,6 +67,11 @@ enum BackfillStatus {
   PARTIAL
   COMPLETED
   FAILED
+}
+
+enum MediaSource {
+  OWNED
+  COLLABORATIVE
 }
 
 model User {
@@ -168,6 +174,17 @@ model SocialConnection {
   historicalBackfillRetryCount     Int            @default(0)
   historicalBackfillProcessedPosts Int            @default(0)
 
+  // Collaborative media backfill state (mirrors the owned backfill above)
+  collaborativeBackfillStatus         BackfillStatus @default(NOT_STARTED)
+  collaborativeBackfillStart          DateTime?
+  collaborativeBackfillCursor         String?
+  collaborativeBackfillPageIndex      Int            @default(0)
+  collaborativeBackfillStartedAt      DateTime?
+  collaborativeBackfillCompletedAt    DateTime?
+  collaborativeBackfillLastError      String?
+  collaborativeBackfillRetryCount     Int            @default(0)
+  collaborativeBackfillProcessedPosts Int            @default(0)
+
   // Incremental sync state, distinct from the historical backfill above
   lastIncrementalSyncAt    DateTime?
   lastIncrementalSyncError String?
@@ -203,6 +220,8 @@ model SocialPost {
   thumbnailUrl            String?
   permalink               String?
   publishedAt             DateTime
+  mediaSource             MediaSource @default(OWNED)
+  mediaMetadata           Json?
   metrics                 Json
   metricAvailability      Json?
   metricAvailabilityState Json?

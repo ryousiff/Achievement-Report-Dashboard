@@ -98,12 +98,12 @@ export async function resolveInstagramUrl(clientId: string, getConnection: () =>
         // Insights may be unavailable for some media types; keep basic metrics.
       }
       metrics.total_interactions ??= (metrics.likes ?? 0) + (metrics.comments ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0);
-      return { id: `instagram-${item.id}`, externalPostId: item.id, caption: item.caption ?? null, mediaType: item.media_type ?? "IMAGE", mediaUrl: item.media_url ?? null, thumbnailUrl: item.thumbnail_url ?? item.media_url ?? null, permalink: item.permalink ?? null, publishedAt: item.timestamp ? new Date(item.timestamp).toISOString() : new Date().toISOString(), metrics, score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
+      return { id: `instagram-${item.id}`, externalPostId: item.id, caption: item.caption ?? null, mediaType: item.media_type ?? "IMAGE", mediaUrl: item.media_url ?? null, thumbnailUrl: item.thumbnail_url ?? item.media_url ?? null, permalink: item.permalink ?? null, publishedAt: item.timestamp ? new Date(item.timestamp).toISOString() : new Date().toISOString(), metrics, isCollaborative: false, score: (metrics.total_interactions ?? 0) + (metrics.shares ?? 0) + (metrics.saved ?? 0) + (metrics.follows ?? 0) };
     }
 
     // For public collaboration or external posts, build a manual post from oEmbed data.
     if (oembedInfo?.thumbnail_url) {
-      return { id: `instagram-${oembedInfo.media_id ?? shortcode}`, externalPostId: oembedInfo.media_id ?? shortcode, caption: oembedInfo.title ?? null, mediaType: "IMAGE", mediaUrl: oembedInfo.thumbnail_url, thumbnailUrl: oembedInfo.thumbnail_url, permalink: url, publishedAt: new Date().toISOString(), metrics: {}, score: 0 };
+      return { id: `instagram-${oembedInfo.media_id ?? shortcode}`, externalPostId: oembedInfo.media_id ?? shortcode, caption: oembedInfo.title ?? null, mediaType: "IMAGE", mediaUrl: oembedInfo.thumbnail_url, thumbnailUrl: oembedInfo.thumbnail_url, permalink: url, publishedAt: new Date().toISOString(), metrics: {}, isCollaborative: false, score: 0 };
     }
 
     console.error("POST NOT FOUND:", { shortcode, clientId, externalAccountId: connection.externalAccountId });

@@ -14,7 +14,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
 
   const [client, accounts] = await Promise.all([
     db.client.findUnique({ where: { id: clientId }, select: { id: true, logoUrl: true } }),
-    db.metaAccount.findMany({ where: { id: { in: accountIds }, profile: { createdById: user.id } } }),
+    db.metaAccount.findMany({ where: { id: { in: accountIds } } }),
   ]);
   if (!client) return NextResponse.json({ error: "Client not found." }, { status: 404 });
   if (accounts.length !== accountIds.length) return NextResponse.json({ error: "One or more accounts are unavailable." }, { status: 400 });

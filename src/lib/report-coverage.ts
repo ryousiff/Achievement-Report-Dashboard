@@ -17,6 +17,7 @@ export type ReportCoverage = {
   followsCoverage: MetricCoverage;
   storyCoverage: { status: "NOT_COLLECTED" };
   historicalBackfillStatus: BackfillStatus;
+  collaborativeBackfillStatus: BackfillStatus;
   missingRanges: Array<{ start: string; end: string; reason: string }>;
   warnings: string[];
 };
@@ -61,6 +62,9 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
       historicalBackfillStatus: true,
       historicalBackfillStart: true,
       historicalBackfillLastError: true,
+      collaborativeBackfillStatus: true,
+      collaborativeBackfillStart: true,
+      collaborativeBackfillLastError: true,
       reachCoverageStart: true,
       followsCoverageStart: true,
       accountInsightsLastSyncedAt: true,
@@ -78,6 +82,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     followsCoverage: { from: null, to: null, complete: false },
     storyCoverage: { status: "NOT_COLLECTED" },
     historicalBackfillStatus: BackfillStatus.NOT_STARTED,
+    collaborativeBackfillStatus: BackfillStatus.NOT_STARTED,
     missingRanges: [],
     warnings: ["لا يوجد ربط بإنستغرام لهذا العميل."],
   };
@@ -89,10 +94,17 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     select: { type: true, status: true },
   });
 
-  const activeBackfill =
+  const activeOwnedBackfill =
     connection.historicalBackfillStatus === BackfillStatus.RUNNING ||
     connection.historicalBackfillStatus === BackfillStatus.PARTIAL ||
     activeJobs.some((job) => job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+
+  const activeCollabBackfill =
+    connection.collaborativeBackfillStatus === BackfillStatus.RUNNING ||
+    connection.collaborativeBackfillStatus === BackfillStatus.PARTIAL ||
+    activeJobs.some((job) => job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+
+  const activeBackfill = activeOwnedBackfill || activeCollabBackfill;
 
   const activeInsights = activeJobs.some((job) => job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC);
 
@@ -110,15 +122,27 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     _max: { publishedAt: true },
   });
 
-  const backfillStart = connection.historicalBackfillStart ?? calculateBackfillStart(new Date(), getHistoricalBackfillConfig().months);
+  const ownedBackfillStart = connection.historicalBackfillStart ?? calculateBackfillStart(new Date(), getHistoricalBackfillConfig().months);
+  const collabBackfillStart = connection.collaborativeBackfillStart ?? ownedBackfillStart;
+  const backfillStart = ownedBackfillStart < collabBackfillStart ? ownedBackfillStart : collabBackfillStart;
   const mediaFrom = allPostsRange._min.publishedAt;
   const mediaTo = allPostsRange._max.publishedAt;
   const hasAnyPost = Boolean(mediaFrom) && Boolean(mediaTo);
 
+  const backfillComplete =
+    connection.historicalBackfillStatus === BackfillStatus.COMPLETED &&
+    connection.collaborativeBackfillStatus === BackfillStatus.COMPLETED;
+
   let mediaComplete = false;
-  if (connection.historicalBackfillStatus === BackfillStatus.COMPLETED && periodStart >= backfillStart) {
+  if (backfillComplete && periodStart >= backfillStart) {
     mediaComplete = true;
-  } else if (mediaFrom && mediaFrom <= periodStart && connection.lastSuccessfulSyncAt && connection.lastSuccessfulSyncAt >= periodEnd) {
+  } else if (
+    mediaFrom &&
+    mediaFrom <= periodStart &&
+    connection.lastSuccessfulSyncAt &&
+    connection.lastSuccessfulSyncAt >= periodEnd &&
+    connection.collaborativeBackfillStatus === BackfillStatus.COMPLETED
+  ) {
     mediaComplete = true;
   }
 
@@ -191,6 +215,11 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     }
   }
 
+  if (connection.collaborativeBackfillStatus !== BackfillStatus.COMPLETED) {
+    warnings.push("مزامنة المنشورات التعاونية غير مكتملة لهذه الفترة.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, "مزامنة المنشورات التعاونية غير مكتملة."));
+  }
+
   if (!reach.complete) {
     if (!connection.reachCoverageStart) {
       warnings.push("لا تتوفر بيانات وصول يومية للحساب في هذه الفترة.");
@@ -227,9 +256,13 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   let status: CoverageStatus;
   const allComplete = mediaComplete && reach.complete && follows.complete && insightsComplete;
 
-  if (connection.historicalBackfillStatus === BackfillStatus.FAILED) {
+  const anyBackfillFailed =
+    connection.historicalBackfillStatus === BackfillStatus.FAILED ||
+    connection.collaborativeBackfillStatus === BackfillStatus.FAILED;
+
+  if (anyBackfillFailed) {
     status = allComplete ? "PARTIAL" : "FAILED";
-    if (status === "FAILED") warnings.unshift(connection.historicalBackfillLastError ?? "فشل التحميل التاريخي للبيانات.");
+    if (status === "FAILED") warnings.unshift(connection.historicalBackfillLastError ?? connection.collaborativeBackfillLastError ?? "فشل التحميل التاريخي للبيانات.");
     else warnings.unshift("فشل التحميل التاريخي لكن بعض البيانات المتزامنة متاحة.");
   } else if (activeBackfill && !mediaComplete) {
     status = "SYNCING";
@@ -253,6 +286,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     followsCoverage: { from: follows.from, to: follows.to, complete: follows.complete },
     storyCoverage: { status: "NOT_COLLECTED" },
     historicalBackfillStatus: connection.historicalBackfillStatus,
+    collaborativeBackfillStatus: connection.collaborativeBackfillStatus,
     missingRanges,
     warnings,
   };

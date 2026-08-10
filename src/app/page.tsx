@@ -62,6 +62,7 @@ type MediaPost = {
   permalink: string | null;
   publishedAt: string;
   metrics: Record<string, number>;
+  isCollaborative?: boolean;
   score: number;
 };
 type MetricPresentation = "cards" | "line" | "bar";
@@ -2854,6 +2855,7 @@ function MediaBlock({
               {(item.thumbnailUrl ?? item.mediaUrl) && (
                 <img src={item.thumbnailUrl ?? item.mediaUrl ?? ""} alt="" />
               )}
+              {item.isCollaborative && <span className="media-collab-badge">مشترك</span>}
               {onRemove && (
                 <button
                   className="mini media-remove"
@@ -3165,6 +3167,7 @@ function MediaLibrary({
           <button
             className={selected.includes(post.id) ? "selected" : ""}
             key={post.id}
+            style={{ position: "relative" }}
             onClick={() =>
               setSelected((current) =>
                 current.includes(post.id)
@@ -3176,6 +3179,7 @@ function MediaLibrary({
             {(post.thumbnailUrl ?? post.mediaUrl) && (
               <img src={post.thumbnailUrl ?? post.mediaUrl ?? ""} alt="" />
             )}
+            {post.isCollaborative && <span className="media-collab-badge">مشترك</span>}
             <MediaMetrics metrics={post.metrics} />
             <small>{post.caption?.slice(0, 45) || "منشور إنستغرام"}</small>
           </button>
@@ -5430,9 +5434,15 @@ function ConnectedAccounts({
         preview?: typeof systemUserPreview;
         pagesConnected?: number;
         error?: string;
+        errors?: string[];
       };
       if (!response.ok) {
-        setSystemUserError(data.error ?? "تعذر الاتصال بخدمة Meta.");
+        const errorList = data.errors?.length
+          ? data.errors
+          : data.error
+            ? [data.error]
+            : ["تعذر الاتصال بخدمة Meta."];
+        setSystemUserError(errorList.join("\n"));
         return;
       }
       if (!confirm) {
@@ -5541,14 +5551,27 @@ function ConnectedAccounts({
           <textarea
             value={systemUserToken}
             onChange={(event) => {
-              setSystemUserToken(event.target.value);
+              setSystemUserToken(event.target.value.replace(/\s+/g, ""));
               setSystemUserPreview(null);
             }}
-            placeholder="EAAB..."
+            onPaste={(event) => {
+              const pasted = event.clipboardData.getData("text").replace(/\s+/g, "");
+              setSystemUserToken(pasted);
+              setSystemUserPreview(null);
+              event.preventDefault();
+            }}
+            placeholder="الصقي رمز System User هنا (يبدأ بـ EAA...)"
             rows={2}
           />
           {systemUserError && (
-            <small className="client-error">{systemUserError}</small>
+            <div className="system-user-error">
+              <b>تعذر التحقق من الرمز:</b>
+              <ul>
+                {systemUserError.split("\n").map((line, index) => (
+                  <li key={index}>{line}</li>
+                ))}
+              </ul>
+            </div>
           )}
           {!systemUserPreview ? (
             <div className="actions">

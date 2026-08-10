@@ -8,7 +8,7 @@ import { encryptToken } from "@/lib/token-encryption";
 const systemUserProfileName = "Meta Business · Kaan Creative (System user)";
 
 function sanitizeError(error: unknown) {
-  return error instanceof Error ? error.message : "Meta connection failed.";
+  return error instanceof Error ? error.message : "فشل الاتصال بـ Meta.";
 }
 
 // Admin-only: connects Kaan's own Business Portfolio (Pages + Instagram accounts) using a non-expiring
@@ -29,14 +29,18 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
-  const token = typeof body.token === "string" ? body.token.trim() : "";
-  if (!token) return NextResponse.json({ error: "A Meta system-user access token is required." }, { status: 400 });
+  const rawToken = typeof body.token === "string" ? body.token : "";
+  const token = rawToken.replace(/\s+/g, "");
+  if (!token) return NextResponse.json({ error: "يرجى لصق رمز System User من Meta Business Settings." }, { status: 400 });
+  if (!/^EAA[A-Za-z0-9_-]{10,}$/.test(token)) {
+    return NextResponse.json({ error: "النص المُدخل لا يبدو رمز Meta System User صالحاً. يجب أن يبدأ بـ EAA ويحتوي على أحرف وأرقام فقط." }, { status: 400 });
+  }
   const confirm = body.confirm === true;
 
   try {
     const debug = await debugMetaToken(token);
     const issues = validateMetaSystemUserToken(debug);
-    if (issues.length > 0) return NextResponse.json({ error: issues.join(" ") }, { status: 400 });
+    if (issues.length > 0) return NextResponse.json({ errors: issues }, { status: 400 });
 
     const [{ pages, warnings: pageWarnings }, { adAccounts, warnings: adWarnings }] = await Promise.all([
       fetchBusinessManagedPages(token, businessId),
@@ -44,8 +48,11 @@ export async function POST(request: NextRequest) {
     ]);
     const warnings = [...pageWarnings, ...adWarnings];
 
-    if (pages.length === 0 && warnings.length === 0) {
-      return NextResponse.json({ error: "No Pages were found for this Business Portfolio. Confirm the system user was assigned the Pages in Business Settings." }, { status: 400 });
+    if (pages.length === 0) {
+      return NextResponse.json({
+        error: "لم يتم العثور على أي صفحات لهذا Business Portfolio. تأكدي من: (1) أن ReportingSync مُعيّن للصفحات والحسابات في Business Settings، (2) أن الرمز يحمل الأذونات المطلوبة، (3) أن الأصول ليست مملوكة من Business Portfolio آخر.",
+        warnings,
+      }, { status: 400 });
     }
 
     const preview = {
@@ -88,7 +95,11 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     // Never log the token itself — only the error message, same as the OAuth callback's error handling.
     console.error("META SYSTEM USER CONNECT ERROR:", sanitizeError(error));
-    return NextResponse.json({ error: sanitizeError(error) }, { status: 500 });
+    const message = sanitizeError(error);
+    const userMessage = message.includes("debug_token") || message.includes("Network")
+      ? "تعذر التحقق من الرمز عبر Meta. تأكدي من اتصال الإنترنت وحاولي مجدداً."
+      : "تعذر إكمال الربط. الرجاء مراجعة رسالة الخطأ أو سجلات الخادم.";
+    return NextResponse.json({ error: userMessage, detail: message }, { status: 500 });
   }
 }
 
@@ -101,7 +112,7 @@ export async function DELETE(request: NextRequest) {
 
   try {
     const profile = await db.metaProfile.findFirst({ where: { displayName: systemUserProfileName }, orderBy: { createdAt: "desc" }, include: { accounts: { select: { id: true } } } });
-    if (!profile) return NextResponse.json({ error: "No Kaan system-user connection found." }, { status: 404 });
+    if (!profile) return NextResponse.json({ error: "لا يوجد ربط Kaan system-user محلي لإزالته." }, { status: 404 });
 
     const accountIds = profile.accounts.map((account) => account.id);
     await db.$transaction([

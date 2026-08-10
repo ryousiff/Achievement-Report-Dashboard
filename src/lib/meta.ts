@@ -109,15 +109,32 @@ export async function debugMetaToken(token: string): Promise<MetaTokenDebugInfo>
   return data.data;
 }
 
-/** Returns a list of human-readable problems, or an empty array if the token is usable as-is. */
+const scopeLabels: Record<string, string> = {
+  pages_show_list: "عرض قائمة الصفحات",
+  pages_read_engagement: "قراءة تفاعل الصفحات",
+  instagram_basic: "بيانات Instagram الأساسية",
+  instagram_manage_insights: "إدارة إحصائيات Instagram",
+};
+
+/** Returns a list of Arabic human-readable problems, or an empty array if the token is usable as-is. */
 export function validateMetaSystemUserToken(debug: MetaTokenDebugInfo) {
   const issues: string[] = [];
-  if (!debug.is_valid) issues.push("Token is not valid.");
-  if (debug.app_id && debug.app_id !== process.env.META_APP_ID) issues.push("Token was not issued for this Meta app.");
-  if (debug.expires_at) issues.push("Token has an expiration date; generate a non-expiring System User token in Business Settings instead.");
+  if (!debug.is_valid) {
+    issues.push("الرمز غير صالح. تأكدي من نسخ الرمز كاملاً من Business Settings (يبدأ عادةً بـ EAAB).");
+    return issues;
+  }
+  if (debug.app_id && debug.app_id !== process.env.META_APP_ID) {
+    issues.push("الرمز لم يُصدر لتطبيق Kaan reporting dashboard الحالي. تأكدي من اختيار التطبيق الصحيح عند إنشاء رمز System User.");
+  }
+  if (debug.expires_at) {
+    issues.push("الرمز له تاريخ انتهاء صلاحية. أنشئي رمز System User دائم (Never) في Business Settings.");
+  }
   const grantedScopes = new Set(debug.scopes ?? []);
   const missingScopes = REQUIRED_META_SYSTEM_USER_SCOPES.filter((scope) => !grantedScopes.has(scope));
-  if (missingScopes.length > 0) issues.push(`Token is missing required permissions: ${missingScopes.join(", ")}.`);
+  if (missingScopes.length > 0) {
+    const labels = missingScopes.map((scope) => scopeLabels[scope] ?? scope);
+    issues.push(`الرمز يفتقر إلى الأذونات المطلوبة: ${labels.join("، ")}.`);
+  }
   return issues;
 }
 

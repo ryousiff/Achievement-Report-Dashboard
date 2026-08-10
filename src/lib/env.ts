@@ -19,8 +19,10 @@ export function getHistoricalBackfillConfig() {
     accountInsightChunkDays: numberFromEnv("ACCOUNT_INSIGHT_CHUNK_DAYS", 30),
     accountInsightMaxLookbackDays: numberFromEnv("ACCOUNT_INSIGHT_MAX_LOOKBACK_DAYS", 450),
     recentPostRefreshDays: numberFromEnv("RECENT_POST_REFRESH_DAYS", 60),
+    collaborativeReconciliationDays: numberFromEnv("COLLABORATIVE_RECONCILIATION_DAYS", 60),
     syncMaxRetries: numberFromEnv("SYNC_MAX_RETRIES", 5),
     syncRetryBaseDelayMs: numberFromEnv("SYNC_RETRY_BASE_DELAY_MS", 30000),
+    metaSyncMinIntervalMs: numberFromEnv("META_SYNC_MIN_INTERVAL_MS", 500),
   };
 }
 
