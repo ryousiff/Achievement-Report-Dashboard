@@ -2,7 +2,7 @@ import { BackfillStatus, InsightPeriodType, SyncJobStatus, SyncJobType } from "@
 import { db } from "@/lib/db";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
-import { periodAccountReach } from "@/lib/report-data";
+import { periodAccountFollowers, periodAccountReach } from "@/lib/report-data";
 
 export type CoverageStatus = "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" | "FAILED";
 
@@ -11,6 +11,7 @@ export type MetricCoverage = { from: Date | null; to: Date | null; complete: boo
 export type PostInsightCoverage = { availableMetrics: string[]; missingMetrics: string[] };
 
 export type ReachCoverageStatus = "DAILY_COMPLETE" | "DAILY_PARTIAL" | "PERIOD_AVAILABLE" | "PERIOD_ESTIMATED" | "DAYS_28_AVAILABLE" | "PERIOD_UNAVAILABLE";
+export type FollowerCoverageStatus = "DAILY_COMPLETE" | "DAILY_PARTIAL" | "PERIOD_AVAILABLE" | "PERIOD_DERIVED" | "UNAVAILABLE";
 
 export type ReportCoverage = {
   status: CoverageStatus;
@@ -21,6 +22,10 @@ export type ReportCoverage = {
   followerCountCoverage: MetricCoverage;
   followsCoverage: MetricCoverage;
   reachStatus: ReachCoverageStatus;
+  followerStatus: FollowerCoverageStatus;
+  followersGained: number | null;
+  followersLost: number | null;
+  netFollowerGrowth: number | null;
   storyCoverage: { status: "NOT_COLLECTED" };
   historicalBackfillStatus: BackfillStatus;
   collaborativeBackfillStatus: BackfillStatus;
@@ -101,6 +106,10 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     followerCountCoverage: { from: null, to: null, complete: false },
     followsCoverage: { from: null, to: null, complete: false },
     reachStatus: "PERIOD_UNAVAILABLE",
+    followerStatus: "UNAVAILABLE",
+    followersGained: null,
+    followersLost: null,
+    netFollowerGrowth: null,
     storyCoverage: { status: "NOT_COLLECTED" },
     historicalBackfillStatus: BackfillStatus.NOT_STARTED,
     collaborativeBackfillStatus: BackfillStatus.NOT_STARTED,
@@ -224,6 +233,13 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     reachStatus = "DAILY_PARTIAL";
   }
 
+  // Use the same Followers resolver the report builder uses.
+  const followers = await periodAccountFollowers(connection.clientId, periodStart, periodEnd);
+  let followerStatus: FollowerCoverageStatus = "UNAVAILABLE";
+  if (followers.gained !== null && followers.lost !== null) {
+    followerStatus = followers.accuracy === "DERIVED" ? "PERIOD_DERIVED" : "PERIOD_AVAILABLE";
+  }
+
   // Post-level insight coverage for the requested period
   const posts = await db.socialPost.findMany({
     where: { connectionId, publishedAt: { gte: periodStart, lte: periodEnd } },
@@ -297,18 +313,11 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     warnings.push("بيانات الوصول الفريدة للفترة بالكامل غير متاحة؛ متاح Reach لآخر 28 يوم فقط.");
   }
 
-  if (!followerCount.complete) {
-    if (!connection.followerCountCoverageStart) {
-      warnings.push("لا تتوفر بيانات متابعين جدد يومية للحساب في هذه الفترة.");
-      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات متابعين يومية متزامنة."));
-    } else if (connection.followerCountCoverageStart > periodStart) {
-      const end = new Date(connection.followerCountCoverageStart.valueOf() - 1);
-      const cappedEnd = end > periodEnd ? periodEnd : end;
-      missingRanges.push(buildMissingRange(periodStart, cappedEnd, "بيانات المتابعين اليومية غير متاحة قبل هذا التاريخ."));
-      warnings.push(`تغطية المتابعين تبدأ من ${toISODate(connection.followerCountCoverageStart)}؛ قد تكون بداية الفترة غير مكتملة.`);
-    } else {
-      warnings.push("بيانات المتابعين اليومية ناقصة لبعض أيام الفترة.");
-    }
+  if (followerStatus === "UNAVAILABLE") {
+    warnings.push("لا تتوفر بيانات حركة المتابعين (follows_and_unfollows) للفترة المطلوبة.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات follows_and_unfollows للفترة."));
+  } else if (followerStatus === "PERIOD_DERIVED") {
+    warnings.push(followers.tooltip ?? "حركة المتابعين قيمة مركّبة لأن Meta API لا يسمح بنطاق 31 يوم مباشر.");
   }
 
   if (!insightsComplete) {
@@ -317,7 +326,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
 
   // Final status
   let status: CoverageStatus;
-  const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerCount.complete && insightsComplete;
+  const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerStatus === "PERIOD_AVAILABLE" && insightsComplete;
 
   const anyBackfillFailed =
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
@@ -330,7 +339,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   } else if (activeBackfill && !mediaComplete) {
     status = "SYNCING";
     warnings.unshift("جارٍ تحميل البيانات التاريخية. أعدي فتح التقرير أو تحديث البيانات لاحقاً.");
-  } else if (activeInsights && reachStatus !== "PERIOD_AVAILABLE" && !followerCount.complete) {
+  } else if (activeInsights && reachStatus !== "PERIOD_AVAILABLE" && followerStatus === "UNAVAILABLE") {
     status = "SYNCING";
     warnings.unshift("جارٍ تحميل بيانات الوصول/المتابعين اليومية.");
   } else if (allComplete) {
@@ -350,6 +359,10 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     followerCountCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },
     followsCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },
     reachStatus,
+    followerStatus,
+    followersGained: followers.gained,
+    followersLost: followers.lost,
+    netFollowerGrowth: followers.net,
     storyCoverage: { status: "NOT_COLLECTED" },
     historicalBackfillStatus: connection.historicalBackfillStatus,
     collaborativeBackfillStatus: connection.collaborativeBackfillStatus,

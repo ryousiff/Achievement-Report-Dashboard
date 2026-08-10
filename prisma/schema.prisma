@@ -78,6 +78,7 @@ enum InsightPeriodType {
   DAY
   WEEK
   DAYS_28
+  TOTAL_VALUE
 }
 
 model User {

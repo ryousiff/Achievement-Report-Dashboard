@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BackfillStatus, MediaSource } from "@prisma/client";
-import { completeDailySeries, reportPosts, buildStandardReportBlocks, clearReachCache, type ReachResult } from "@/lib/report-data";
+import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, dailyFollowerMovement, currentFollowersCount, clearReachCache, clearFollowersCache, type ReachResult } from "@/lib/report-data";
 
 const mockDb = vi.hoisted(() => ({
   socialPost: { findMany: vi.fn() },
-  socialInsightSnapshot: { findMany: vi.fn() },
+  socialInsightSnapshot: { findMany: vi.fn(), findFirst: vi.fn(), upsert: vi.fn() },
   socialConnection: { findFirst: vi.fn() },
 }));
 
@@ -20,23 +20,58 @@ vi.mock("@/lib/token-encryption", () => mockTokenEncryption);
 
 beforeEach(() => {
   clearReachCache();
+  clearFollowersCache();
   mockDb.socialPost.findMany.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
+  mockDb.socialInsightSnapshot.findFirst.mockReset();
+  mockDb.socialInsightSnapshot.upsert.mockReset();
   mockDb.socialConnection.findFirst.mockReset();
   mockGraph.mockReset();
   mockDecryptToken.mockReset();
 });
 
-function setGraphTotalValue(value: number) {
-  mockGraph.mockResolvedValue({ data: [{ total_value: { value } }] });
+function setGraphReachValue(value: number) {
+  mockGraph.mockImplementation(async (_path: string, _token: string, parameters: Record<string, string>) => {
+    if (parameters.metric === "follows_and_unfollows") {
+      return {
+        data: [{
+          total_value: {
+            breakdowns: [{
+              dimension_keys: ["follow_type"],
+              results: [
+                { dimension_values: ["FOLLOWER"], value },
+                { dimension_values: ["NON_FOLLOWER"], value: Math.floor(value / 2) },
+              ],
+            }],
+          },
+        }],
+      };
+    }
+    return { data: [{ total_value: { value } }] };
+  });
 }
 
-function setGraphTotalValuesByWindow(values: Record<string, number>) {
+function setGraphReachValuesByWindow(values: Record<string, { reach?: number; gained?: number; lost?: number }>) {
   mockGraph.mockImplementation(async (_path: string, _token: string, parameters: Record<string, string>) => {
     const key = `${parameters.since}__${parameters.until}`;
-    const value = values[key] ?? null;
-    if (value === null) return { data: [] };
-    return { data: [{ total_value: { value } }] };
+    const entry = values[key] ?? null;
+    if (entry === null) return { data: [] };
+    if (parameters.metric === "follows_and_unfollows") {
+      return {
+        data: [{
+          total_value: {
+            breakdowns: [{
+              dimension_keys: ["follow_type"],
+              results: [
+                { dimension_values: ["FOLLOWER"], value: entry.gained ?? 0 },
+                { dimension_values: ["NON_FOLLOWER"], value: entry.lost ?? 0 },
+              ],
+            }],
+          },
+        }],
+      };
+    }
+    return { data: [{ total_value: { value: entry.reach ?? 0 } }] };
   });
 }
 
@@ -79,7 +114,7 @@ describe("buildStandardReportBlocks", () => {
     });
     mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
     mockDecryptToken.mockReturnValue("token-123");
-    setGraphTotalValue(300);
+    setGraphReachValue(300);
 
     const blocks = await buildStandardReportBlocks("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-01T23:59:59.999Z"));
     const kpiBlock = blocks.find((block) => block.type === "KPI" && block.title === "أهم الإحصائيات");
@@ -105,13 +140,13 @@ describe("buildStandardReportBlocks", () => {
     mockDecryptToken.mockReturnValue("token-123");
     // A = D1..D30 = 1000, B = D2..D31 = 1100, C = D2..D30 = 900
     // estimate = 1000 + 1100 - 900 = 1200
-    setGraphTotalValuesByWindow({
+    setGraphReachValuesByWindow({
       // A (D1..D30): since 2026-07-01, until 2026-07-31
-      "1782864000__1785456000": 1000,
+      "1782864000__1785456000": { reach: 1000, gained: 502, lost: 360 },
       // B (D2..D31): since 2026-07-02, until 2026-08-01
-      "1782950400__1785542400": 1100,
+      "1782950400__1785542400": { reach: 1100, gained: 499, lost: 364 },
       // C (D2..D30): since 2026-07-02, until 2026-07-31
-      "1782950400__1785456000": 900,
+      "1782950400__1785456000": { reach: 900, gained: 489, lost: 350 },
     });
 
     const blocks = await buildStandardReportBlocks("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
@@ -140,7 +175,7 @@ describe("buildStandardReportBlocks", () => {
     });
     mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
     mockDecryptToken.mockReturnValue("token-123");
-    setGraphTotalValue(150);
+    setGraphReachValue(150);
 
     const blocks = await buildStandardReportBlocks("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-01T23:59:59.999Z"));
     const kpiBlock = blocks.find((block) => block.type === "KPI" && block.title === "أهم الإحصائيات");
@@ -150,5 +185,135 @@ describe("buildStandardReportBlocks", () => {
     const dailySumKpi = kpis.find((kpi) => kpi.id === "daily-reach-sum");
     expect(reachKpi?.value).toBe("150");
     expect(dailySumKpi?.value).toBe("300");
+  });
+
+  it("exposes gained, lost, and net follower movement from follows_and_unfollows", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { id: "p1", externalPostId: "ig-1", caption: "Owned", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-07-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 7 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE" }, mediaSource: MediaSource.OWNED },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.upsert.mockResolvedValue(null);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    setGraphReachValuesByWindow({
+      "1782864000__1785456000": { gained: 502, lost: 360 },
+      "1782950400__1785542400": { gained: 499, lost: 364 },
+      "1782950400__1785456000": { gained: 489, lost: 350 },
+    });
+
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+    const kpiBlock = blocks.find((block) => block.type === "KPI" && block.title === "أهم الإحصائيات");
+    expect(kpiBlock).toBeDefined();
+    const kpis = (kpiBlock!.content as Record<string, unknown>).kpis as Array<{ id: string; value: string; available: boolean; followersAccuracy?: string; followersMethod?: string; badge?: string }>;
+    const gainedKpi = kpis.find((kpi) => kpi.id === "follows");
+    const lostKpi = kpis.find((kpi) => kpi.id === "followers-lost");
+    const netKpi = kpis.find((kpi) => kpi.id === "net-follower-growth");
+    expect(gainedKpi?.value).toBe("512");
+    expect(gainedKpi?.followersMethod).toBe("OVERLAPPING_WINDOWS_COMPOSITION");
+    expect(gainedKpi?.badge).toBe("مركّب");
+    expect(lostKpi?.value).toBe("374");
+    expect(netKpi?.value).toBe("+138");
+  });
+});
+
+describe("periodAccountFollowers", () => {
+  it("maps FOLLOWER to gained and NON_FOLLOWER to lost for <=30 day periods", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockGraph.mockResolvedValue({
+      data: [{
+        total_value: {
+          breakdowns: [{
+            dimension_keys: ["follow_type"],
+            results: [
+              { dimension_values: ["FOLLOWER"], value: 100 },
+              { dimension_values: ["NON_FOLLOWER"], value: 30 },
+            ],
+          }],
+        },
+      }],
+    });
+
+    const result = await periodAccountFollowers("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
+    expect(result.gained).toBe(100);
+    expect(result.lost).toBe(30);
+    expect(result.net).toBe(70);
+    expect(result.accuracy).toBe("EXACT");
+    expect(result.method).toBe("META_TOTAL_VALUE");
+    expect(result.raw?.some((r) => r.dimension === "FOLLOWER" && r.value === 100)).toBe(true);
+    expect(result.raw?.some((r) => r.dimension === "NON_FOLLOWER" && r.value === 30)).toBe(true);
+  });
+
+  it("returns unavailable when the API gives no breakdown", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockGraph.mockResolvedValue({ data: [] });
+
+    const result = await periodAccountFollowers("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
+    expect(result.gained).toBeNull();
+    expect(result.lost).toBeNull();
+    expect(result.method).toBe("UNAVAILABLE");
+  });
+
+  it("composes 31-day gained and lost using overlapping windows", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    setGraphReachValuesByWindow({
+      "1782864000__1785456000": { gained: 502, lost: 360 },
+      "1782950400__1785542400": { gained: 499, lost: 364 },
+      "1782950400__1785456000": { gained: 489, lost: 350 },
+    });
+
+    const result = await periodAccountFollowers("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+    expect(result.gained).toBe(512);
+    expect(result.lost).toBe(374);
+    expect(result.net).toBe(138);
+    expect(result.accuracy).toBe("DERIVED");
+    expect(result.method).toBe("OVERLAPPING_WINDOWS_COMPOSITION");
+  });
+});
+
+describe("dailyFollowerMovement", () => {
+  it("fetches and stores one day at a time, exposing gained/lost/net", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.upsert.mockResolvedValue(null);
+    mockGraph.mockResolvedValue({
+      data: [{
+        total_value: {
+          breakdowns: [{
+            dimension_keys: ["follow_type"],
+            results: [
+              { dimension_values: ["FOLLOWER"], value: 10 },
+              { dimension_values: ["NON_FOLLOWER"], value: 3 },
+            ],
+          }],
+        },
+      }],
+    });
+
+    const result = await dailyFollowerMovement("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
+    expect(result.complete).toBe(true);
+    expect(result.gainedSeries.map(([, v]) => v)).toEqual([10, 10, 10]);
+    expect(result.lostSeries.map(([, v]) => v)).toEqual([3, 3, 3]);
+    expect(result.netSeries.map(([, v]) => v)).toEqual([7, 7, 7]);
+    expect(mockDb.socialInsightSnapshot.upsert).toHaveBeenCalled();
+    const upsertCalls = mockDb.socialInsightSnapshot.upsert.mock.calls as Array<[{ create: { metric: string } }]>;
+    const metrics = upsertCalls.map((call) => call[0].create.metric);
+    expect(metrics).toContain("followers_gained");
+    expect(metrics).toContain("followers_lost");
+  });
+});
+
+describe("currentFollowersCount", () => {
+  it("returns followers_count from the IG User node", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockGraph.mockResolvedValue({ followers_count: 12345 });
+
+    const count = await currentFollowersCount("client-1");
+    expect(count).toBe(12345);
   });
 });

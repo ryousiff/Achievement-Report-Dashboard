@@ -10,9 +10,10 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 const mockPeriodAccountReach = vi.hoisted(() => vi.fn());
+const mockPeriodAccountFollowers = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
-vi.mock("@/lib/report-data", () => ({ periodAccountReach: mockPeriodAccountReach }));
+vi.mock("@/lib/report-data", () => ({ periodAccountReach: mockPeriodAccountReach, periodAccountFollowers: mockPeriodAccountFollowers }));
 
 function resetMocks() {
   mockDb.socialConnection.findUnique.mockReset();
@@ -21,6 +22,8 @@ function resetMocks() {
   mockDb.socialPost.findMany.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
   mockPeriodAccountReach.mockReset();
+  mockPeriodAccountFollowers.mockReset();
+  mockPeriodAccountFollowers.mockResolvedValue({ gained: 10, lost: 2, net: 8, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
 }
 
 describe("getCoverage", () => {

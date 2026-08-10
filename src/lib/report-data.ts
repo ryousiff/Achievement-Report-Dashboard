@@ -138,7 +138,7 @@ const SUM_DAILY_TOOLTIP = "مجموع الوصول اليومي؛ قد يحتو�
 async function fetchConnection(clientId: string) {
   return db.socialConnection.findFirst({
     where: { clientId, platform: "INSTAGRAM" },
-    select: { externalAccountId: true, encryptedToken: true },
+    select: { id: true, externalAccountId: true, encryptedToken: true },
   });
 }
 
@@ -254,9 +254,313 @@ export async function periodAccountReach(clientId: string, periodStart: Date, pe
   return unavailable;
 }
 
-/** Sum daily net-new-follower snapshots for the period. `follower_count` is additive (daily net change),
- * unlike reach, so summing the days gives the total account-level follower growth for the period.
- * Returns null if any day in the period is missing, so we never present a partial sum as a period total. */
+// ===== Follower movement (gained / lost / net) =====
+
+export type FollowersAccuracy = "EXACT" | "DERIVED" | null;
+export type FollowersMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "UNAVAILABLE" | null;
+
+export type FollowersResult = {
+  gained: number | null;
+  lost: number | null;
+  net: number | null;
+  accuracy: FollowersAccuracy;
+  method: FollowersMethod;
+  raw?: { dimension: string; value: number }[];
+  tooltip?: string;
+};
+
+const DERIVED_TOOLTIP = "قيمة مركّبة من نوافز follows_and_unfollows المتداخلة لأن Meta API لا يتيح نطاقاً زمنياً مباشراً لمدة 31 يوماً.";
+
+const followersCache = new Map<string, { result: FollowersResult; expiresAt: number }>();
+const FOLLOWERS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Clear the in-memory followers resolver cache. Useful in tests. */
+export function clearFollowersCache() {
+  followersCache.clear();
+}
+
+function followersCacheKey(clientId: string, periodStart: Date, periodEnd: Date) {
+  return `${clientId}:followers:${startOfDayUTC(periodStart).toISOString()}:${startOfDayUTC(periodEnd).toISOString()}`;
+}
+
+function getCachedFollowers(clientId: string, periodStart: Date, periodEnd: Date): FollowersResult | undefined {
+  const key = followersCacheKey(clientId, periodStart, periodEnd);
+  const entry = followersCache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt < Date.now()) {
+    followersCache.delete(key);
+    return undefined;
+  }
+  return entry.result;
+}
+
+function setCachedFollowers(clientId: string, periodStart: Date, periodEnd: Date, result: FollowersResult) {
+  const key = followersCacheKey(clientId, periodStart, periodEnd);
+  followersCache.set(key, { result, expiresAt: Date.now() + FOLLOWERS_CACHE_TTL_MS });
+}
+
+function parseFollowerBreakdown(insight: unknown): { gained: number; lost: number; raw: { dimension: string; value: number }[] } | null {
+  const breakdowns = (insight as any)?.total_value?.breakdowns as Array<{
+    dimension_keys: string[];
+    results: Array<{ dimension_values: string[]; value: number }>;
+  }> | undefined;
+  if (!breakdowns || breakdowns.length === 0) return null;
+  const results = breakdowns[0].results;
+  const raw = results.map((r) => ({ dimension: r.dimension_values[0] ?? "UNKNOWN", value: r.value }));
+  const gained = results.find((r) => r.dimension_values[0] === "FOLLOWER")?.value ?? 0;
+  const lost = results.find((r) => r.dimension_values[0] === "NON_FOLLOWER")?.value ?? 0;
+  return { gained, lost, raw };
+}
+
+async function fetchFollowerMovementTotal(clientId: string, periodStart: Date, periodEnd: Date): Promise<FollowersResult> {
+  const connection = await fetchConnection(clientId);
+  if (!connection || !connection.externalAccountId || !connection.encryptedToken) {
+    return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE" };
+  }
+  const since = startOfDayUTC(periodStart);
+  const until = addDaysUTC(periodEnd, 1); // exclusive
+  const windowDays = (until.valueOf() - since.valueOf()) / (24 * 60 * 60 * 1000);
+  if (windowDays > 30) return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE" };
+  try {
+    const token = decryptToken(connection.encryptedToken);
+    const res = await graph<{ data?: Array<unknown> }>(
+      `${connection.externalAccountId}/insights`,
+      token,
+      {
+        metric: "follows_and_unfollows",
+        period: "day",
+        metric_type: "total_value",
+        breakdown: "follow_type",
+        since: String(Math.floor(since.valueOf() / 1000)),
+        until: String(Math.floor(until.valueOf() / 1000)),
+      },
+    );
+    const parsed = parseFollowerBreakdown(res.data?.[0]);
+    if (!parsed) return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE" };
+    return {
+      gained: parsed.gained,
+      lost: parsed.lost,
+      net: parsed.gained - parsed.lost,
+      accuracy: "EXACT",
+      method: "META_TOTAL_VALUE",
+      raw: parsed.raw,
+    };
+  } catch (error) {
+    return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE" };
+  }
+}
+
+/** Resolve account-level follower movement (gained / lost / net) for a report period.
+ * - 1–30 days: exact Meta total_value for the range.
+ * - 31 days: derived from overlapping 30/29-day windows (A + B - C) for gained and lost separately.
+ * - Never uses account-insight `follower_count` or media-level `follows`.
+ */
+export async function periodAccountFollowers(clientId: string, periodStart: Date, periodEnd: Date): Promise<FollowersResult> {
+  const cached = getCachedFollowers(clientId, periodStart, periodEnd);
+  if (cached) return cached;
+
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+
+  if (days <= 30) {
+    const result = await fetchFollowerMovementTotal(clientId, periodStart, periodEnd);
+    setCachedFollowers(clientId, periodStart, periodEnd, result);
+    return result;
+  }
+
+  if (days === 31) {
+    const [A, B, C] = await Promise.all([
+      fetchFollowerMovementTotal(clientId, periodStart, addDaysUTC(periodStart, 29)),
+      fetchFollowerMovementTotal(clientId, addDaysUTC(periodStart, 1), periodEnd),
+      fetchFollowerMovementTotal(clientId, addDaysUTC(periodStart, 1), addDaysUTC(periodStart, 29)),
+    ]);
+
+    if (A.gained !== null && B.gained !== null && C.gained !== null && A.lost !== null && B.lost !== null && C.lost !== null) {
+      const gained = A.gained + B.gained - C.gained;
+      const lost = A.lost + B.lost - C.lost;
+      const result: FollowersResult = {
+        gained,
+        lost,
+        net: gained - lost,
+        accuracy: "DERIVED",
+        method: "OVERLAPPING_WINDOWS_COMPOSITION",
+        raw: [
+          { dimension: "gained_A", value: A.gained },
+          { dimension: "gained_B", value: B.gained },
+          { dimension: "gained_C", value: C.gained },
+          { dimension: "lost_A", value: A.lost },
+          { dimension: "lost_B", value: B.lost },
+          { dimension: "lost_C", value: C.lost },
+        ],
+        tooltip: DERIVED_TOOLTIP,
+      };
+      setCachedFollowers(clientId, periodStart, periodEnd, result);
+      return result;
+    }
+
+    if (A.gained !== null && A.lost !== null) {
+      const result: FollowersResult = { ...A, accuracy: "DERIVED", method: "META_TOTAL_VALUE", tooltip: DERIVED_TOOLTIP };
+      setCachedFollowers(clientId, periodStart, periodEnd, result);
+      return result;
+    }
+    if (B.gained !== null && B.lost !== null) {
+      const result: FollowersResult = { ...B, accuracy: "DERIVED", method: "META_TOTAL_VALUE", tooltip: DERIVED_TOOLTIP };
+      setCachedFollowers(clientId, periodStart, periodEnd, result);
+      return result;
+    }
+  }
+
+  const unavailable: FollowersResult = { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE" };
+  setCachedFollowers(clientId, periodStart, periodEnd, unavailable);
+  return unavailable;
+}
+
+/** Fetch the current total followers for an account from the IG User node (followers_count),
+ * not from account insights. */
+export type DailyFollowerMovement = {
+  gainedSeries: Array<[string, number]>;
+  lostSeries: Array<[string, number]>;
+  netSeries: Array<[string, number]>;
+  complete: boolean;
+};
+
+async function fetchAndStoreDailyFollowerMovement(
+  connectionId: string,
+  externalAccountId: string,
+  token: string,
+  day: Date,
+): Promise<{ gained: number; lost: number } | null> {
+  const since = startOfDayUTC(day);
+  const until = addDaysUTC(day, 1);
+  try {
+    const res = await graph<{ data?: Array<unknown> }>(
+      `${externalAccountId}/insights`,
+      token,
+      {
+        metric: "follows_and_unfollows",
+        period: "day",
+        metric_type: "total_value",
+        breakdown: "follow_type",
+        since: String(Math.floor(since.valueOf() / 1000)),
+        until: String(Math.floor(until.valueOf() / 1000)),
+      },
+    );
+    const parsed = parseFollowerBreakdown(res.data?.[0]);
+    if (!parsed) return null;
+    const periodEnd = new Date(since);
+    periodEnd.setUTCDate(periodEnd.getUTCDate() + 1);
+    periodEnd.setUTCHours(7);
+    const periodStart = new Date(periodEnd);
+    periodStart.setUTCDate(periodStart.getUTCDate() - 1);
+    // Store gained
+    await db.socialInsightSnapshot.upsert({
+      where: {
+        connectionId_metric_periodType_periodStart_periodEnd: {
+          connectionId,
+          metric: "followers_gained",
+          periodType: InsightPeriodType.DAY,
+          periodStart,
+          periodEnd,
+        },
+      },
+      create: { connectionId, metric: "followers_gained", periodType: InsightPeriodType.DAY, periodStart, periodEnd, value: parsed.gained },
+      update: { value: parsed.gained },
+    });
+    // Store lost
+    await db.socialInsightSnapshot.upsert({
+      where: {
+        connectionId_metric_periodType_periodStart_periodEnd: {
+          connectionId,
+          metric: "followers_lost",
+          periodType: InsightPeriodType.DAY,
+          periodStart,
+          periodEnd,
+        },
+      },
+      create: { connectionId, metric: "followers_lost", periodType: InsightPeriodType.DAY, periodStart, periodEnd, value: parsed.lost },
+      update: { value: parsed.lost },
+    });
+    return { gained: parsed.gained, lost: parsed.lost };
+  } catch (error) {
+    return null;
+  }
+}
+
+/** Build a daily gained/lost/net series for the period by fetching follows_and_unfollows one day at a time.
+ * Values are stored in SocialInsightSnapshot for reuse. */
+export async function dailyFollowerMovement(clientId: string, periodStart: Date, periodEnd: Date): Promise<DailyFollowerMovement> {
+  const connection = await fetchConnection(clientId);
+  if (!connection || !connection.externalAccountId || !connection.encryptedToken) {
+    return { gainedSeries: [], lostSeries: [], netSeries: [], complete: false };
+  }
+  const token = decryptToken(connection.encryptedToken);
+  const expected = daysBetweenInclusive(periodStart, periodEnd);
+  const gainedByDay = new Map<string, number>();
+  const lostByDay = new Map<string, number>();
+
+  const current = startOfDayUTC(periodStart);
+  const end = startOfDayUTC(periodEnd);
+  while (current <= end) {
+    const day = current.toISOString().slice(0, 10);
+    // Check stored snapshots first
+    const periodEnd = new Date(current);
+    periodEnd.setUTCDate(periodEnd.getUTCDate() + 1);
+    periodEnd.setUTCHours(7);
+    const periodStartDay = new Date(periodEnd);
+    periodStartDay.setUTCDate(periodStartDay.getUTCDate() - 1);
+    const stored = await db.socialInsightSnapshot.findFirst({
+      where: {
+        connection: { clientId },
+        metric: "followers_gained",
+        periodType: InsightPeriodType.DAY,
+        periodStart: periodStartDay,
+        periodEnd,
+      },
+      select: { value: true },
+    });
+    const storedLost = await db.socialInsightSnapshot.findFirst({
+      where: {
+        connection: { clientId },
+        metric: "followers_lost",
+        periodType: InsightPeriodType.DAY,
+        periodStart: periodStartDay,
+        periodEnd,
+      },
+      select: { value: true },
+    });
+    if (stored && storedLost) {
+      gainedByDay.set(day, stored.value);
+      lostByDay.set(day, storedLost.value);
+    } else {
+      const fetched = await fetchAndStoreDailyFollowerMovement(connection.id, connection.externalAccountId, token, current);
+      if (fetched) {
+        gainedByDay.set(day, fetched.gained);
+        lostByDay.set(day, fetched.lost);
+      }
+    }
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+
+  const complete = gainedByDay.size >= expected;
+  const gainedSeries = completeDailySeries(periodStart, periodEnd, [...gainedByDay.entries()]);
+  const lostSeries = completeDailySeries(periodStart, periodEnd, [...lostByDay.entries()]);
+  const netSeries: Array<[string, number]> = gainedSeries.map(([day, gained], i) => [day, gained - lostSeries[i][1]]);
+  return { gainedSeries, lostSeries, netSeries, complete };
+}
+
+export async function currentFollowersCount(clientId: string): Promise<number | null> {
+  const connection = await fetchConnection(clientId);
+  if (!connection || !connection.externalAccountId || !connection.encryptedToken) return null;
+  try {
+    const token = decryptToken(connection.encryptedToken);
+    const res = await graph<{ followers_count?: number }>(connection.externalAccountId, token, { fields: "followers_count" });
+    return typeof res.followers_count === "number" ? res.followers_count : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/** @deprecated Kept for compatibility; use `periodAccountReach` or `periodAccountFollowers`.
+ *  The old implementation summed snapshots, which is wrong for reach (double-counts unique people). */
 export async function periodAccountFollowerCount(clientId: string, periodStart: Date, periodEnd: Date): Promise<number | null> {
   const snapshots = await db.socialInsightSnapshot.findMany({
     where: {
@@ -311,14 +615,12 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
   // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
-  // Account-level reach and follows are sourced from Meta's daily account insights, not by summing post-level
-  // metrics (which would double-count people reached by multiple posts and mis-attribute follower growth).
   const reach = await periodAccountReach(clientId, periodStart, periodEnd);
-  const accountFollows = await periodAccountFollowerCount(clientId, periodStart, periodEnd);
+  const followers = await periodAccountFollowers(clientId, periodStart, periodEnd);
   const hasReach = reach.value !== null;
-  const hasFollows = accountFollows !== null;
+  const hasFollows = followers.gained !== null;
   totals.reach = reach.value ?? 0;
-  totals.follows = accountFollows ?? 0;
+  totals.follows = followers.gained ?? 0;
   const engagementRate = hasReach && totals.reach > 0 && hasMetric("total_interactions") ? `${((totals.total_interactions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
   const topBy = (metric: ReportMetric) => [...posts].sort((left, right) => value(right.metrics, metric) - value(left.metrics, metric)).filter((post) => value(post.metrics, metric) > 0).slice(0, 4);
   const topInteractions = topBy("total_interactions");
@@ -326,19 +628,14 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const topFollows = topBy("follows");
   const formats = ["REELS", "IMAGE", "VIDEO", "CAROUSEL_ALBUM"].map((mediaType) => ({ id: `format-${mediaType}`, label: mediaType === "REELS" ? "الريلز" : mediaType === "IMAGE" ? "المنشورات" : mediaType === "VIDEO" ? "الفيديوهات" : "الألبومات", value: String(posts.filter((post) => post.mediaType === mediaType).reduce((sum, post) => sum + (post.metrics.total_interactions ?? 0), 0)), display: "cards" })).filter((item) => Number(item.value) > 0);
 
-  const followerSnapshots = await db.socialInsightSnapshot.findMany({
-    where: { connection: { clientId }, metric: "follower_count", periodType: InsightPeriodType.DAY, periodEnd: { gte: startOfDayUTC(periodStart), lte: endOfDayUTC(periodEnd) } },
-    orderBy: { periodEnd: "asc" },
-  });
-  const dailyFollowEntries = [...followerSnapshots.reduce((days, snapshot) => { const day = snapshot.periodEnd.toISOString().slice(0, 10); days.set(day, (days.get(day) ?? 0) + snapshot.value); return days; }, new Map<string, number>()).entries()];
+  const dailyMovement = await dailyFollowerMovement(clientId, periodStart, periodEnd);
   const expectedFollowerDays = daysBetweenInclusive(periodStart, periodEnd);
-  const followerDataComplete = dailyFollowEntries.length >= expectedFollowerDays;
+  const followerDataComplete = dailyMovement.complete && dailyMovement.gainedSeries.length >= expectedFollowerDays;
   const followerSource = followerDataComplete
-    ? "بيانات صافي اكتساب المتابعين (follower_count) اليومية من Meta."
-    : `بيانات صافي اكتساب المتابعين (follower_count) اليومية من Meta — متاحة لـ ${dailyFollowEntries.length} من أصل ${expectedFollowerDays} يوم. إجمالي الأيام المتاحة: ${dailyFollowEntries.reduce((sum, [, value]) => sum + value, 0).toLocaleString()}.`;
-  const completeFollowerEntries = completeDailySeries(periodStart, periodEnd, dailyFollowEntries);
-  const followerValues = completeFollowerEntries.map(([, value]) => value);
-  const followerLabels = completeFollowerEntries.map(([day]) => day);
+    ? "بيانات المتابعين الجدد (follows_and_unfollows) اليومية من Meta."
+    : `بيانات المتابعين الجدد (follows_and_unfollows) اليومية من Meta — متاحة لـ ${dailyMovement.gainedSeries.length} من أصل ${expectedFollowerDays} يوم.`;
+  const followerValues = dailyMovement.gainedSeries.map(([, value]) => value);
+  const followerLabels = dailyMovement.gainedSeries.map(([day]) => day);
 
   const reachExtra = { reachAccuracy: reach.accuracy, reachMethod: reach.method, tooltip: reach.tooltip };
   const reachKpis = [
@@ -359,11 +656,25 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     reachKpis.push(kpi("daily-reach-sum", "مجموع الوصول اليومي", reachDailySnapshots.reduce((sum, s) => sum + s.value, 0).toLocaleString(), true, { tooltip: SUM_DAILY_TOOLTIP }));
   }
 
+  const followsTooltip = followers.tooltip;
+  const followsExtra = followers.gained !== null ? { followersAccuracy: followers.accuracy, followersMethod: followers.method, tooltip: followsTooltip } : undefined;
+  const followKpis = [
+    followsExtra?.followersAccuracy === "DERIVED"
+      ? kpi("follows", "المتابعون الجدد", followers.gained!.toLocaleString(), true, { ...followsExtra, badge: "مركّب" })
+      : kpi("follows", "المتابعون الجدد", hasFollows ? followers.gained!.toLocaleString() : "غير متاح", hasFollows, followsExtra),
+  ];
+  if (followers.lost !== null && followers.net !== null) {
+    followKpis.push(
+      kpi("followers-lost", "المتابعون المفقودون", followers.lost.toLocaleString(), true, { tooltip: "عدد الحسابات التي ألغت المتابعة أو تركت Instagram خلال الفترة." }),
+      kpi("net-follower-growth", "صافي نمو المتابعين", (followers.net >= 0 ? "+" : "") + followers.net.toLocaleString(), true, { tooltip: "المتابعون الجدد ناقص المتابعون المفقودون." }),
+    );
+  }
+
   return [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover" } },
-    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("follows", "المتابعون الجدد", hasFollows ? totals.follows.toLocaleString() : "غير متاح", hasFollows), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], comparison: "none", autoFilled: true } },
+    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], comparison: "none", autoFilled: true } },
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [kpi("total_interactions", metricLabel.total_interactions, hasMetric("total_interactions") ? totals.total_interactions.toLocaleString() : "غير متاح", hasMetric("total_interactions")), kpi("likes", metricLabel.likes, hasMetric("likes") ? totals.likes.toLocaleString() : "غير متاح", hasMetric("likes")), kpi("comments", metricLabel.comments, hasMetric("comments") ? totals.comments.toLocaleString() : "غير متاح", hasMetric("comments")), kpi("saved", "حفظ", hasMetric("saved") ? totals.saved.toLocaleString() : "غير متاح", hasMetric("saved")), kpi("shares", "مشاركة", hasMetric("shares") ? totals.shares.toLocaleString() : "غير متاح", hasMetric("shares"))], comparison: "none", autoFilled: true } },
-    { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerDataComplete ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: `إجمالي المتابعين الجدد خلال الأيام المتاحة: ${followerValues.reduce((sum, value) => sum + value, 0).toLocaleString()}.` } } : { body: followerSource, chartUnavailable: true, unavailableReason: "Meta توفر بيانات follower_count لآخر 30 يوم فقط؛ الفترة المطلوبة غير مكتملة." } },
+    { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerDataComplete ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: `إجمالي المتابعين الجدد خلال الأيام المتاحة: ${followerValues.reduce((sum, value) => sum + value, 0).toLocaleString()}.` } } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ بعض الأيام ناقصة." } },
     mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"]),
     { type: BlockType.KPI, title: "التفاعل حسب نوع المحتوى", content: { body: "إجمالي التفاعل حسب نوع المنشور.", kpis: formats, comparison: "none", autoFilled: true } },
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"]),

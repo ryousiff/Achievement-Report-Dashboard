@@ -11,6 +11,7 @@ const periodTypeToMetaPeriod: Record<InsightPeriodType, string> = {
   [InsightPeriodType.DAY]: "day",
   [InsightPeriodType.WEEK]: "week",
   [InsightPeriodType.DAYS_28]: "days_28",
+  [InsightPeriodType.TOTAL_VALUE]: "day",
 };
 
 function startOfDayUTC(date: Date) {
@@ -47,7 +48,7 @@ function windowStartFor(periodEnd: Date, periodType: InsightPeriodType): Date {
   // - week:   seven days ending at end_time    -> start = end - 6 days
   // - days_28: 28 days ending at end_time       -> start = end - 27 days
   const daysBack =
-    periodType === InsightPeriodType.DAY ? 1 :
+    periodType === InsightPeriodType.DAY || periodType === InsightPeriodType.TOTAL_VALUE ? 1 :
     periodType === InsightPeriodType.WEEK ? 6 :
     27;
   start.setUTCDate(start.getUTCDate() - daysBack);
