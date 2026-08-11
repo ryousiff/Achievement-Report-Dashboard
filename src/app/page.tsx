@@ -5483,6 +5483,9 @@ function ConnectedAccounts({
   const kaanSystemUserProfile = profiles.find(
     (profile) => profile.displayName === "Meta Business · Kaan Creative (System user)",
   );
+  const totalMetaAssets = systemUserPreview
+    ? systemUserPreview.pages.length + systemUserPreview.adAccounts.length
+    : 0;
   return (
     <section>
       <div className="hero">
@@ -5585,12 +5588,10 @@ function ConnectedAccounts({
             </div>
           ) : (
             <>
+              <small>الرمز: {systemUserPreview.tokenPreview}</small>
               <small>
-                الرمز: {systemUserPreview.tokenPreview} ·{" "}
-                {systemUserPreview.pages.length} صفحة
-                {systemUserPreview.adAccounts.length
-                  ? ` · ${systemUserPreview.adAccounts.length} حساب إعلاني`
-                  : ""}
+                {totalMetaAssets} أصل Meta متاح ·{" "}
+                {systemUserPreview.adAccounts.length} حساب إعلاني
               </small>
               {systemUserPreview.warnings &&
                 systemUserPreview.warnings.length > 0 && (
