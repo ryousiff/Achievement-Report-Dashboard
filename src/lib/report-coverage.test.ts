@@ -58,7 +58,7 @@ describe("getCoverage", () => {
       .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-08-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-08-07T00:00:00.000Z") }, _count: 2 })
       .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-08-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-08-07T00:00:00.000Z") } });
     mockDb.socialPost.findMany.mockResolvedValue([
-      { metrics: { reach: 100, views: 200, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
+      { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
     ]);
     mockDb.socialInsightSnapshot.findMany
       .mockResolvedValueOnce([
@@ -148,7 +148,7 @@ describe("getCoverage", () => {
       .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-08-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-08-03T00:00:00.000Z") }, _count: 2 })
       .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-08-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-08-03T00:00:00.000Z") } });
     mockDb.socialPost.findMany.mockResolvedValue([
-      { metrics: { reach: 100, views: 200, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
+      { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
     ]);
     mockDb.socialInsightSnapshot.findMany
       .mockResolvedValueOnce([
@@ -197,7 +197,7 @@ describe("getCoverage", () => {
       .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") }, _count: 2 })
       .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") } });
     mockDb.socialPost.findMany.mockResolvedValue([
-      { metrics: { reach: 100, views: 200, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
+      { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
     ]);
     mockDb.socialInsightSnapshot.findMany
       .mockResolvedValueOnce(Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))

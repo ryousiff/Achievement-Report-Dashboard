@@ -150,7 +150,7 @@ function paginatedPage(items: unknown[], nextCursor?: string) {
   return { data: items, paging: nextCursor ? { cursors: { after: nextCursor } } : {} };
 }
 
-const metricValues: Record<string, number> = { views: 100, reach: 50, saved: 5, shares: 2, total_interactions: 117, follows: 1 };
+const metricValues: Record<string, number> = { views: 100, total_views: 100, reach: 50, saved: 5, shares: 2, total_interactions: 117, follows: 1, facebook_views: 0 };
 
 function singleInsight(metric: string, value: number) {
   return { data: [{ name: metric, values: [{ value }] }] };
@@ -206,6 +206,8 @@ describe("runIncrementalSync", () => {
     expect(post).toBeDefined();
     expect(post.mediaSource).toBe(MediaSource.OWNED);
     expect(post.mediaMetadata).toBeUndefined();
+    expect(post.metrics.views).toBe(100);
+    expect(post.metrics.total_views).toBe(100);
     expect(post.metrics.follows).toBe(1);
     expect(post.metricAvailabilityState.follows).toBe("AVAILABLE");
   });

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BackfillStatus, MediaSource } from "@prisma/client";
-import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, dailyFollowerMovement, currentFollowersCount, clearReachCache, clearFollowersCache, type ReachResult } from "@/lib/report-data";
+import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, periodAccountViews, dailyFollowerMovement, currentFollowersCount, clearReachCache, clearFollowersCache, clearViewsCache, type ReachResult } from "@/lib/report-data";
 
 const mockDb = vi.hoisted(() => ({
   socialPost: { findMany: vi.fn() },
@@ -21,6 +21,7 @@ vi.mock("@/lib/token-encryption", () => mockTokenEncryption);
 beforeEach(() => {
   clearReachCache();
   clearFollowersCache();
+  clearViewsCache();
   mockDb.socialPost.findMany.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
   mockDb.socialInsightSnapshot.findFirst.mockReset();
@@ -304,6 +305,34 @@ describe("dailyFollowerMovement", () => {
     const metrics = upsertCalls.map((call) => call[0].create.metric);
     expect(metrics).toContain("followers_gained");
     expect(metrics).toContain("followers_lost");
+  });
+});
+
+describe("periodAccountViews", () => {
+  it("returns exact account-level total_value views for <=30 day periods", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockGraph.mockResolvedValue({ data: [{ total_value: { value: 5000 } }] });
+
+    const result = await periodAccountViews("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
+    expect(result.value).toBe(5000);
+    expect(result.accuracy).toBe("EXACT");
+    expect(result.method).toBe("META_TOTAL_VALUE");
+  });
+
+  it("composes 31-day total views using overlapping windows", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    setGraphReachValuesByWindow({
+      "1782864000__1785456000": { reach: 1000, gained: 0, lost: 0 },
+      "1782950400__1785542400": { reach: 1100, gained: 0, lost: 0 },
+      "1782950400__1785456000": { reach: 900, gained: 0, lost: 0 },
+    });
+
+    const result = await periodAccountViews("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+    expect(result.value).toBe(1200);
+    expect(result.accuracy).toBe("DERIVED");
+    expect(result.method).toBe("OVERLAPPING_WINDOWS_COMPOSITION");
   });
 });
 

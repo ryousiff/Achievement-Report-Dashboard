@@ -92,7 +92,7 @@ export async function resolveInstagramUrl(clientId: string, getConnection: () =>
     if (item) {
       let metrics: Record<string, number> = { likes: item.like_count ?? 0, comments: item.comments_count ?? 0 };
       try {
-        const insights = await graph<{ data?: InstagramInsight[] }>(`${item.id}/insights`, token, { metric: "views,reach,saved,shares,total_interactions,follows" });
+        const insights = await graph<{ data?: InstagramInsight[] }>(`${item.id}/insights`, token, { metric: "views,total_views,reach,saved,shares,total_interactions,follows" });
         Object.assign(metrics, Object.fromEntries((insights.data ?? []).flatMap((insight) => insight.name && typeof insight.values?.[0]?.value === "number" ? [[insight.name, insight.values[0].value]] : [])));
       } catch {
         // Insights may be unavailable for some media types; keep basic metrics.

@@ -34,7 +34,7 @@ export type MetricAvailabilityState = "AVAILABLE" | "NOT_SUPPORTED" | "NOT_RETUR
 const graphUrl = "https://graph.facebook.com/v23.0";
 const mediaFields = "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count";
 const collaborativeMediaFields = `${mediaFields},owner{id,username},collaborators`;
-const insightMetrics = ["views", "reach", "saved", "shares", "total_interactions", "follows"] as const;
+const insightMetrics = ["views", "total_views", "reach", "saved", "shares", "total_interactions", "follows", "facebook_views"] as const;
 
 // Simple, process-wide throttle for the Meta Graph API. `requestQueue` ensures we never issue more than
 // one request at a time; `currentIntervalMs` is adjusted based on Meta's X-App-Usage header and on
@@ -168,15 +168,20 @@ async function fetchInsightBatch(postId: string, token: string, metrics: string[
 
 async function postInsights(postId: string, token: string) {
   const results = await Promise.allSettled([
-    fetchInsightBatch(postId, token, ["views", "reach", "saved", "shares", "total_interactions"]),
+    fetchInsightBatch(postId, token, ["views", "total_views", "reach", "saved", "shares", "total_interactions"]),
     fetchInsightBatch(postId, token, ["follows"]),
+    fetchInsightBatch(postId, token, ["facebook_views"]),
   ]);
   if (results[0].status === "rejected") throw results[0].reason;
   if (results[1].status === "rejected") throw results[1].reason;
+  // facebook_views is optional and may be unsupported for some media product types; never let a transient
+  // rate-limit on the optional metric be silently swallowed.
+  if (results[2].status === "rejected" && results[2].reason instanceof MetaSyncError && results[2].reason.code === "rate_limited") throw results[2].reason;
   const core = results[0].value;
   const follows = results[1].value;
-  const metrics = { ...core.metrics, ...follows.metrics };
-  const availability = { ...core.availability, ...follows.availability };
+  const facebookViews = results[2].status === "fulfilled" ? results[2].value : { metrics: {}, availability: { facebook_views: "unavailable" as const } };
+  const metrics = { ...core.metrics, ...follows.metrics, ...facebookViews.metrics };
+  const availability = { ...core.availability, ...follows.availability, ...facebookViews.availability };
   return { metrics, availability };
 }
 

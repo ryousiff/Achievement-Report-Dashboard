@@ -33,7 +33,7 @@ export type ReportCoverage = {
   warnings: string[];
 };
 
-const trackedMetrics = ["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows"] as const;
+const trackedMetrics = ["reach", "views", "total_views", "total_interactions", "likes", "comments", "saved", "shares", "follows"] as const;
 
 type TrackedMetric = (typeof trackedMetrics)[number];
 
@@ -321,7 +321,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   }
 
   if (!insightsComplete) {
-    warnings.push(`بعض المنشورات تفتقر إلى مؤشرات: ${missingMetrics.map((metric) => ({ reach: "الوصول", views: "المشاهدات", total_interactions: "التفاعل", likes: "الإعجابات", comments: "التعليقات", saved: "الحفظ", shares: "المشاركات", follows: "المتابعون الجدد" })[metric as TrackedMetric] ?? metric).join("، ")}.`);
+    warnings.push(`بعض المنشورات تفتقر إلى مؤشرات: ${missingMetrics.map((metric) => ({ reach: "الوصول", views: "مشاهدات المنشورات العضوية", total_views: "إجمالي المشاهدات", total_interactions: "التفاعل", likes: "الإعجابات", comments: "التعليقات", saved: "الحفظ", shares: "المشاركات", follows: "المتابعون الجدد" })[metric as TrackedMetric] ?? metric).join("، ")}.`);
   }
 
   // Final status

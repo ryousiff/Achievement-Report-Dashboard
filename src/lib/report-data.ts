@@ -28,7 +28,7 @@ export function completeDailySeries(periodStart: Date, periodEnd: Date, entries:
   return series;
 }
 
-const metricLabel: Record<ReportMetric, string> = { reach: "شخص تم الوصول له", views: "مشاهدة", total_interactions: "التفاعل مع المحتوى", likes: "إعجاب", comments: "تعليق", saved: "حفظ", shares: "مشاركة", follows: "المتابعون الجدد", posts: "منشور" };
+const metricLabel: Record<ReportMetric, string> = { reach: "شخص تم الوصول له", views: "مشاهدات المنشورات العضوية", total_interactions: "التفاعل مع المحتوى", likes: "إعجاب", comments: "تعليق", saved: "حفظ", shares: "مشاركة", follows: "المتابعون الجدد", posts: "منشور" };
 
 function value(metrics: PostMetrics, metric: ReportMetric) {
   return metric === "posts" ? 0 : metrics[metric] ?? 0;
@@ -251,6 +251,126 @@ export async function periodAccountReach(clientId: string, periodStart: Date, pe
 
   const unavailable: ReachResult = { value: null, accuracy: null, method: "UNAVAILABLE" };
   setCachedReach(clientId, periodStart, periodEnd, unavailable);
+  return unavailable;
+}
+
+// ===== Account-level Total Views =====
+
+export type ViewsAccuracy = "EXACT" | "DERIVED" | null;
+export type ViewsMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "SNAPSHOT" | "UNAVAILABLE" | null;
+
+export type ViewsResult = {
+  value: number | null;
+  accuracy: ViewsAccuracy;
+  method: ViewsMethod;
+  tooltip?: string;
+};
+
+const VIEWS_DERIVED_TOOLTIP = "قيمة مركّبة من نوافز views المتداخلة لأن Meta API لا يتيح نطاقاً زمنياً مباشراً لمدة 31 يوماُ.";
+
+const viewsCache = new Map<string, { result: ViewsResult; expiresAt: number }>();
+const VIEWS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Clear the in-memory views resolver cache. Useful in tests. */
+export function clearViewsCache() {
+  viewsCache.clear();
+}
+
+function viewsCacheKey(clientId: string, periodStart: Date, periodEnd: Date) {
+  return `${clientId}:views:${startOfDayUTC(periodStart).toISOString()}:${startOfDayUTC(periodEnd).toISOString()}`;
+}
+
+function getCachedViews(clientId: string, periodStart: Date, periodEnd: Date): ViewsResult | undefined {
+  const key = viewsCacheKey(clientId, periodStart, periodEnd);
+  const entry = viewsCache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt < Date.now()) {
+    viewsCache.delete(key);
+    return undefined;
+  }
+  return entry.result;
+}
+
+function setCachedViews(clientId: string, periodStart: Date, periodEnd: Date, result: ViewsResult) {
+  const key = viewsCacheKey(clientId, periodStart, periodEnd);
+  viewsCache.set(key, { result, expiresAt: Date.now() + VIEWS_CACHE_TTL_MS });
+}
+
+async function fetchTotalValueViews(clientId: string, periodStart: Date, periodEnd: Date): Promise<ViewsResult> {
+  const connection = await fetchConnection(clientId);
+  if (!connection || !connection.externalAccountId || !connection.encryptedToken) {
+    return { value: null, accuracy: null, method: "UNAVAILABLE" };
+  }
+  const since = startOfDayUTC(periodStart);
+  const until = addDaysUTC(periodEnd, 1); // `until` is exclusive
+  const windowDays = (until.valueOf() - since.valueOf()) / (24 * 60 * 60 * 1000);
+  if (windowDays > 30) return { value: null, accuracy: null, method: "UNAVAILABLE" };
+  try {
+    const token = decryptToken(connection.encryptedToken);
+    const res = await graph<{ data?: Array<{ total_value?: { value?: number } }> }>(
+      `${connection.externalAccountId}/insights`,
+      token,
+      {
+        metric: "views",
+        period: "day",
+        metric_type: "total_value",
+        since: String(Math.floor(since.valueOf() / 1000)),
+        until: String(Math.floor(until.valueOf() / 1000)),
+      },
+    );
+    const value = res.data?.[0]?.total_value?.value;
+    if (typeof value !== "number") return { value: null, accuracy: null, method: "UNAVAILABLE" };
+    return { value, accuracy: "EXACT", method: "META_TOTAL_VALUE" };
+  } catch (error) {
+    return { value: null, accuracy: null, method: "UNAVAILABLE" };
+  }
+}
+
+/** Return the account-level Total Views for a report period.
+ * - 1–30 days: exact Meta `total_value`.
+ * - 31 days: derived using overlapping 30/29-day `total_value` windows (A + B - C).
+ * - Never sums media-level views.
+ */
+export async function periodAccountViews(clientId: string, periodStart: Date, periodEnd: Date): Promise<ViewsResult> {
+  const cached = getCachedViews(clientId, periodStart, periodEnd);
+  if (cached) return cached;
+
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+
+  if (days <= 30) {
+    const result = await fetchTotalValueViews(clientId, periodStart, periodEnd);
+    setCachedViews(clientId, periodStart, periodEnd, result);
+    return result;
+  }
+
+  if (days === 31) {
+    const [A, B, C] = await Promise.all([
+      fetchTotalValueViews(clientId, periodStart, addDaysUTC(periodStart, 29)),
+      fetchTotalValueViews(clientId, addDaysUTC(periodStart, 1), periodEnd),
+      fetchTotalValueViews(clientId, addDaysUTC(periodStart, 1), addDaysUTC(periodStart, 29)),
+    ]);
+
+    if (A.value !== null && B.value !== null && C.value !== null) {
+      const value = A.value + B.value - C.value;
+      const result: ViewsResult = { value, accuracy: "DERIVED", method: "OVERLAPPING_WINDOWS_COMPOSITION", tooltip: VIEWS_DERIVED_TOOLTIP };
+      setCachedViews(clientId, periodStart, periodEnd, result);
+      return result;
+    }
+
+    if (A.value !== null) {
+      const result: ViewsResult = { value: A.value, accuracy: "DERIVED", method: "META_TOTAL_VALUE", tooltip: VIEWS_DERIVED_TOOLTIP };
+      setCachedViews(clientId, periodStart, periodEnd, result);
+      return result;
+    }
+    if (B.value !== null) {
+      const result: ViewsResult = { value: B.value, accuracy: "DERIVED", method: "META_TOTAL_VALUE", tooltip: VIEWS_DERIVED_TOOLTIP };
+      setCachedViews(clientId, periodStart, periodEnd, result);
+      return result;
+    }
+  }
+
+  const unavailable: ViewsResult = { value: null, accuracy: null, method: "UNAVAILABLE" };
+  setCachedViews(clientId, periodStart, periodEnd, unavailable);
   return unavailable;
 }
 
@@ -617,8 +737,10 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
   const reach = await periodAccountReach(clientId, periodStart, periodEnd);
   const followers = await periodAccountFollowers(clientId, periodStart, periodEnd);
+  const totalViews = await periodAccountViews(clientId, periodStart, periodEnd);
   const hasReach = reach.value !== null;
   const hasFollows = followers.gained !== null;
+  const hasTotalViews = totalViews.value !== null;
   totals.reach = reach.value ?? 0;
   totals.follows = followers.gained ?? 0;
   const engagementRate = hasReach && totals.reach > 0 && hasMetric("total_interactions") ? `${((totals.total_interactions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
@@ -663,6 +785,13 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
       ? kpi("follows", "المتابعون الجدد", followers.gained!.toLocaleString(), true, { ...followsExtra, badge: "مركّب" })
       : kpi("follows", "المتابعون الجدد", hasFollows ? followers.gained!.toLocaleString() : "غير متاح", hasFollows, followsExtra),
   ];
+
+  const totalViewsExtra = totalViews.value !== null ? { viewsAccuracy: totalViews.accuracy, viewsMethod: totalViews.method, tooltip: totalViews.tooltip } : undefined;
+  const totalViewsKpis = [
+    totalViewsExtra?.viewsAccuracy === "DERIVED"
+      ? kpi("total-views", "إجمالي المشاهدات", totalViews.value!.toLocaleString(), true, { ...totalViewsExtra, badge: "مركّب" })
+      : kpi("total-views", "إجمالي المشاهدات", hasTotalViews ? totalViews.value!.toLocaleString() : "غير متاح", hasTotalViews, totalViewsExtra),
+  ];
   if (followers.lost !== null && followers.net !== null) {
     followKpis.push(
       kpi("followers-lost", "المتابعون المفقودون", followers.lost.toLocaleString(), true, { tooltip: "عدد الحسابات التي ألغت المتابعة أو تركت Instagram خلال الفترة." }),
@@ -672,13 +801,13 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
 
   return [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover" } },
-    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], comparison: "none", autoFilled: true } },
+    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], comparison: "none", autoFilled: true } },
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [kpi("total_interactions", metricLabel.total_interactions, hasMetric("total_interactions") ? totals.total_interactions.toLocaleString() : "غير متاح", hasMetric("total_interactions")), kpi("likes", metricLabel.likes, hasMetric("likes") ? totals.likes.toLocaleString() : "غير متاح", hasMetric("likes")), kpi("comments", metricLabel.comments, hasMetric("comments") ? totals.comments.toLocaleString() : "غير متاح", hasMetric("comments")), kpi("saved", "حفظ", hasMetric("saved") ? totals.saved.toLocaleString() : "غير متاح", hasMetric("saved")), kpi("shares", "مشاركة", hasMetric("shares") ? totals.shares.toLocaleString() : "غير متاح", hasMetric("shares"))], comparison: "none", autoFilled: true } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerDataComplete ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: `إجمالي المتابعين الجدد خلال الأيام المتاحة: ${followerValues.reduce((sum, value) => sum + value, 0).toLocaleString()}.` } } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ بعض الأيام ناقصة." } },
     mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"]),
     { type: BlockType.KPI, title: "التفاعل حسب نوع المحتوى", content: { body: "إجمالي التفاعل حسب نوع المنشور.", kpis: formats, comparison: "none", autoFilled: true } },
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"]),
-    mediaBlock("أعلى المنشورات من حيث المشاهدات", "تم اختيار المنشورات الأعلى مشاهدة من بيانات الفترة.", topViews, ["views", "total_interactions"]),
+    mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"]),
     mediaBlock("محتوى الشهر", "أضيفي نماذج إضافية من المحتوى أو احتفظي بالمنشورات المختارة تلقائياً.", [...posts].sort((left, right) => right.score - left.score).slice(0, 4), ["total_interactions", "views"]),
     { type: BlockType.NOTES, title: "التوصيات", content: { body: "أضيفي توصيات عملية قابلة للتنفيذ للشهر القادم." } },
     { type: BlockType.TEXT, title: "شكراً على ثقتكم", content: { body: "Kaan Creative", page: "closing" } },
