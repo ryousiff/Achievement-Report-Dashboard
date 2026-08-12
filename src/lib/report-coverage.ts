@@ -2,7 +2,7 @@ import { BackfillStatus, InsightPeriodType, SyncJobStatus, SyncJobType } from "@
 import { db } from "@/lib/db";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
-import { periodAccountFollowers, periodAccountReach } from "@/lib/report-data";
+import { periodAccountFollowersForRange, periodAccountReachForRange } from "@/lib/report-data";
 
 export type CoverageStatus = "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" | "FAILED";
 
@@ -220,7 +220,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
 
   // Use the same Reach resolver the report builder uses: total_value for <=30 days,
   // overlapping-window estimate for 31 days. Never rely on summed daily snapshots.
-  const reach = await periodAccountReach(connection.clientId, periodStart, periodEnd);
+  const reach = await periodAccountReachForRange(connection.clientId, periodStart, periodEnd);
   let reachStatus: ReachCoverageStatus = "PERIOD_UNAVAILABLE";
   let periodReachValue: number | null = reach.value;
   if (reach.value !== null) {
@@ -234,7 +234,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   }
 
   // Use the same Followers resolver the report builder uses.
-  const followers = await periodAccountFollowers(connection.clientId, periodStart, periodEnd);
+  const followers = await periodAccountFollowersForRange(connection.clientId, periodStart, periodEnd);
   let followerStatus: FollowerCoverageStatus = "UNAVAILABLE";
   if (followers.gained !== null && followers.lost !== null) {
     followerStatus = followers.accuracy === "DERIVED" ? "PERIOD_DERIVED" : "PERIOD_AVAILABLE";

@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useEffect, useState } from "react";
+import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
 import {
   AlertCircle,
   ArrowDown,
@@ -151,7 +152,6 @@ type WorkspaceUser = {
   features?: string[];
   googleConnected?: boolean;
 };
-type ReportPeriod = "monthly" | "quarterly" | "halfYearly" | "yearly";
 type ReportMetadata = {
   title: string;
   clientId: string | null;
@@ -461,51 +461,7 @@ const metricValues = {
 } as const;
 type MetricKey = keyof typeof metricValues;
 
-const arabicMonths = [
-  "يناير",
-  "فبراير",
-  "مارس",
-  "أبريل",
-  "مايو",
-  "يونيو",
-  "يوليو",
-  "أغسطس",
-  "سبتمبر",
-  "أكتوبر",
-  "نوفمبر",
-  "ديسمبر",
-];
-const dateInputValue = (date: Date) =>
-  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-const completedPeriod = (periodType: ReportPeriod, today = new Date()) => {
-  const year = today.getFullYear();
-  let end: Date;
-  let start: Date;
-  if (periodType === "monthly") {
-    end = new Date(year, today.getMonth(), 0);
-    start = new Date(end.getFullYear(), end.getMonth(), 1);
-  } else if (periodType === "quarterly") {
-    end = new Date(year, Math.floor(today.getMonth() / 3) * 3, 0);
-    start = new Date(end.getFullYear(), end.getMonth() - 2, 1);
-  } else if (periodType === "halfYearly") {
-    end = today.getMonth() < 6 ? new Date(year, 0, 0) : new Date(year, 6, 0);
-    start = new Date(end.getFullYear(), end.getMonth() - 5, 1);
-  } else {
-    end = new Date(year, 0, 0);
-    start = new Date(end.getFullYear(), 0, 1);
-  }
-  const labels = {
-    monthly: `شهر ${arabicMonths[end.getMonth()]}`,
-    quarterly: `الربع ${Math.floor(end.getMonth() / 3) + 1} لعام ${end.getFullYear()}`,
-    halfYearly: `النصف ${end.getMonth() < 6 ? "الأول" : "الثاني"} لعام ${end.getFullYear()}`,
-    yearly: `عام ${end.getFullYear()}`,
-  };
-  return {
-    periodStart: dateInputValue(start),
-    periodEnd: dateInputValue(end),
-    label: labels[periodType],
-  };
-};
+
 
 export default function Home() {
   const [view, setView] = useState<View>("dashboard");

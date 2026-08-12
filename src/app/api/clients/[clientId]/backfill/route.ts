@@ -15,7 +15,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const connections = await db.socialConnection.findMany({ where: { clientId, platform: Platform.INSTAGRAM }, select: { id: true } });
   if (connections.length === 0) return NextResponse.json({ error: "No Instagram connection found for this client." }, { status: 404 });
   try {
-    const jobs = await Promise.all(connections.map((connection) => enqueueHistoricalBackfill(connection.id)));
+    const jobArrays = await Promise.all(connections.map((connection) => enqueueHistoricalBackfill(connection.id)));
+    const jobs = jobArrays.flat();
     return NextResponse.json({ jobs: jobs.map((job) => ({ id: job.id, connectionId: job.connectionId, status: job.status })) }, { status: 202 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to start historical sync." }, { status: 400 });

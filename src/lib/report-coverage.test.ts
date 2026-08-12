@@ -9,11 +9,11 @@ const mockDb = vi.hoisted(() => ({
   socialInsightSnapshot: { findMany: vi.fn() },
 }));
 
-const mockPeriodAccountReach = vi.hoisted(() => vi.fn());
-const mockPeriodAccountFollowers = vi.hoisted(() => vi.fn());
+const mockPeriodAccountReachForRange = vi.hoisted(() => vi.fn());
+const mockPeriodAccountFollowersForRange = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
-vi.mock("@/lib/report-data", () => ({ periodAccountReach: mockPeriodAccountReach, periodAccountFollowers: mockPeriodAccountFollowers }));
+vi.mock("@/lib/report-data", () => ({ periodAccountReachForRange: mockPeriodAccountReachForRange, periodAccountFollowersForRange: mockPeriodAccountFollowersForRange }));
 
 function resetMocks() {
   mockDb.socialConnection.findUnique.mockReset();
@@ -21,9 +21,9 @@ function resetMocks() {
   mockDb.socialPost.aggregate.mockReset();
   mockDb.socialPost.findMany.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
-  mockPeriodAccountReach.mockReset();
-  mockPeriodAccountFollowers.mockReset();
-  mockPeriodAccountFollowers.mockResolvedValue({ gained: 10, lost: 2, net: 8, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
+  mockPeriodAccountReachForRange.mockReset();
+  mockPeriodAccountFollowersForRange.mockReset();
+  mockPeriodAccountFollowersForRange.mockResolvedValue({ gained: 10, lost: 2, net: 8, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
 }
 
 describe("getCoverage", () => {
@@ -82,7 +82,7 @@ describe("getCoverage", () => {
       ])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ value: 1234 }]);
-    mockPeriodAccountReach.mockResolvedValue({ value: 1234, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: 1234, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
     expect(coverage.status).toBe("COMPLETE");
@@ -118,7 +118,7 @@ describe("getCoverage", () => {
       .mockResolvedValueOnce({ _min: { publishedAt: null }, _max: { publishedAt: null } });
     mockDb.socialPost.findMany.mockResolvedValue([]);
     mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
-    mockPeriodAccountReach.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("SYNCING");
@@ -164,7 +164,7 @@ describe("getCoverage", () => {
       ])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
-    mockPeriodAccountReach.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("PARTIAL");
@@ -205,7 +205,7 @@ describe("getCoverage", () => {
       .mockResolvedValueOnce(Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))
       .mockResolvedValueOnce([{ periodEnd: new Date("2026-07-31T07:00:00.000Z") }])
       .mockResolvedValueOnce([]);
-    mockPeriodAccountReach.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
 
     const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
     expect(coverage.reachStatus).toBe("DAYS_28_AVAILABLE");

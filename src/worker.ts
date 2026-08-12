@@ -4,11 +4,24 @@ import { getSchedulerConfig } from "./lib/env";
 const pollMs = Number(process.env.SYNC_WORKER_POLL_MS ?? 5000);
 const { dailyClientSyncCheckIntervalMs } = getSchedulerConfig();
 
+let isDraining = false;
+
 async function poll() {
+  if (isDraining) return;
+  isDraining = true;
   try {
     while (await processNextSyncJob()) {}
   } catch (error) {
     console.error("Sync worker error:", error instanceof Error ? error.message : error);
+  } finally {
+    isDraining = false;
+  }
+}
+
+async function startPolling() {
+  while (true) {
+    await poll();
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
 
@@ -23,8 +36,7 @@ async function maybeRunDailyClientSync() {
   }
 }
 
-void poll();
-setInterval(() => { void poll(); }, pollMs);
+void startPolling();
 
 void maybeRunDailyClientSync();
 setInterval(() => { void maybeRunDailyClientSync(); }, dailyClientSyncCheckIntervalMs);

@@ -2,6 +2,7 @@ import { BlockType, InsightPeriodType, MediaSource } from "@prisma/client";
 import { db } from "@/lib/db";
 import { decryptToken } from "@/lib/token-encryption";
 import { graph } from "@/lib/meta-sync";
+import { splitRangeByMonth } from "@/lib/report-period";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
@@ -257,7 +258,7 @@ export async function periodAccountReach(clientId: string, periodStart: Date, pe
 // ===== Account-level Total Views =====
 
 export type ViewsAccuracy = "EXACT" | "DERIVED" | null;
-export type ViewsMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "SNAPSHOT" | "UNAVAILABLE" | null;
+export type ViewsMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "AGGREGATE_OF_PERIOD_CHUNKS" | "SNAPSHOT" | "UNAVAILABLE" | null;
 
 export type ViewsResult = {
   value: number | null;
@@ -377,7 +378,7 @@ export async function periodAccountViews(clientId: string, periodStart: Date, pe
 // ===== Follower movement (gained / lost / net) =====
 
 export type FollowersAccuracy = "EXACT" | "DERIVED" | null;
-export type FollowersMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "UNAVAILABLE" | null;
+export type FollowersMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "AGGREGATE_OF_PERIOD_CHUNKS" | "UNAVAILABLE" | null;
 
 export type FollowersResult = {
   gained: number | null;
@@ -735,9 +736,10 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
   // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
-  const reach = await periodAccountReach(clientId, periodStart, periodEnd);
-  const followers = await periodAccountFollowers(clientId, periodStart, periodEnd);
-  const totalViews = await periodAccountViews(clientId, periodStart, periodEnd);
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  const reach = await periodAccountReachForRange(clientId, periodStart, periodEnd);
+  const followers = await periodAccountFollowersForRange(clientId, periodStart, periodEnd);
+  const totalViews = await periodAccountViewsForRange(clientId, periodStart, periodEnd);
   const hasReach = reach.value !== null;
   const hasFollows = followers.gained !== null;
   const hasTotalViews = totalViews.value !== null;
@@ -750,7 +752,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const topFollows = topBy("follows");
   const formats = ["REELS", "IMAGE", "VIDEO", "CAROUSEL_ALBUM"].map((mediaType) => ({ id: `format-${mediaType}`, label: mediaType === "REELS" ? "الريلز" : mediaType === "IMAGE" ? "المنشورات" : mediaType === "VIDEO" ? "الفيديوهات" : "الألبومات", value: String(posts.filter((post) => post.mediaType === mediaType).reduce((sum, post) => sum + (post.metrics.total_interactions ?? 0), 0)), display: "cards" })).filter((item) => Number(item.value) > 0);
 
-  const dailyMovement = await dailyFollowerMovement(clientId, periodStart, periodEnd);
+  const dailyMovement = days <= 31 ? await dailyFollowerMovement(clientId, periodStart, periodEnd) : { complete: false, gainedSeries: [] as Array<[string, number]>, lostSeries: [] as Array<[string, number]>, netSeries: [] as Array<[string, number]> };
   const expectedFollowerDays = daysBetweenInclusive(periodStart, periodEnd);
   const followerDataComplete = dailyMovement.complete && dailyMovement.gainedSeries.length >= expectedFollowerDays;
   const followerSource = followerDataComplete
@@ -812,4 +814,78 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     { type: BlockType.NOTES, title: "التوصيات", content: { body: "أضيفي توصيات عملية قابلة للتنفيذ للشهر القادم." } },
     { type: BlockType.TEXT, title: "شكراً على ثقتكم", content: { body: "Kaan Creative", page: "closing" } },
   ];
+}
+
+const LONG_RANGE_REACH_TOOLTIP = "لا يمكن حساب الوصول الفريد لأكثر من 31 يوماً؛ Meta API لا توفر نافذة وصول فريدة لهذه المدة وتجميع نوافذ أقصر لا يُنتج قيمة فريدة صحيحة.";
+const LONG_RANGE_AGGREGATE_TOOLTIP = "قيمة محسوبة بجمع القيم الشهرية (أو جزئية) باستخدام total_value المباشر أو التركيب المتداخل للنوافذ حيثما لزم الأمر. تنطبق على المقاييس التراكمية فقط.";
+
+/** Long-range Reach resolver.
+ *  - ≤30 days: exact Meta total_value.
+ *  - 31 days: existing overlapping-window estimate.
+ *  - >31 days: UNAVAILABLE. Unique Reach is non-additive; summing shorter windows
+ *    would misrepresent the true unique audience for the full period. */
+export async function periodAccountReachForRange(clientId: string, periodStart: Date, periodEnd: Date): Promise<ReachResult> {
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days <= 31) return periodAccountReach(clientId, periodStart, periodEnd);
+  return { value: null, accuracy: null, method: "UNAVAILABLE", tooltip: LONG_RANGE_REACH_TOOLTIP };
+}
+
+function mergeAccuracy(values: Array<"EXACT" | "DERIVED" | null>): "EXACT" | "DERIVED" | null {
+  if (values.some((a) => a === null)) return null;
+  if (values.includes("DERIVED")) return "DERIVED";
+  return "EXACT";
+}
+
+/** Long-range Total Views resolver.
+ *  - ≤31 days: delegates to periodAccountViews.
+ *  - >31 days: splits the range into calendar-month chunks (each ≤31 days),
+ *    resolves each chunk via the existing ≤31-day logic, and sums the results.
+ *    Total views are additive across disjoint time windows, so this aggregation is valid. */
+export async function periodAccountViewsForRange(clientId: string, periodStart: Date, periodEnd: Date): Promise<ViewsResult> {
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days <= 31) return periodAccountViews(clientId, periodStart, periodEnd);
+
+  const chunks = splitRangeByMonth(periodStart, periodEnd);
+  const results = await Promise.all(chunks.map((chunk) => periodAccountViews(clientId, chunk.start, chunk.end)));
+
+  if (results.some((r) => r.value === null)) {
+    return { value: null, accuracy: null, method: "UNAVAILABLE", tooltip: LONG_RANGE_AGGREGATE_TOOLTIP };
+  }
+
+  const total = results.reduce((sum, r) => sum + (r.value ?? 0), 0);
+  const accuracy = mergeAccuracy(results.map((r) => r.accuracy));
+  return {
+    value: total,
+    accuracy,
+    method: "AGGREGATE_OF_PERIOD_CHUNKS",
+    tooltip: LONG_RANGE_AGGREGATE_TOOLTIP,
+  };
+}
+
+/** Long-range Follower movement resolver.
+ *  - ≤31 days: delegates to periodAccountFollowers.
+ *  - >31 days: splits the range into calendar-month chunks and sums gained/lost/net.
+ *    Follower movement is additive across disjoint time windows, so this is valid. */
+export async function periodAccountFollowersForRange(clientId: string, periodStart: Date, periodEnd: Date): Promise<FollowersResult> {
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days <= 31) return periodAccountFollowers(clientId, periodStart, periodEnd);
+
+  const chunks = splitRangeByMonth(periodStart, periodEnd);
+  const results = await Promise.all(chunks.map((chunk) => periodAccountFollowers(clientId, chunk.start, chunk.end)));
+
+  if (results.some((r) => r.gained === null || r.lost === null)) {
+    return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE", tooltip: LONG_RANGE_AGGREGATE_TOOLTIP };
+  }
+
+  const gained = results.reduce((sum, r) => sum + (r.gained ?? 0), 0);
+  const lost = results.reduce((sum, r) => sum + (r.lost ?? 0), 0);
+  const accuracy = mergeAccuracy(results.map((r) => r.accuracy));
+  return {
+    gained,
+    lost,
+    net: gained - lost,
+    accuracy,
+    method: "AGGREGATE_OF_PERIOD_CHUNKS",
+    tooltip: LONG_RANGE_AGGREGATE_TOOLTIP,
+  };
 }

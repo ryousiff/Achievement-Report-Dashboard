@@ -6,6 +6,7 @@ import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 
 const { metaSyncMinIntervalMs } = getHistoricalBackfillConfig();
+const graphTimeoutMs = 30_000;
 
 type MetaMedia = {
   id: string;
@@ -87,38 +88,48 @@ export async function graph<T>(path: string, token: string, parameters: Record<s
     const wait = Math.max(0, lastRequestTime + currentIntervalMs - now);
     if (wait > 0) await sleep(wait);
 
-    const response = await fetch(url, { cache: "no-store" });
-    lastRequestTime = Date.now();
-    const usage = appUsageFrom(response.headers);
-    if (response.ok) {
-      adjustInterval(usage, false);
-      return response.json() as T;
-    }
+    try {
+      const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(graphTimeoutMs) });
+      lastRequestTime = Date.now();
+      const usage = appUsageFrom(response.headers);
+      if (response.ok) {
+        adjustInterval(usage, false);
+        return response.json() as T;
+      }
 
-    const body = await response.json().catch(() => ({})) as MetaErrorResponse;
-    const code = body.error?.code;
-    const rateLimited = response.status === 429 || code === 4 || code === 17 || code === 32 || code === 613;
-    // Permission errors (10, 200s) and "does not exist"/deleted-object errors (100) are not going to succeed on
-    // retry — classify them so callers can stop retrying instead of burning through attempts pointlessly.
-    const permanent = !rateLimited && (code === 10 || code === 100 || (code !== undefined && code >= 200 && code < 300));
-    const retryAfterHeader = Number(response.headers.get("retry-after"));
-    let retryAfterMs: number | undefined;
-    if (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0) {
-      retryAfterMs = Math.max(currentIntervalMs, retryAfterHeader * 1000);
-    } else if (rateLimited) {
-      // Application request limit (code 4) is app-level and typically needs several minutes to cool down,
-      // so default to a longer wait than the per-user transient rate limits.
-      const base = code === 4 ? 5 * 60 * 1000 : 60_000;
-      retryAfterMs = Math.max(base, currentIntervalMs * 10);
+      const body = await response.json().catch(() => ({})) as MetaErrorResponse;
+      const code = body.error?.code;
+      const rateLimited = response.status === 429 || code === 4 || code === 17 || code === 32 || code === 613;
+      // Permission errors (10, 200s) and "does not exist"/deleted-object errors (100) are not going to succeed on
+      // retry — classify them so callers can stop retrying instead of burning through attempts pointlessly.
+      const permanent = !rateLimited && (code === 10 || code === 100 || (code !== undefined && code >= 200 && code < 300));
+      const retryAfterHeader = Number(response.headers.get("retry-after"));
+      let retryAfterMs: number | undefined;
+      if (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0) {
+        retryAfterMs = Math.max(currentIntervalMs, retryAfterHeader * 1000);
+      } else if (rateLimited) {
+        // Application request limit (code 4) is app-level and typically needs several minutes to cool down,
+        // so default to a longer wait than the per-user transient rate limits.
+        const base = code === 4 ? 5 * 60 * 1000 : 60_000;
+        retryAfterMs = Math.max(base, currentIntervalMs * 10);
+      }
+      adjustInterval(usage, rateLimited);
+      throw new MetaSyncError(
+        body.error?.message ?? "Meta sync request failed.",
+        rateLimited ? "rate_limited" : "request_failed",
+        retryAfterMs,
+        permanent,
+        code,
+      );
+    } catch (error) {
+      if (error instanceof MetaSyncError) throw error;
+      // Network/timeouts from fetch itself should be retried, not treated as permanent failures.
+      throw new MetaSyncError(
+        error instanceof Error ? error.message : "Meta sync request failed.",
+        "request_failed",
+        30_000,
+      );
     }
-    adjustInterval(usage, rateLimited);
-    throw new MetaSyncError(
-      body.error?.message ?? "Meta sync request failed.",
-      rateLimited ? "rate_limited" : "request_failed",
-      retryAfterMs,
-      permanent,
-      code,
-    );
   };
 
   const next = requestQueue.then(execute);
