@@ -82,7 +82,6 @@ type Block = {
   mediaItems?: MediaPost[];
   mediaDisplay?: string[];
   kpis?: Kpi[];
-  comparison?: "previousMonth" | "previousPeriod" | "none";
 };
 type WorkspaceClient = {
   id: string;
@@ -160,7 +159,6 @@ type ReportMetadata = {
   periodType: ReportPeriod;
 };
 type Dictionary = (typeof copy)[Language];
-type Comparison = "previousMonth" | "previousPeriod" | "none";
 type MediaSort = "score" | "interactions" | "views" | "follows" | "newest";
 type CoverageStatus =
   "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" | "FAILED";
@@ -301,10 +299,6 @@ const copy = {
     platform: "المنصة",
     instagram: "إنستغرام",
     metrics: "المؤشرات",
-    comparison: "المقارنة",
-    previousMonth: "مقارنة بالشهر الماضي",
-    previousPeriod: "مقارنة بالفترة السابقة",
-    noComparison: "بدون مقارنة",
     customKpi: "مؤشر مخصص",
     customKpiHint: "أضيفي رقماً من العميل أو من أي نظام آخر.",
     kpiName: "اسم المؤشر",
@@ -316,15 +310,26 @@ const copy = {
     selectedMetrics: "مؤشرات مختارة",
     sampleData: "قيم تجريبية حتى يتم ربط بيانات Meta",
     followers: "المتابعون",
-    reachMetric: "الوصول",
-    impressions: "مرات الظهور",
-    engagementRate: "معدل التفاعل",
-    engagements: "إجمالي التفاعل",
-    profileVisits: "زيارات الملف الشخصي",
-    linkClicks: "نقرات الرابط",
-    reelsPlays: "مشاهدات الريلز",
-    saves: "الحفظ",
-    shares: "المشاركات",
+    metricReach: "الوصول",
+    metricTotalViews: "إجمالي المشاهدات",
+    metricViews: "مشاهدات المنشورات العضوية",
+    metricFollows: "المتابعون الجدد",
+    metricFollowersLost: "المتابعون المفقودون",
+    metricNetFollowerGrowth: "صافي نمو المتابعين",
+    metricPosts: "المنشورات",
+    metricOwnedPosts: "المنشورات الملكية",
+    metricCollabPosts: "المنشورات التعاونية",
+    metricInteractions: "إجمالي التفاعل",
+    metricLikes: "إعجاب",
+    metricComments: "تعليق",
+    metricShares: "المشاركات",
+    metricSaves: "الحفظ",
+    metricMediaFollows: "متابعات من المحتوى",
+    metricImpressions: "مرات الظهور",
+    metricEngagementRate: "معدل التفاعل",
+    metricProfileVisits: "زيارات الملف الشخصي",
+    metricLinkClicks: "نقرات الرابط",
+    metricReelsPlays: "مشاهدات الريلز",
   },
   EN: {
     workspace: "WORKSPACE",
@@ -413,10 +418,6 @@ const copy = {
     platform: "Platform",
     instagram: "Instagram",
     metrics: "Metrics",
-    comparison: "Comparison",
-    previousMonth: "Compare with previous month",
-    previousPeriod: "Compare with previous period",
-    noComparison: "No comparison",
     customKpi: "Custom KPI",
     customKpiHint: "Add a number from the client or another system.",
     kpiName: "KPI name",
@@ -428,15 +429,26 @@ const copy = {
     selectedMetrics: "Selected metrics",
     sampleData: "Sample values until Meta data is connected",
     followers: "Followers",
-    reachMetric: "Reach",
-    impressions: "Impressions",
-    engagementRate: "Engagement rate",
-    engagements: "Total engagements",
-    profileVisits: "Profile visits",
-    linkClicks: "Link clicks",
-    reelsPlays: "Reels plays",
-    saves: "Saves",
-    shares: "Shares",
+    metricReach: "Reach",
+    metricTotalViews: "Total views",
+    metricViews: "Organic post views",
+    metricFollows: "Followers gained",
+    metricFollowersLost: "Followers lost",
+    metricNetFollowerGrowth: "Net follower growth",
+    metricPosts: "Posts",
+    metricOwnedPosts: "Owned posts",
+    metricCollabPosts: "Collaborative posts",
+    metricInteractions: "Total interactions",
+    metricLikes: "Likes",
+    metricComments: "Comments",
+    metricShares: "Shares",
+    metricSaves: "Saves",
+    metricMediaFollows: "Media follows",
+    metricImpressions: "Impressions",
+    metricEngagementRate: "Engagement rate",
+    metricProfileVisits: "Profile visits",
+    metricLinkClicks: "Link clicks",
+    metricReelsPlays: "Reels plays",
   },
 } as const;
 
@@ -449,15 +461,26 @@ const blockIcons = {
 };
 const metricValues = {
   followers: ["12,540", "+8.2%"],
-  reachMetric: ["245,000", "+16.4%"],
-  impressions: ["412,800", "+11.8%"],
-  engagementRate: ["5.8%", "+0.7%"],
-  engagements: ["14,210", "+18.3%"],
-  profileVisits: ["9,640", "+12.5%"],
-  linkClicks: ["1,284", "+9.6%"],
-  reelsPlays: ["168,400", "+22.1%"],
-  saves: ["2,760", "+14.2%"],
-  shares: ["940", "+19.8%"],
+  metricReach: ["245,000", "+16.4%"],
+  metricTotalViews: ["412,800", "+11.8%"],
+  metricViews: ["168,400", "+22.1%"],
+  metricFollows: ["1,240", "+8.2%"],
+  metricFollowersLost: ["320", "-2.1%"],
+  metricNetFollowerGrowth: ["+920", "+6.1%"],
+  metricPosts: ["28", "+12.0%"],
+  metricOwnedPosts: ["25", "+10.0%"],
+  metricCollabPosts: ["3", "+50%"],
+  metricInteractions: ["14,210", "+18.3%"],
+  metricLikes: ["8,500", "+15.0%"],
+  metricComments: ["1,200", "+10.0%"],
+  metricShares: ["940", "+19.8%"],
+  metricSaves: ["2,760", "+14.2%"],
+  metricMediaFollows: ["350", "+5.0%"],
+  metricImpressions: ["412,800", "+11.8%"],
+  metricEngagementRate: ["5.8%", "+0.7%"],
+  metricProfileVisits: ["9,640", "+12.5%"],
+  metricLinkClicks: ["1,284", "+9.6%"],
+  metricReelsPlays: ["168,400", "+22.1%"],
 } as const;
 type MetricKey = keyof typeof metricValues;
 
@@ -595,32 +618,35 @@ export default function Home() {
       );
     if (syncResponse.status === 202)
       await waitForClientSync(reportMetadata.clientId);
-    const postsResponse = await fetch(
-      `/api/clients/${reportMetadata.clientId}/posts?periodStart=${reportMetadata.periodStart}&periodEnd=${reportMetadata.periodEnd}`,
-    );
+    const [postsResponse, metricsResponse] = await Promise.all([
+      fetch(
+        `/api/clients/${reportMetadata.clientId}/posts?periodStart=${reportMetadata.periodStart}&periodEnd=${reportMetadata.periodEnd}`,
+      ),
+      fetch(
+        `/api/clients/${reportMetadata.clientId}/period-metrics?periodStart=${reportMetadata.periodStart}&periodEnd=${reportMetadata.periodEnd}`,
+      ),
+    ]);
     if (!postsResponse.ok) throw new Error("تعذر جلب المنشورات المحدثة.");
+    if (!metricsResponse.ok) throw new Error("تعذر جلب إجماليات الفترة.");
     const data = (await postsResponse.json()) as {
       posts?: MediaPost[];
       followerSeries?: number[];
       followerLabels?: string[];
       hasFollowerData?: boolean;
     };
+    const metricsData = (await metricsResponse.json()) as Record<
+      string,
+      number | string | null
+    >;
     const latestPosts = data.posts ?? [];
     const followerSeries = data.followerSeries ?? [];
     const followerLabels = data.followerLabels ?? [];
     const hasFollowerData = data.hasFollowerData === true;
-    const totals = latestPosts.reduce(
-      (result, post) => {
-        Object.entries(post.metrics).forEach(([key, value]) => {
-          result[key] = (result[key] ?? 0) + value;
-        });
-        return result;
-      },
-      { posts: latestPosts.length } as Record<string, number>,
-    );
-    const hasReach = latestPosts.some(
-      (post) => typeof post.metrics.reach === "number",
-    );
+    const totals = { ...metricsData, posts: latestPosts.length } as Record<
+      string,
+      number
+    >;
+    const hasReach = typeof totals.reach === "number";
     setBlocks((current) =>
       current.map((block) => {
         if (
@@ -723,7 +749,6 @@ export default function Home() {
               { id: "followers", label: "نسبة نمو المتابعين", value: "0%" },
               { id: "posts", label: "منشور", value: "0" },
             ],
-            comparison: "previousMonth",
           },
           {
             id: 3,
@@ -738,7 +763,6 @@ export default function Home() {
               { id: "shares", label: "مشاركة", value: "0" },
               { id: "reposts", label: "إعادة نشر", value: "0" },
             ],
-            comparison: "previousMonth",
           },
           {
             id: 4,
@@ -753,7 +777,6 @@ export default function Home() {
                 display: "line",
               },
             ],
-            comparison: "previousMonth",
           },
           {
             id: 5,
@@ -772,7 +795,6 @@ export default function Home() {
               { id: "stories", label: "القصص", value: "4", display: "bar" },
               { id: "videos", label: "الفيديوهات", value: "1", display: "bar" },
             ],
-            comparison: "previousMonth",
           },
           {
             id: 7,
@@ -825,7 +847,6 @@ export default function Home() {
               { id: "followers", label: "Follower growth", value: "0%" },
               { id: "posts", label: "Posts", value: "0" },
             ],
-            comparison: "previousMonth",
           },
           {
             id: 3,
@@ -840,7 +861,6 @@ export default function Home() {
               { id: "shares", label: "Shares", value: "0" },
               { id: "reposts", label: "Reposts", value: "0" },
             ],
-            comparison: "previousMonth",
           },
           {
             id: 4,
@@ -947,12 +967,6 @@ export default function Home() {
             ? (content.summary as MonthlySummary)
             : undefined,
         kpis: Array.isArray(content.kpis) ? (content.kpis as Kpi[]) : undefined,
-        comparison:
-          content.comparison === "previousMonth" ||
-          content.comparison === "previousPeriod" ||
-          content.comparison === "none"
-            ? content.comparison
-            : undefined,
       };
     });
   };
@@ -1052,7 +1066,6 @@ export default function Home() {
         mediaDisplay:
           block.mediaDisplay ?? mediaSectionConfig(block.title).display,
         kpis: block.kpis ?? [],
-        comparison: block.comparison,
       },
     }));
     const response = await fetch("/api/reports", {
@@ -1087,7 +1100,6 @@ export default function Home() {
         mediaDisplay:
           block.mediaDisplay ?? mediaSectionConfig(block.title).display,
         kpis: block.kpis ?? [],
-        comparison: block.comparison,
       },
     }));
     const response = await fetch("/api/reports", {
@@ -1178,17 +1190,11 @@ export default function Home() {
     setBlank(false);
     setToast(t.sectionAdded);
   };
-  const addKpiBlock = (
-    kpis: Kpi[],
-    comparison: Block["comparison"],
-    presentation: MetricPresentation,
-  ) => {
+  const addKpiBlock = (kpis: Kpi[], presentation: MetricPresentation) => {
     setBlocks((current) =>
       kpiTargetBlockId
         ? current.map((block) =>
-            block.id === kpiTargetBlockId
-              ? { ...block, kpis: [...(block.kpis ?? []), ...kpis] }
-              : block,
+            block.id === kpiTargetBlockId ? { ...block, kpis } : block,
           )
         : [
             ...current,
@@ -1198,7 +1204,6 @@ export default function Home() {
               title: t.instagramPerformance,
               body: t.sampleData,
               kpis,
-              comparison,
               presentation,
             },
           ],
@@ -1397,12 +1402,6 @@ export default function Home() {
           kpis: Array.isArray(content.kpis)
             ? (content.kpis as Kpi[])
             : undefined,
-          comparison:
-            content.comparison === "previousMonth" ||
-            content.comparison === "previousPeriod" ||
-            content.comparison === "none"
-              ? content.comparison
-              : undefined,
         };
       }),
     );
@@ -1628,6 +1627,11 @@ export default function Home() {
         <KpiPicker
           t={t}
           periodType={reportMetadata.periodType}
+          existingKpis={
+            kpiTargetBlockId !== null
+              ? blocks.find((block) => block.id === kpiTargetBlockId)?.kpis
+              : undefined
+          }
           onClose={() => setKpiPickerOpen(false)}
           onAdd={addKpiBlock}
         />
@@ -2542,7 +2546,7 @@ function ReportBlock({
             إضافة مؤشر إلى هذه الصفحة
           </button>
           <div className="kpi-card-grid">
-            {block.kpis.map((kpi) =>
+            {block.kpis!.map((kpi, kpiIndex) =>
               kpi.display === "line" || kpi.display === "bar" ? (
                 <MetricTrendChart
                   key={kpi.id}
@@ -2597,7 +2601,7 @@ function ReportBlock({
                   >
                     {kpi.value}
                   </strong>
-                  {block.comparison !== "none" && kpi.change && (
+                  {kpi.change && (
                     <small
                       contentEditable
                       suppressContentEditableWarning
@@ -4249,9 +4253,7 @@ function ReportPreview({
                           <div className="print-kpi" key={kpi.id}>
                             <span>{kpi.label}</span>
                             <strong>{kpi.value}</strong>
-                            {block.comparison !== "none" && kpi.change && (
-                              <small>{kpi.change}</small>
-                            )}
+                            {kpi.change && <small>{kpi.change}</small>}
                           </div>
                         ),
                       )}
@@ -4433,33 +4435,62 @@ function MonthlySummaryPrint({
   );
 }
 
+const kpiPickerIdMap: Record<MetricKey, string> = {
+  followers: "followers",
+  metricReach: "reach",
+  metricTotalViews: "total-views",
+  metricViews: "views",
+  metricFollows: "follows",
+  metricFollowersLost: "followers-lost",
+  metricNetFollowerGrowth: "net-follower-growth",
+  metricPosts: "posts",
+  metricOwnedPosts: "owned-posts",
+  metricCollabPosts: "collaborative-posts",
+  metricInteractions: "total_interactions",
+  metricLikes: "likes",
+  metricComments: "comments",
+  metricShares: "shares",
+  metricSaves: "saved",
+  metricMediaFollows: "media-follows",
+  metricImpressions: "impressions",
+  metricEngagementRate: "engagement-rate",
+  metricProfileVisits: "profile-visits",
+  metricLinkClicks: "link-clicks",
+  metricReelsPlays: "reels-plays",
+};
+const kpiPickerReverseIdMap = Object.fromEntries(
+  Object.entries(kpiPickerIdMap).map(([key, id]) => [id, key]),
+) as Record<string, MetricKey>;
+
 function KpiPicker({
   t,
   periodType,
+  existingKpis,
   onClose,
   onAdd,
 }: {
   t: Dictionary;
   periodType: ReportPeriod;
+  existingKpis?: Kpi[];
   onClose: () => void;
-  onAdd: (
-    kpis: Kpi[],
-    comparison: Block["comparison"],
-    presentation: MetricPresentation,
-  ) => void;
+  onAdd: (kpis: Kpi[], presentation: MetricPresentation) => void;
 }) {
   const metricKeys = Object.keys(metricValues) as MetricKey[];
-  const [selected, setSelected] = useState<MetricKey[]>([
-    "followers",
-    "reachMetric",
-    "engagementRate",
-  ]);
-  const [comparison, setComparison] = useState<Comparison>("previousMonth");
+  const existingById = new Map((existingKpis ?? []).map((kpi) => [kpi.id, kpi]));
+  const [selected, setSelected] = useState<MetricKey[]>(() =>
+    existingKpis
+      ? (existingKpis
+          .map((kpi) => kpiPickerReverseIdMap[kpi.id])
+          .filter(Boolean) as MetricKey[])
+      : ["metricReach", "metricViews", "metricInteractions"],
+  );
   const [presentation, setPresentation] = useState<MetricPresentation>("cards");
   const [customName, setCustomName] = useState("");
   const [customValue, setCustomValue] = useState("");
   const [customChange, setCustomChange] = useState("");
-  const [customKpis, setCustomKpis] = useState<Kpi[]>([]);
+  const [customKpis, setCustomKpis] = useState<Kpi[]>(
+    () => existingKpis?.filter((kpi) => !kpiPickerReverseIdMap[kpi.id]) ?? [],
+  );
   const toggleMetric = (key: MetricKey) =>
     setSelected((current) =>
       current.includes(key)
@@ -4483,15 +4514,24 @@ function KpiPicker({
     setCustomValue("");
     setCustomChange("");
   };
+  const removeCustom = (id: string) =>
+    setCustomKpis((current) => current.filter((kpi) => kpi.id !== id));
+  const idMap = kpiPickerIdMap;
   const submit = () => {
-    const metrics = selected.map((key) => ({
-      id: key,
-      label: t[key],
-      value: metricValues[key][0],
-      change: metricValues[key][1],
-      display: presentation,
-    }));
-    onAdd([...metrics, ...customKpis], comparison, presentation);
+    const metrics = selected.map((key) => {
+      const id = idMap[key];
+      const existingKpi = existingById.get(id);
+      return (
+        existingKpi ?? {
+          id,
+          label: t[key],
+          value: metricValues[key][0],
+          change: metricValues[key][1],
+          display: presentation,
+        }
+      );
+    });
+    onAdd([...metrics, ...customKpis], presentation);
   };
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -4561,24 +4601,6 @@ function KpiPicker({
             ))}
           </div>
         </fieldset>
-        <fieldset className="picker-section">
-          <legend>{t.comparison}</legend>
-          <div className="comparison-options">
-            {(["previousMonth", "previousPeriod", "none"] as const).map(
-              (option) => (
-                <label key={option}>
-                  <input
-                    type="radio"
-                    name="comparison"
-                    checked={comparison === option}
-                    onChange={() => setComparison(option)}
-                  />
-                  {option === "none" ? t.noComparison : t[option]}
-                </label>
-              ),
-            )}
-          </div>
-        </fieldset>
         <fieldset className="picker-section custom-section">
           <legend>{t.customKpi}</legend>
           <p>{t.customKpiHint}</p>
@@ -4608,6 +4630,13 @@ function KpiPicker({
               {customKpis.map((kpi) => (
                 <span key={kpi.id}>
                   {kpi.label}: {kpi.value}
+                  <button
+                    type="button"
+                    aria-label="Remove custom KPI"
+                    onClick={() => removeCustom(kpi.id)}
+                  >
+                    <X size={11} />
+                  </button>
                 </span>
               ))}
             </div>
