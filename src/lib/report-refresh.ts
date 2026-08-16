@@ -15,6 +15,19 @@ type RefreshOptions = {
 
 const DEFAULT_OPTIONS: Required<RefreshOptions> = { skipMetaApi: true };
 
+/** Account-level period KPIs are not reconstructable exactly from the currently persisted daily/media
+ * snapshots. Reach is non-additive, account Total Views is not the same as summed media total_views,
+ * and follower period total_value can differ from the sum of the daily chart. Preserve the validated
+ * value already stored on the report during a DB-only refresh instead of silently replacing it with a
+ * mathematically different fallback. */
+const AUTHORITATIVE_PERIOD_KPI_IDS = new Set([
+  "reach",
+  "total-views",
+  "follows",
+  "followers-lost",
+  "net-follower-growth",
+]);
+
 /** Load the Instagram connection for a client. */
 async function fetchConnection(clientId: string) {
   return db.socialConnection.findFirst({
@@ -96,6 +109,12 @@ function mergeKpis(existing: unknown, fresh: unknown): unknown {
     const id = String(kpi.id ?? "");
     const freshKpi = freshById.get(id);
     if (!freshKpi) return kpi;
+
+    // DB-only refresh cannot currently reconstruct these account-level period totals with the same
+    // semantics as Meta total_value. Keep the report's validated snapshot until those totals are
+    // explicitly persisted by the sync pipeline.
+    if (AUTHORITATIVE_PERIOD_KPI_IDS.has(id)) return kpi;
+
     return {
       ...kpi,
       value: freshKpi.value,
