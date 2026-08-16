@@ -28,6 +28,20 @@ const AUTHORITATIVE_PERIOD_KPI_IDS = new Set([
   "net-follower-growth",
 ]);
 
+/** The DB-only builder can safely supply Reach only when it found one stored snapshot whose boundaries
+ * exactly match the requested report period. Its fallback daily-Reach sum carries a tooltip and must never
+ * replace the unique period Reach. Account Total Views and follower period totals are not persisted with
+ * their authoritative Meta total_value semantics yet, so their DB-only reconstructions are never accepted
+ * as replacements for report-level period KPIs. */
+function isSafeAuthoritativeFreshKpi(id: string, kpi: Record<string, unknown>) {
+  if (!AUTHORITATIVE_PERIOD_KPI_IDS.has(id)) return true;
+  if (kpi.available !== true) return false;
+  if (id === "reach") {
+    return kpi.reachMethod === "SNAPSHOT" && kpi.reachAccuracy === "EXACT" && kpi.tooltip === undefined;
+  }
+  return false;
+}
+
 /** Load the Instagram connection for a client. */
 async function fetchConnection(clientId: string) {
   return db.socialConnection.findFirst({
@@ -110,10 +124,9 @@ function mergeKpis(existing: unknown, fresh: unknown): unknown {
     const freshKpi = freshById.get(id);
     if (!freshKpi) return kpi;
 
-    // DB-only refresh cannot currently reconstruct these account-level period totals with the same
-    // semantics as Meta total_value. Keep the report's validated snapshot until those totals are
-    // explicitly persisted by the sync pipeline.
-    if (AUTHORITATIVE_PERIOD_KPI_IDS.has(id)) return kpi;
+    // Replace authoritative period KPIs only when the DB contains a semantically equivalent stored value.
+    // Otherwise keep the validated value already stored on the report.
+    if (AUTHORITATIVE_PERIOD_KPI_IDS.has(id) && !isSafeAuthoritativeFreshKpi(id, freshKpi)) return kpi;
 
     return {
       ...kpi,
@@ -130,7 +143,10 @@ function mergeKpis(existing: unknown, fresh: unknown): unknown {
     };
   });
   const existingIds = new Set(existingKpis.map((kpi) => String(kpi.id ?? "")));
-  const newKpis = freshKpis.filter((kpi) => !existingIds.has(String(kpi.id ?? "")));
+  const newKpis = freshKpis.filter((kpi) => {
+    const id = String(kpi.id ?? "");
+    return !existingIds.has(id) && (!AUTHORITATIVE_PERIOD_KPI_IDS.has(id) || isSafeAuthoritativeFreshKpi(id, kpi));
+  });
   return [...mergedKpis, ...newKpis];
 }
 
