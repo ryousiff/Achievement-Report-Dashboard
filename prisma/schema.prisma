@@ -310,6 +310,12 @@ model Report {
   isBlank                Boolean         @default(false)
   orientation            String          @default("landscape")
   approvalOverrideReason String?
+  // Set whenever refreshReportData() (src/lib/report-refresh.ts) recomputes this report's
+  // data-driven blocks from the database. Used to show "last refreshed" and to avoid
+  // redundant Meta API calls when export/refresh is triggered again shortly after.
+  dataRefreshedAt        DateTime?
+  coverageStatus         String?
+  coverageWarnings       Json?
   createdAt              DateTime        @default(now())
   updatedAt              DateTime        @updatedAt
   client                 Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)

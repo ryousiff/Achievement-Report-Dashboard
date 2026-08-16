@@ -4,7 +4,8 @@ import { db } from "@/lib/db";
 import { hasInternalApiAccess } from "@/lib/internal-api";
 import { hasFeature, requireFeature } from "@/lib/access";
 import { createReportDraft, ReportBlockType } from "@/lib/report-template";
-import { buildStandardReportBlocks } from "@/lib/report-data";
+import { buildStandardReportBlocksFromDatabase } from "@/lib/report-data";
+import { refreshReportData } from "@/lib/report-refresh";
 import { enqueueClientSync } from "@/lib/sync-queue";
 import { getCoverage } from "@/lib/report-coverage";
 
@@ -84,7 +85,7 @@ export async function POST(request: NextRequest) {
     }
     const hasSyncedPosts = template === "standard" && (await db.socialPost.count({ where: { connection: { clientId } } })) > 0;
     const syncQueued = template === "standard" && !hasSyncedPosts ? await enqueueClientSync(clientId) : [];
-    const populatedBlocks = template === "standard" ? await buildStandardReportBlocks(clientId, periodStart, periodEnd) : [];
+    const populatedBlocks = template === "standard" ? await buildStandardReportBlocksFromDatabase(clientId, periodStart, periodEnd) : [];
     const report = await db.report.create({
       data: {
         clientId,
@@ -98,7 +99,14 @@ export async function POST(request: NextRequest) {
       },
       include: { blocks: { orderBy: { position: "asc" } } },
     });
-    return NextResponse.json({ report, syncQueued: syncQueued.length > 0 }, { status: 201 });
+    if (template === "standard") {
+      await refreshReportData(report.id);
+    }
+    const refreshedReport = await db.report.findUnique({
+      where: { id: report.id },
+      include: { blocks: { orderBy: { position: "asc" } } },
+    });
+    return NextResponse.json({ report: refreshedReport ?? report, syncQueued: syncQueued.length > 0 }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid request." }, { status: 400 });
   }

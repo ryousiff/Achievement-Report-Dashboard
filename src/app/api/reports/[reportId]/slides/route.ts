@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireFeature } from "@/lib/access";
 import { GoogleReconnectRequiredError } from "@/lib/google";
 import { exportReportToSlides } from "@/lib/slides";
+import { refreshReportData } from "@/lib/report-refresh";
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ reportId: string }> }) {
   const user = await requireFeature(request, "export_report");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { reportId } = await params;
   try {
+    await refreshReportData(reportId);
     const result = await exportReportToSlides(reportId, user.id);
     return NextResponse.json(result);
   } catch (error) {

@@ -216,6 +216,36 @@ describe("buildStandardReportBlocks", () => {
     expect(lostKpi?.value).toBe("374");
     expect(netKpi?.value).toBe("+138");
   });
+
+  it("never presents the daily follower chart's own sum as the period total when it diverges from periodAccountFollowers", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { id: "p1", externalPostId: "ig-1", caption: "Owned", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-07-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 7 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE" }, mediaSource: MediaSource.OWNED },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.upsert.mockResolvedValue(null);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    // The account-level period total (via periodAccountFollowers' A/B/C window composition) resolves to
+    // gained=512. The daily "day"-period breakdown call used only by the chart is not mocked for any
+    // per-day window, so it returns no data — the chart's own daily sum is 0, deliberately diverging
+    // from the validated 512 total to reproduce the real-world mismatch.
+    setGraphReachValuesByWindow({
+      "1782864000__1785456000": { gained: 502, lost: 360 },
+      "1782950400__1785542400": { gained: 499, lost: 364 },
+      "1782950400__1785456000": { gained: 489, lost: 350 },
+    });
+
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+    const chartBlock = blocks.find((block) => block.type === "CHART" && block.title === "معدل اكتساب المتابعين اليومي");
+    expect(chartBlock).toBeDefined();
+    const content = chartBlock!.content as Record<string, unknown>;
+    const chart = content.chart as { insight?: string } | undefined;
+    expect(chart?.insight).toContain("512");
+    expect(chart?.insight).toContain("المصدر المعتمد");
+    // The chart's own (diverging) daily sum must never be presented as the period total on its own.
+    expect(chart?.insight).not.toBe("إجمالي المتابعين الجدد خلال الأيام المتاحة: 0.");
+  });
 });
 
 describe("periodAccountFollowers", () => {

@@ -6,6 +6,27 @@ import { splitRangeByMonth } from "@/lib/report-period";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
+/** Stable, non-editable markers (`content.refreshKey`) identifying which blocks in
+ * `buildStandardReportBlocks()`'s output are data-driven (safe to recompute/replace on
+ * refresh) vs. manual (cover/closing text, recommendations — never touched by refresh).
+ * Used by `refreshReportData()` (src/lib/report-refresh.ts) to merge freshly computed
+ * data into a report's already-saved blocks without discarding manual edits. */
+export const REPORT_DATA_DRIVEN_REFRESH_KEYS = [
+  "kpi-overview",
+  "kpi-interactions",
+  "chart-followers",
+  "media-top-follows",
+  "kpi-content-type",
+  "media-top-interactions",
+  "media-top-views",
+  "media-month-content",
+] as const;
+export type ReportRefreshKey =
+  | (typeof REPORT_DATA_DRIVEN_REFRESH_KEYS)[number]
+  | "cover"
+  | "notes-recommendations"
+  | "closing";
+
 export type ReachAccuracy = "EXACT" | "ESTIMATED" | null;
 export type ReachMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_ESTIMATE" | "SNAPSHOT" | "UNAVAILABLE" | null;
 
@@ -18,7 +39,7 @@ export type ReachResult = {
 
 type PostMetrics = Record<string, number>;
 type ReportPost = { id: string; externalPostId: string; caption: string | null; mediaType: string; mediaUrl: string | null; thumbnailUrl: string | null; permalink: string | null; publishedAt: string; metrics: PostMetrics; metricAvailability: Record<string, string>; metricAvailabilityState: Record<string, string> | null; mediaSource: MediaSource; isCollaborative: boolean; score: number };
-type ReportBlock = { type: BlockType; title: string; content: Record<string, unknown> };
+export type ReportBlock = { type: BlockType; title: string; content: Record<string, unknown> };
 
 export function completeDailySeries(periodStart: Date, periodEnd: Date, entries: Array<[string, number]>) {
   const valuesByDay = new Map(entries);
@@ -47,8 +68,8 @@ function kpi(id: string, label: string, value: string, available = true, extra?:
   return { id, label, value, available, display: "cards", ...extra };
 }
 
-function mediaBlock(title: string, body: string, posts: ReportPost[], display: string[]) {
-  return { type: BlockType.MEDIA, title, content: { body, mediaItems: posts, mediaDisplay: display, autoFilled: true } };
+function mediaBlock(title: string, body: string, posts: ReportPost[], display: string[], refreshKey: ReportRefreshKey) {
+  return { type: BlockType.MEDIA, title, content: { body, mediaItems: posts, mediaDisplay: display, autoFilled: true, refreshKey } };
 }
 
 export async function reportPosts(clientId: string, periodStart: Date, periodEnd: Date) {
@@ -378,7 +399,7 @@ export async function periodAccountViews(clientId: string, periodStart: Date, pe
 // ===== Follower movement (gained / lost / net) =====
 
 export type FollowersAccuracy = "EXACT" | "DERIVED" | null;
-export type FollowersMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "AGGREGATE_OF_PERIOD_CHUNKS" | "UNAVAILABLE" | null;
+export type FollowersMethod = "META_TOTAL_VALUE" | "OVERLAPPING_WINDOWS_COMPOSITION" | "AGGREGATE_OF_PERIOD_CHUNKS" | "SNAPSHOT" | "UNAVAILABLE" | null;
 
 export type FollowersResult = {
   gained: number | null;
@@ -729,7 +750,139 @@ export async function periodAccountMetricTotal(clientId: string, metric: "reach"
   return snapshots.reduce((sum, snapshot) => sum + snapshot.value, 0);
 }
 
-export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date): Promise<ReportBlock[]> {
+type ReportDataResolvers = {
+  reach: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<ReachResult>;
+  followers: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<FollowersResult>;
+  views: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<ViewsResult>;
+  dailyFollowerMovement: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<DailyFollowerMovement>;
+};
+
+const defaultReportDataResolvers: ReportDataResolvers = {
+  reach: periodAccountReachForRange,
+  followers: periodAccountFollowersForRange,
+  views: periodAccountViewsForRange,
+  dailyFollowerMovement,
+};
+
+const DB_ONLY_SUM_DAILY_REACH_TOOLTIP = "مجموع الوصول اليومي من بيانات متزامنة؛ قد يحتوي على أشخاص وصل إليهم أكثر من منشور واحد، لذا لا يُستخدم كوصول فريد.";
+const DB_ONLY_POST_SUM_VIEWS_TOOLTIP = "مجموع إجمالي المشاهدات على مستوى المنشورات من البيانات المتزامنة؛ قد تختلف عن قيمة الحساب الإجمالية في Meta.";
+
+/** Read account-level Reach from stored snapshots only (no Meta API calls).
+ *  Prefers an exact period snapshot, then falls back to a full daily sum for short periods. */
+export async function periodAccountReachFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<ReachResult> {
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days > 31) return { value: null, accuracy: null, method: "UNAVAILABLE", tooltip: LONG_RANGE_REACH_TOOLTIP };
+
+  const exactSnapshots = await db.socialInsightSnapshot.findMany({
+    where: {
+      connection: { clientId },
+      metric: "reach",
+      periodStart: { gte: startOfDayUTC(periodStart), lte: endOfDayUTC(periodStart) },
+      periodEnd: { gte: startOfDayUTC(periodEnd), lte: endOfDayUTC(periodEnd) },
+    },
+    select: { value: true, periodType: true },
+    orderBy: { periodEnd: "desc" },
+  });
+  const exact = exactSnapshots[0];
+  if (exact) return { value: exact.value, accuracy: "EXACT", method: "SNAPSHOT" };
+
+  if (days <= 31) {
+    const dailySnapshots = await db.socialInsightSnapshot.findMany({
+      where: {
+        connection: { clientId },
+        metric: "reach",
+        periodType: InsightPeriodType.DAY,
+        periodEnd: { gte: startOfDayUTC(periodStart), lte: endOfDayUTC(periodEnd) },
+      },
+      select: { value: true },
+    });
+    const expectedDays = daysBetweenInclusive(periodStart, periodEnd);
+    if (dailySnapshots.length >= expectedDays) {
+      return { value: dailySnapshots.reduce((sum, s) => sum + s.value, 0), accuracy: "EXACT", method: "SNAPSHOT", tooltip: DB_ONLY_SUM_DAILY_REACH_TOOLTIP };
+    }
+  }
+
+  return { value: null, accuracy: null, method: "UNAVAILABLE" };
+}
+
+/** Read account-level Total Views from stored post metrics only (no Meta API calls).
+ *  Sums media-level total_views because account-level total_value is not persisted. */
+export async function periodAccountViewsFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<ViewsResult> {
+  const posts = await reportPosts(clientId, periodStart, periodEnd);
+  const value = posts.reduce((sum, post) => sum + (post.metrics.total_views ?? 0), 0);
+  if (posts.length === 0) return { value: null, accuracy: null, method: "UNAVAILABLE" };
+  return { value, accuracy: "EXACT", method: "SNAPSHOT", tooltip: DB_ONLY_POST_SUM_VIEWS_TOOLTIP };
+}
+
+/** Read daily gained/lost follower snapshots without fetching from Meta. */
+export async function dailyFollowerMovementFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<DailyFollowerMovement> {
+  const connection = await fetchConnection(clientId);
+  if (!connection) return { gainedSeries: [], lostSeries: [], netSeries: [], complete: false };
+  const expected = daysBetweenInclusive(periodStart, periodEnd);
+  const gainedByDay = new Map<string, number>();
+  const lostByDay = new Map<string, number>();
+  const current = startOfDayUTC(periodStart);
+  const end = startOfDayUTC(periodEnd);
+  while (current <= end) {
+    const day = current.toISOString().slice(0, 10);
+    const periodEndDay = new Date(current);
+    periodEndDay.setUTCDate(periodEndDay.getUTCDate() + 1);
+    periodEndDay.setUTCHours(7);
+    const periodStartDay = new Date(periodEndDay);
+    periodStartDay.setUTCDate(periodStartDay.getUTCDate() - 1);
+    const [stored, storedLost] = await Promise.all([
+      db.socialInsightSnapshot.findFirst({ where: { connection: { clientId }, metric: "followers_gained", periodType: InsightPeriodType.DAY, periodStart: periodStartDay, periodEnd: periodEndDay }, select: { value: true } }),
+      db.socialInsightSnapshot.findFirst({ where: { connection: { clientId }, metric: "followers_lost", periodType: InsightPeriodType.DAY, periodStart: periodStartDay, periodEnd: periodEndDay }, select: { value: true } }),
+    ]);
+    if (stored && storedLost) {
+      gainedByDay.set(day, stored.value);
+      lostByDay.set(day, storedLost.value);
+    }
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  const complete = gainedByDay.size >= expected;
+  const gainedSeries = completeDailySeries(periodStart, periodEnd, [...gainedByDay.entries()]);
+  const lostSeries = completeDailySeries(periodStart, periodEnd, [...lostByDay.entries()]);
+  const netSeries: Array<[string, number]> = gainedSeries.map(([day, gained], i) => [day, gained - lostSeries[i][1]]);
+  return { gainedSeries, lostSeries, netSeries, complete };
+}
+
+/** Compose follower movement for longer periods from stored daily snapshots only. */
+export async function periodAccountFollowersFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<FollowersResult> {
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days <= 31) {
+    const movement = await dailyFollowerMovementFromDatabase(clientId, periodStart, periodEnd);
+    if (movement.gainedSeries.length === 0) return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE" };
+    const gained = movement.gainedSeries.reduce((sum, [, v]) => sum + v, 0);
+    const lost = movement.lostSeries.reduce((sum, [, v]) => sum + v, 0);
+    const accuracy = movement.complete ? "EXACT" : null;
+    const method = movement.complete ? "SNAPSHOT" : "UNAVAILABLE";
+    return { gained, lost, net: gained - lost, accuracy, method };
+  }
+
+  const chunks = splitRangeByMonth(periodStart, periodEnd);
+  let totalGained = 0;
+  let totalLost = 0;
+  for (const chunk of chunks) {
+    const movement = await dailyFollowerMovementFromDatabase(clientId, chunk.start, chunk.end);
+    if (movement.gainedSeries.length === 0) return { gained: null, lost: null, net: null, accuracy: null, method: "UNAVAILABLE", tooltip: LONG_RANGE_AGGREGATE_TOOLTIP };
+    totalGained += movement.gainedSeries.reduce((sum, [, v]) => sum + v, 0);
+    totalLost += movement.lostSeries.reduce((sum, [, v]) => sum + v, 0);
+  }
+  return { gained: totalGained, lost: totalLost, net: totalGained - totalLost, accuracy: "EXACT", method: "AGGREGATE_OF_PERIOD_CHUNKS", tooltip: LONG_RANGE_AGGREGATE_TOOLTIP };
+}
+
+/** Build standard blocks using only data already in the database. */
+export async function buildStandardReportBlocksFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<ReportBlock[]> {
+  return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
+    reach: periodAccountReachFromDatabase,
+    followers: periodAccountFollowersFromDatabase,
+    views: periodAccountViewsFromDatabase,
+    dailyFollowerMovement: dailyFollowerMovementFromDatabase,
+  });
+}
+
+export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}): Promise<ReportBlock[]> {
   const posts = await reportPosts(clientId, periodStart, periodEnd);
   const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
   const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
@@ -737,9 +890,10 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
   const days = daysBetweenInclusive(periodStart, periodEnd);
-  const reach = await periodAccountReachForRange(clientId, periodStart, periodEnd);
-  const followers = await periodAccountFollowersForRange(clientId, periodStart, periodEnd);
-  const totalViews = await periodAccountViewsForRange(clientId, periodStart, periodEnd);
+  const resolve = { ...defaultReportDataResolvers, ...resolvers };
+  const reach = await resolve.reach(clientId, periodStart, periodEnd);
+  const followers = await resolve.followers(clientId, periodStart, periodEnd);
+  const totalViews = await resolve.views(clientId, periodStart, periodEnd);
   const hasReach = reach.value !== null;
   const hasFollows = followers.gained !== null;
   const hasTotalViews = totalViews.value !== null;
@@ -752,14 +906,36 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const topFollows = topBy("follows");
   const formats = ["REELS", "IMAGE", "VIDEO", "CAROUSEL_ALBUM"].map((mediaType) => ({ id: `format-${mediaType}`, label: mediaType === "REELS" ? "الريلز" : mediaType === "IMAGE" ? "المنشورات" : mediaType === "VIDEO" ? "الفيديوهات" : "الألبومات", value: String(posts.filter((post) => post.mediaType === mediaType).reduce((sum, post) => sum + (post.metrics.total_interactions ?? 0), 0)), display: "cards" })).filter((item) => Number(item.value) > 0);
 
-  const dailyMovement = days <= 31 ? await dailyFollowerMovement(clientId, periodStart, periodEnd) : { complete: false, gainedSeries: [] as Array<[string, number]>, lostSeries: [] as Array<[string, number]>, netSeries: [] as Array<[string, number]> };
+  const dailyMovement = days <= 31 ? await resolve.dailyFollowerMovement(clientId, periodStart, periodEnd) : { complete: false, gainedSeries: [] as Array<[string, number]>, lostSeries: [] as Array<[string, number]>, netSeries: [] as Array<[string, number]> };
   const expectedFollowerDays = daysBetweenInclusive(periodStart, periodEnd);
   const followerDataComplete = dailyMovement.complete && dailyMovement.gainedSeries.length >= expectedFollowerDays;
+  // The daily chart has its own data source (a per-day `follows_and_unfollows` breakdown call) which is
+  // independent from the account-level period total resolved by periodAccountFollowers()/periodAccountFollowersForRange()
+  // (Meta's own range `total_value`, or an overlapping-windows composition for 31-day periods). Even when every
+  // day of the chart is present, the two can legitimately diverge — never let the chart's own daily sum stand
+  // in for, or be confused with, the validated period total shown on the KPI cards.
   const followerSource = followerDataComplete
     ? "بيانات المتابعين الجدد (follows_and_unfollows) اليومية من Meta."
     : `بيانات المتابعين الجدد (follows_and_unfollows) اليومية من Meta — متاحة لـ ${dailyMovement.gainedSeries.length} من أصل ${expectedFollowerDays} يوم.`;
   const followerValues = dailyMovement.gainedSeries.map(([, value]) => value);
   const followerLabels = dailyMovement.gainedSeries.map(([day]) => day);
+  const followerChartHasData = dailyMovement.gainedSeries.length > 0;
+  const dailyChartSum = followerValues.reduce((sum, value) => sum + value, 0);
+  const followerPeriodTotalLabel = hasFollows ? followers.gained!.toLocaleString() : "غير متاح";
+  const followerInsightLines = [
+    `إجمالي المتابعين الجدد خلال الأيام المتاحة: ${dailyChartSum.toLocaleString()}.`,
+    `إجمالي المتابعين الجدد للفترة (المصدر المعتمد): ${followerPeriodTotalLabel}.`,
+  ];
+  if (!followerDataComplete) {
+    followerInsightLines.push(
+      "تنبيه تغطية: بيانات الرسم البياني اليومية غير مكتملة لهذه الفترة، لذلك لا يعكس مجموعها الإجمالي الفعلي المعتمد أعلاه.",
+    );
+  } else if (hasFollows && dailyChartSum !== followers.gained) {
+    followerInsightLines.push(
+      "ملاحظة: القيمة المعتمدة أعلاه (periodAccountFollowers) هي المصدر الرسمي؛ الفرق عن مجموع الرسم البياني اليومي طبيعي بسبب اختلاف طريقة احتساب Meta بين المجموع اليومي والفترة الكاملة.",
+    );
+  }
+  const followerInsight = followerInsightLines.join(" ");
 
   const reachExtra = { reachAccuracy: reach.accuracy, reachMethod: reach.method, tooltip: reach.tooltip };
   const reachKpis = [
@@ -802,17 +978,17 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   }
 
   return [
-    { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover" } },
-    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true } },
-    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [kpi("total_interactions", metricLabel.total_interactions, hasMetric("total_interactions") ? totals.total_interactions.toLocaleString() : "غير متاح", hasMetric("total_interactions")), kpi("likes", metricLabel.likes, hasMetric("likes") ? totals.likes.toLocaleString() : "غير متاح", hasMetric("likes")), kpi("comments", metricLabel.comments, hasMetric("comments") ? totals.comments.toLocaleString() : "غير متاح", hasMetric("comments")), kpi("saved", "حفظ", hasMetric("saved") ? totals.saved.toLocaleString() : "غير متاح", hasMetric("saved")), kpi("shares", "مشاركة", hasMetric("shares") ? totals.shares.toLocaleString() : "غير متاح", hasMetric("shares"))], autoFilled: true } },
-    { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerDataComplete ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: `إجمالي المتابعين الجدد خلال الأيام المتاحة: ${followerValues.reduce((sum, value) => sum + value, 0).toLocaleString()}.` } } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ بعض الأيام ناقصة." } },
-    mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"]),
-    { type: BlockType.KPI, title: "التفاعل حسب نوع المحتوى", content: { body: "إجمالي التفاعل حسب نوع المنشور.", kpis: formats, autoFilled: true } },
-    mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"]),
-    mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"]),
-    mediaBlock("محتوى الشهر", "أضيفي نماذج إضافية من المحتوى أو احتفظي بالمنشورات المختارة تلقائياً.", [...posts].sort((left, right) => right.score - left.score).slice(0, 4), ["total_interactions", "views"]),
-    { type: BlockType.NOTES, title: "التوصيات", content: { body: "أضيفي توصيات عملية قابلة للتنفيذ للشهر القادم." } },
-    { type: BlockType.TEXT, title: "شكراً على ثقتكم", content: { body: "Kaan Creative", page: "closing" } },
+    { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [kpi("total_interactions", metricLabel.total_interactions, hasMetric("total_interactions") ? totals.total_interactions.toLocaleString() : "غير متاح", hasMetric("total_interactions")), kpi("likes", metricLabel.likes, hasMetric("likes") ? totals.likes.toLocaleString() : "غير متاح", hasMetric("likes")), kpi("comments", metricLabel.comments, hasMetric("comments") ? totals.comments.toLocaleString() : "غير متاح", hasMetric("comments")), kpi("saved", "حفظ", hasMetric("saved") ? totals.saved.toLocaleString() : "غير متاح", hasMetric("saved")), kpi("shares", "مشاركة", hasMetric("shares") ? totals.shares.toLocaleString() : "غير متاح", hasMetric("shares"))], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
+    { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
+    mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"], "media-top-follows"),
+    { type: BlockType.KPI, title: "التفاعل حسب نوع المحتوى", content: { body: "إجمالي التفاعل حسب نوع المنشور.", kpis: formats, autoFilled: true, refreshKey: "kpi-content-type" satisfies ReportRefreshKey } },
+    mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),
+    mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"], "media-top-views"),
+    mediaBlock("محتوى الشهر", "أضيفي نماذج إضافية من المحتوى أو احتفظي بالمنشورات المختارة تلقائياً.", [...posts].sort((left, right) => right.score - left.score).slice(0, 4), ["total_interactions", "views"], "media-month-content"),
+    { type: BlockType.NOTES, title: "التوصيات", content: { body: "أضيفي توصيات عملية قابلة للتنفيذ للشهر القادم.", refreshKey: "notes-recommendations" satisfies ReportRefreshKey } },
+    { type: BlockType.TEXT, title: "شكراً على ثقتكم", content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" satisfies ReportRefreshKey } },
   ];
 }
 

@@ -608,6 +608,8 @@ export default function Home() {
       );
     if (!reportMetadata.clientId)
       throw new Error("لم يتم اختيار عميل للتقرير.");
+    if (!draftId) throw new Error("لم يتم حفظ التقرير بعد.");
+    // Queue a sync first so the database has the latest data, then refresh the report server-side.
     const syncResponse = await fetch(
       `/api/clients/${reportMetadata.clientId}/sync`,
       { method: "POST" },
@@ -618,89 +620,14 @@ export default function Home() {
       );
     if (syncResponse.status === 202)
       await waitForClientSync(reportMetadata.clientId);
-    const [postsResponse, metricsResponse] = await Promise.all([
-      fetch(
-        `/api/clients/${reportMetadata.clientId}/posts?periodStart=${reportMetadata.periodStart}&periodEnd=${reportMetadata.periodEnd}`,
-      ),
-      fetch(
-        `/api/clients/${reportMetadata.clientId}/period-metrics?periodStart=${reportMetadata.periodStart}&periodEnd=${reportMetadata.periodEnd}`,
-      ),
-    ]);
-    if (!postsResponse.ok) throw new Error("تعذر جلب المنشورات المحدثة.");
-    if (!metricsResponse.ok) throw new Error("تعذر جلب إجماليات الفترة.");
-    const data = (await postsResponse.json()) as {
-      posts?: MediaPost[];
-      followerSeries?: number[];
-      followerLabels?: string[];
-      hasFollowerData?: boolean;
-    };
-    const metricsData = (await metricsResponse.json()) as Record<
-      string,
-      number | string | null
-    >;
-    const latestPosts = data.posts ?? [];
-    const followerSeries = data.followerSeries ?? [];
-    const followerLabels = data.followerLabels ?? [];
-    const hasFollowerData = data.hasFollowerData === true;
-    const totals = { ...metricsData, posts: latestPosts.length } as Record<
-      string,
-      number
-    >;
-    const hasReach = typeof totals.reach === "number";
-    setBlocks((current) =>
-      current.map((block) => {
-        if (
-          block.kind === "chart" &&
-          (block.chartUnavailable ||
-            block.chart?.metric.includes("المتابعون الجدد")) &&
-          hasFollowerData
-        )
-          return {
-            ...block,
-            title: "معدل اكتساب المتابعين اليومي",
-            body: "بيانات المتابعين الجدد اليومية من Meta خلال الفترة.",
-            chartUnavailable: false,
-            unavailableReason: undefined,
-            chart: {
-              type: "line",
-              metric: "المتابعون الجدد يومياً",
-              values: followerSeries.join(", "),
-              labels: followerLabels.join(", "),
-              insight: `إجمالي المتابعين الجدد خلال الأيام المتاحة: ${followerSeries.reduce((sum, value) => sum + value, 0).toLocaleString()}.`,
-            },
-          };
-        if (block.kind === "media" && block.mediaItems) {
-          const updatedItems = block.mediaItems.map((item) =>
-            item.id.startsWith("manual-")
-              ? item
-              : (latestPosts.find(
-                  (post) =>
-                    post.id === item.id ||
-                    post.externalPostId === item.externalPostId,
-                ) ?? item),
-          );
-          return { ...block, mediaItems: updatedItems };
-        }
-        if (block.kind === "kpi" && block.kpis)
-          return {
-            ...block,
-            kpis: block.kpis.map((kpi) =>
-              kpi.id === "engagement-rate"
-                ? {
-                    ...kpi,
-                    value:
-                      hasReach && totals.reach
-                        ? `${(((totals.total_interactions ?? 0) / totals.reach) * 100).toFixed(2)}%`
-                        : "غير متاح",
-                  }
-                : totals[kpi.id] !== undefined
-                  ? { ...kpi, value: totals[kpi.id].toLocaleString() }
-                  : kpi,
-            ),
-          };
-        return block;
-      }),
-    );
+    const response = await fetch(`/api/reports/${draftId}/refresh`, {
+      method: "POST",
+    });
+    if (!response.ok) {
+      const data = (await response.json()) as { error?: string };
+      throw new Error(data.error ?? "تعذر تحديث بيانات التقرير.");
+    }
+    await loadReport(draftId);
     const now = new Date().toISOString();
     setLastSyncedAt(now);
     return now;
@@ -1336,6 +1263,7 @@ export default function Home() {
         periodEnd: string;
         isBlank: boolean;
         status: "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED";
+        dataRefreshedAt?: string | null;
         blocks: Array<{ type: string; position: number; content: unknown }>;
       }>;
     };
@@ -1418,6 +1346,7 @@ export default function Home() {
     setReportStatus(report.status);
     setSaveState("saved");
     setSelectedReportId(report.id);
+    setLastSyncedAt(report.dataRefreshedAt ? new Date(report.dataRefreshedAt).toISOString() : null);
     setView("reports");
   };
   const loadSavedDraft = () => loadReport();
