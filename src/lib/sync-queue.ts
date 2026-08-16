@@ -24,6 +24,10 @@ function lockKey(connectionId: string, type: SyncJobType) {
   return `${connectionId}:${type}`;
 }
 
+function isHistoricalJob(type: SyncJobType) {
+  return type === SyncJobType.HISTORICAL_MEDIA_BACKFILL || type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL;
+}
+
 async function hasActiveJob(connectionId: string, type: SyncJobType) {
   return db.syncJob.findFirst({ where: { connectionId, type, status: { in: [SyncJobStatus.QUEUED, SyncJobStatus.RUNNING] } } });
 }
@@ -200,6 +204,23 @@ export async function enqueueHistoricalBackfill(connectionId: string) {
   const collabIncomplete = connection.collaborativeBackfillStatus !== BackfillStatus.COMPLETED;
   if (!ownedIncomplete && !collabIncomplete) throw new Error("Historical sync has already completed for this connection.");
 
+  // A previous transient failure may have left the connection itself marked FAILED even though a new
+  // resumable job is about to be queued. Reset that stale terminal state immediately so coverage/UI does
+  // not keep surfacing an old "fetch failed" while the retry is queued or running.
+  if (connection.historicalBackfillStatus === BackfillStatus.FAILED || connection.collaborativeBackfillStatus === BackfillStatus.FAILED) {
+    await db.socialConnection.update({
+      where: { id: connectionId },
+      data: {
+        ...(connection.historicalBackfillStatus === BackfillStatus.FAILED
+          ? { historicalBackfillStatus: BackfillStatus.PARTIAL, historicalBackfillLastError: null }
+          : {}),
+        ...(connection.collaborativeBackfillStatus === BackfillStatus.FAILED
+          ? { collaborativeBackfillStatus: BackfillStatus.PARTIAL, collaborativeBackfillLastError: null }
+          : {}),
+      },
+    });
+  }
+
   const jobs: Awaited<ReturnType<typeof enqueueJob>>[] = [];
 
   if (ownedIncomplete) {
@@ -363,6 +384,20 @@ export async function processNextSyncJob() {
   const lock = await db.socialConnection.updateMany({ where: { id: job.connectionId, OR: [{ syncLockedUntil: null }, { syncLockedUntil: { lt: new Date() } }] }, data: { syncLockedUntil: new Date(Date.now() + lockMs) } });
   if (!lock.count) { await db.syncJob.update({ where: { id: job.id }, data: { status: SyncJobStatus.QUEUED, lockedAt: null, runAfter: new Date(Date.now() + 10_000) } }); return null; }
 
+  // Once a historical retry is actually claimed, the connection must reflect that it is running and
+  // must not keep exposing a stale terminal error from an earlier attempt.
+  if (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL) {
+    await db.socialConnection.update({
+      where: { id: job.connectionId },
+      data: { historicalBackfillStatus: BackfillStatus.RUNNING, historicalBackfillLastError: null },
+    });
+  } else if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) {
+    await db.socialConnection.update({
+      where: { id: job.connectionId },
+      data: { collaborativeBackfillStatus: BackfillStatus.RUNNING, collaborativeBackfillLastError: null },
+    });
+  }
+
   const run = await db.syncRun.create({ data: { jobId: job.id, connectionId: job.connectionId } });
   const startedAt = Date.now();
   logEvent("sync.job.started", { jobId: job.id, connectionId: job.connectionId, type: job.type, lockKey: key, platform: connection.platform, attempt: job.attempts + 1 });
@@ -409,6 +444,7 @@ export async function processNextSyncJob() {
     const errorCode = error instanceof ConnectorError ? error.code : "sync_failed";
     const isRateLimited = errorCode === "rate_limited";
     const isMetaRateLimit = isRateLimited && connection.platform === Platform.INSTAGRAM;
+    const transientHistoricalFailure = connection.platform === Platform.INSTAGRAM && isHistoricalJob(job.type) && retryable;
 
     let cooldownUntil: Date | null = null;
     if (isMetaRateLimit) {
@@ -416,22 +452,39 @@ export async function processNextSyncJob() {
       cooldownUntil = await setMetaAppCooldownUntil(retryAfter);
     }
 
-    // Rate-limited jobs (especially Meta #4 application limit) can take hours to clear, so give them
-    // more attempts instead of failing after the default 5.
-    const maxAttempts = isRateLimited && retryable ? Math.max(job.maxAttempts, attempts + 10) : job.maxAttempts;
+    // Historical jobs are resumable and must not become terminally FAILED because of transient network
+    // failures such as Node's "fetch failed" or Meta application rate limits. Permanent permission/object
+    // errors remain non-retryable and can still fail normally.
+    const maxAttempts = transientHistoricalFailure || (isRateLimited && retryable)
+      ? Math.max(job.maxAttempts, attempts + 10)
+      : job.maxAttempts;
     let failed = !retryable || attempts >= maxAttempts;
-
-    // Historical backfills must never be marked FAILED for a transient Meta application rate limit.
-    if (failed && isMetaRateLimit && (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL || job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL)) {
-      failed = false;
-    }
+    if (failed && transientHistoricalFailure) failed = false;
 
     const retryAfter = error instanceof ConnectorError ? error.retryAfterMs : undefined;
     const now = new Date();
     const connectionUpdate: Record<string, unknown> = { syncLockedUntil: null };
     if (job.type === SyncJobType.INCREMENTAL_MEDIA_SYNC) { connectionUpdate.lastFailedSyncAt = now; connectionUpdate.lastFailureReason = message; connectionUpdate.lastIncrementalSyncError = message; }
-    if (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL && failed) { connectionUpdate.historicalBackfillStatus = BackfillStatus.FAILED; connectionUpdate.historicalBackfillLastError = message; connectionUpdate.historicalBackfillRetryCount = { increment: 1 }; }
-    if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL && failed) { connectionUpdate.collaborativeBackfillStatus = BackfillStatus.FAILED; connectionUpdate.collaborativeBackfillLastError = message; connectionUpdate.collaborativeBackfillRetryCount = { increment: 1 }; }
+    if (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL) {
+      if (failed) {
+        connectionUpdate.historicalBackfillStatus = BackfillStatus.FAILED;
+        connectionUpdate.historicalBackfillLastError = message;
+        connectionUpdate.historicalBackfillRetryCount = { increment: 1 };
+      } else {
+        connectionUpdate.historicalBackfillStatus = BackfillStatus.PARTIAL;
+        connectionUpdate.historicalBackfillLastError = message;
+      }
+    }
+    if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) {
+      if (failed) {
+        connectionUpdate.collaborativeBackfillStatus = BackfillStatus.FAILED;
+        connectionUpdate.collaborativeBackfillLastError = message;
+        connectionUpdate.collaborativeBackfillRetryCount = { increment: 1 };
+      } else {
+        connectionUpdate.collaborativeBackfillStatus = BackfillStatus.PARTIAL;
+        connectionUpdate.collaborativeBackfillLastError = message;
+      }
+    }
     if (job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC) connectionUpdate.accountInsightsLastError = message;
 
     const runAfter = isMetaRateLimit && cooldownUntil
