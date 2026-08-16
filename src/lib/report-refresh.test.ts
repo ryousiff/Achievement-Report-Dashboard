@@ -66,11 +66,23 @@ beforeEach(() => {
 });
 
 describe("refreshReportData", () => {
-  it("replaces data-driven KPI blocks from the database and preserves manual blocks", async () => {
+  it("refreshes safe DB metrics, preserves authoritative period KPIs, and preserves manual blocks", async () => {
     const manualBody = "توصيات مخصصة";
     const report = createReport([
       { type: BlockType.TEXT, position: 0, content: { body: "غلاف مخصص", page: "cover", refreshKey: "cover" } },
-      { type: BlockType.KPI, position: 1, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [{ id: "reach", label: "وصول", value: "0", available: true }] } },
+      {
+        type: BlockType.KPI,
+        position: 1,
+        content: {
+          body: "نظرة عامة",
+          refreshKey: "kpi-overview",
+          kpis: [
+            { id: "reach", label: "وصول", value: "0", available: true },
+            { id: "follows", label: "المتابعون الجدد", value: "512", available: true, followersAccuracy: "DERIVED", followersMethod: "OVERLAPPING_WINDOWS_COMPOSITION" },
+            { id: "total-views", label: "إجمالي المشاهدات", value: "818,485", available: true, viewsAccuracy: "DERIVED", viewsMethod: "OVERLAPPING_WINDOWS_COMPOSITION" },
+          ],
+        },
+      },
       { type: BlockType.KPI, position: 2, content: { body: "تفاعلات", refreshKey: "kpi-interactions", kpis: [{ id: "total_interactions", label: "تفاعل", value: "0", available: true }] } },
       { type: BlockType.NOTES, position: 3, content: { body: manualBody, refreshKey: "notes-recommendations" } },
       { type: BlockType.TEXT, position: 4, content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" } },
@@ -118,10 +130,13 @@ describe("refreshReportData", () => {
     expect(createdBlocks[3].content.body).toBe(manualBody);
     expect(createdBlocks[4].content.body).toBe("Kaan Creative");
 
-    // KPI values refreshed from DB-only data
+    // Exact matching Reach snapshot is safe to refresh from DB.
     const overviewKpis = createdBlocks[1].content.kpis as Array<{ id: string; value: string }>;
     expect(overviewKpis.find((k) => k.id === "reach")?.value).toBe("300");
-    expect(overviewKpis.find((k) => k.id === "follows")?.value).toBe("30");
+
+    // Account-level period totals must not be replaced by daily/media DB reconstructions.
+    expect(overviewKpis.find((k) => k.id === "follows")?.value).toBe("512");
+    expect(overviewKpis.find((k) => k.id === "total-views")?.value).toBe("818,485");
 
     const interactionsKpis = createdBlocks[2].content.kpis as Array<{ id: string; value: string }>;
     expect(interactionsKpis.find((k) => k.id === "total_interactions")?.value).toBe("50");
