@@ -455,9 +455,9 @@ export async function processNextSyncJob() {
     // Historical jobs are resumable and must not become terminally FAILED because of transient network
     // failures such as Node's "fetch failed" or Meta application rate limits. Permanent permission/object
     // errors remain non-retryable and can still fail normally.
-    const maxAttempts = transientHistoricalFailure || (isRateLimited && retryable)
+    const maxAttempts = transientHistoricalFailure
       ? Math.max(job.maxAttempts, attempts + 10)
-      : job.maxAttempts;
+      : Math.min(job.maxAttempts, 5);
     let failed = !retryable || attempts >= maxAttempts;
     if (failed && transientHistoricalFailure) failed = false;
 
