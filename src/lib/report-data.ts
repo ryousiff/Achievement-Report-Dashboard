@@ -10,7 +10,11 @@ export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | 
  * `buildStandardReportBlocks()`'s output are data-driven (safe to recompute/replace on
  * refresh) vs. manual (cover/closing text, recommendations — never touched by refresh).
  * Used by `refreshReportData()` (src/lib/report-refresh.ts) to merge freshly computed
- * data into a report's already-saved blocks without discarding manual edits. */
+ * data into a report's already-saved blocks without discarding manual edits.
+ *
+ * "kpi-content-type" is kept here even though `buildStandardReportBlocks` no longer emits
+ * it, so `refreshReportData` still recognizes it as data-driven (rather than manual) and
+ * drops any block still carrying it from older, already-saved reports on their next refresh. */
 export const REPORT_DATA_DRIVEN_REFRESH_KEYS = [
   "kpi-overview",
   "kpi-interactions",
@@ -904,7 +908,6 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const topInteractions = topBy("total_interactions");
   const topViews = topBy("views");
   const topFollows = topBy("follows");
-  const formats = ["REELS", "IMAGE", "VIDEO", "CAROUSEL_ALBUM"].map((mediaType) => ({ id: `format-${mediaType}`, label: mediaType === "REELS" ? "الريلز" : mediaType === "IMAGE" ? "المنشورات" : mediaType === "VIDEO" ? "الفيديوهات" : "الألبومات", value: String(posts.filter((post) => post.mediaType === mediaType).reduce((sum, post) => sum + (post.metrics.total_interactions ?? 0), 0)), display: "cards" })).filter((item) => Number(item.value) > 0);
 
   const dailyMovement = days <= 31 ? await resolve.dailyFollowerMovement(clientId, periodStart, periodEnd) : { complete: false, gainedSeries: [] as Array<[string, number]>, lostSeries: [] as Array<[string, number]>, netSeries: [] as Array<[string, number]> };
   const expectedFollowerDays = daysBetweenInclusive(periodStart, periodEnd);
@@ -983,7 +986,6 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [kpi("total_interactions", metricLabel.total_interactions, hasMetric("total_interactions") ? totals.total_interactions.toLocaleString() : "غير متاح", hasMetric("total_interactions")), kpi("likes", metricLabel.likes, hasMetric("likes") ? totals.likes.toLocaleString() : "غير متاح", hasMetric("likes")), kpi("comments", metricLabel.comments, hasMetric("comments") ? totals.comments.toLocaleString() : "غير متاح", hasMetric("comments")), kpi("saved", "حفظ", hasMetric("saved") ? totals.saved.toLocaleString() : "غير متاح", hasMetric("saved")), kpi("shares", "مشاركة", hasMetric("shares") ? totals.shares.toLocaleString() : "غير متاح", hasMetric("shares"))], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
     mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"], "media-top-follows"),
-    { type: BlockType.KPI, title: "التفاعل حسب نوع المحتوى", content: { body: "إجمالي التفاعل حسب نوع المنشور.", kpis: formats, autoFilled: true, refreshKey: "kpi-content-type" satisfies ReportRefreshKey } },
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),
     mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"], "media-top-views"),
     mediaBlock("محتوى الشهر", "أضيفي نماذج إضافية من المحتوى أو احتفظي بالمنشورات المختارة تلقائياً.", [...posts].sort((left, right) => right.score - left.score).slice(0, 4), ["total_interactions", "views"], "media-month-content"),

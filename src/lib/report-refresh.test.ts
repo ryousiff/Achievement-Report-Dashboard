@@ -209,6 +209,32 @@ describe("refreshReportData", () => {
     expect(mockDb.report.update).toHaveBeenCalled();
   });
 
+  it("drops a saved data-driven block whose refreshKey the builder no longer produces", async () => {
+    const report = createReport([
+      { type: BlockType.KPI, position: 0, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [] } },
+      { type: BlockType.KPI, position: 1, content: { body: "إجمالي التفاعل حسب نوع المنشور.", refreshKey: "kpi-content-type", kpis: [{ id: "format-IMAGE", label: "المنشورات", value: "17" }] } },
+      { type: BlockType.NOTES, position: 2, content: { body: "توصيات مخصصة", refreshKey: "notes-recommendations" } },
+    ]);
+
+    mockDb.report.findUnique.mockResolvedValue(report);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockDb.socialPost.findMany.mockResolvedValue([defaultPost()]);
+    mockDb.socialPost.count.mockResolvedValue(1);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.count.mockResolvedValue(1);
+    mockDb.report.update.mockResolvedValue({});
+
+    await refreshReportData("report-1");
+
+    const updateData = mockDb.report.update.mock.calls[0][0].data as { blocks: { create: Array<{ content: Record<string, unknown> }> } };
+    const refreshKeys = updateData.blocks.create.map((block) => block.content.refreshKey);
+    expect(refreshKeys).not.toContain("kpi-content-type");
+    expect(refreshKeys).toContain("kpi-overview");
+    expect(refreshKeys).toContain("notes-recommendations");
+  });
+
   it("throws when the report is approved", async () => {
     mockDb.report.findUnique.mockResolvedValue({ ...createReport([]), status: "APPROVED" });
     await expect(refreshReportData("report-1")).rejects.toThrow("Approved reports are frozen");

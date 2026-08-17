@@ -181,7 +181,7 @@ function mergeBlockContent(existing: ReportBlock, fresh: ReportBlock): ReportBlo
     merged.body = existingContent.body;
   }
 
-  if (refreshKey === "kpi-overview" || refreshKey === "kpi-interactions" || refreshKey === "kpi-content-type") {
+  if (refreshKey === "kpi-overview" || refreshKey === "kpi-interactions") {
     merged.kpis = mergeKpis(existingContent.kpis, freshContent.kpis);
   } else if (refreshKey === "chart-followers") {
     merged.chart = freshContent.chart;
@@ -229,7 +229,11 @@ export async function refreshReportData(reportId: string, options: RefreshOption
       content: dbBlock.content as Record<string, unknown>,
     };
     const key = getRefreshKey(existing.content);
-    if (key && isDataDrivenRefreshKey(key) && freshByKey.has(key)) {
+    if (key && isDataDrivenRefreshKey(key)) {
+      // A data-driven block whose refreshKey the builder no longer produces has been retired from the
+      // standard template (e.g. a section removed from buildStandardReportBlocks); drop it on refresh
+      // instead of leaving a stale, un-refreshable block behind.
+      if (!freshByKey.has(key)) continue;
       mergedBlocks.push(mergeBlockContent(existing, freshByKey.get(key)!));
       usedKeys.add(key);
     } else {
