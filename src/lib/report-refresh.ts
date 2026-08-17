@@ -5,7 +5,12 @@ import {
   type ReportBlock,
   type ReportRefreshKey,
 } from "@/lib/report-data";
-import { buildStandardReportBlocksFromStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
+import {
+  buildStandardReportBlocksFromStoredPeriodSnapshots,
+  storedAccountFollowersForRange,
+  storedAccountReachForRange,
+  storedAccountViewsForRange,
+} from "@/lib/stored-period-metrics";
 
 type RefreshOptions = {
   /** When true (default), the refresh only reads data already in the database and does not
@@ -31,6 +36,12 @@ function isSafeAuthoritativeFreshKpi(id: string, kpi: Record<string, unknown>) {
   return kpi.available === true;
 }
 
+function daysBetweenInclusive(from: Date, to: Date) {
+  const start = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+  return Math.max(1, Math.floor((end - start) / (24 * 60 * 60 * 1000)) + 1);
+}
+
 /** Load the Instagram connection for a client. */
 async function fetchConnection(clientId: string) {
   return db.socialConnection.findFirst({
@@ -39,7 +50,7 @@ async function fetchConnection(clientId: string) {
   });
 }
 
-/** Determine a simple DB-only coverage status and warnings for the report period. */
+/** Determine DB-only report coverage using the same authoritative period snapshots that refresh/export use. */
 async function computeCoverageSummary(clientId: string, periodStart: Date, periodEnd: Date) {
   const connection = await fetchConnection(clientId);
   const warnings: string[] = [];
@@ -65,28 +76,25 @@ async function computeCoverageSummary(clientId: string, periodStart: Date, perio
   }
 
   if (connection) {
-    const reachSnapshots = await db.socialInsightSnapshot.count({
-      where: {
-        connectionId: connection.id,
-        metric: "reach",
-        periodEnd: { gte: periodStart, lte: periodEnd },
-      },
-    });
-    if (reachSnapshots === 0) {
-      if (status === "COMPLETE") status = "PARTIAL";
-      warnings.push("لا تتوفر بيانات وصول للحساب في هذه الفترة.");
-    }
+    const [reach, views, followers] = await Promise.all([
+      storedAccountReachForRange(clientId, periodStart, periodEnd),
+      storedAccountViewsForRange(clientId, periodStart, periodEnd),
+      storedAccountFollowersForRange(clientId, periodStart, periodEnd),
+    ]);
+    const days = daysBetweenInclusive(periodStart, periodEnd);
 
-    const followerSnapshots = await db.socialInsightSnapshot.count({
-      where: {
-        connectionId: connection.id,
-        metric: { in: ["followers_gained", "followers_lost"] },
-        periodEnd: { gte: periodStart, lte: periodEnd },
-      },
-    });
-    if (followerSnapshots === 0) {
+    // Reach is intentionally non-additive beyond 31 days, so its absence does not make a quarter/year partial.
+    if (days <= 31 && reach.value === null) {
       if (status === "COMPLETE") status = "PARTIAL";
-      warnings.push("لا تتوفر بيانات حركة المتابعين للفترة المطلوبة.");
+      warnings.push("لا تتوفر قيمة الوصول المعتمدة لهذه الفترة بعد.");
+    }
+    if (views.value === null) {
+      if (status === "COMPLETE") status = "PARTIAL";
+      warnings.push("لا تتوفر قيمة إجمالي المشاهدات المعتمدة لكل أشهر الفترة بعد.");
+    }
+    if (followers.gained === null || followers.lost === null) {
+      if (status === "COMPLETE") status = "PARTIAL";
+      warnings.push("لا تتوفر قيم حركة المتابعين المعتمدة لكل أشهر الفترة بعد.");
     }
   }
 
