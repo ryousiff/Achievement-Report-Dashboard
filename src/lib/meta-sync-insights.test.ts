@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDailyInsightChunks } from "@/lib/meta-sync-insights";
+import { buildDailyInsightChunks, completedMonthsWithinLookback } from "@/lib/meta-sync-insights";
 
 const toISODate = (date: Date) => date.toISOString().slice(0, 10);
 
@@ -39,5 +39,27 @@ describe("buildDailyInsightChunks", () => {
     const to = new Date("2026-08-01T00:00:00.000Z");
     const chunks = buildDailyInsightChunks(from, to, 30);
     expect(chunks.length).toBe(0);
+  });
+});
+
+describe("completedMonthsWithinLookback", () => {
+  it("returns only fully retrievable completed months, newest first", () => {
+    const months = completedMonthsWithinLookback(
+      new Date("2026-08-17T06:00:00.000Z"),
+      new Date("2026-05-19T00:00:00.000Z"),
+    );
+
+    expect(months.map((month) => [toISODate(month.start), toISODate(month.end)])).toEqual([
+      ["2026-07-01", "2026-07-31"],
+      ["2026-06-01", "2026-06-30"],
+    ]);
+  });
+
+  it("never includes the current partial month", () => {
+    const months = completedMonthsWithinLookback(
+      new Date("2026-08-01T00:01:00.000Z"),
+      new Date("2026-07-01T00:00:00.000Z"),
+    );
+    expect(months.map((month) => toISODate(month.start))).toEqual(["2026-07-01"]);
   });
 });
