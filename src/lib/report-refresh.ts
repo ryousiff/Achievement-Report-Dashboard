@@ -1,11 +1,11 @@
 import { BlockType, Prisma, SyncJobStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import {
-  buildStandardReportBlocksFromDatabase,
   REPORT_DATA_DRIVEN_REFRESH_KEYS,
   type ReportBlock,
   type ReportRefreshKey,
 } from "@/lib/report-data";
+import { buildStandardReportBlocksFromStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
 
 type RefreshOptions = {
   /** When true (default), the refresh only reads data already in the database and does not
@@ -15,11 +15,7 @@ type RefreshOptions = {
 
 const DEFAULT_OPTIONS: Required<RefreshOptions> = { skipMetaApi: true };
 
-/** Account-level period KPIs are not reconstructable exactly from the currently persisted daily/media
- * snapshots. Reach is non-additive, account Total Views is not the same as summed media total_views,
- * and follower period total_value can differ from the sum of the daily chart. Preserve the validated
- * value already stored on the report during a DB-only refresh instead of silently replacing it with a
- * mathematically different fallback. */
+/** These KPIs use account-level period semantics and must never be replaced by daily/media reconstructions. */
 const AUTHORITATIVE_PERIOD_KPI_IDS = new Set([
   "reach",
   "total-views",
@@ -28,18 +24,11 @@ const AUTHORITATIVE_PERIOD_KPI_IDS = new Set([
   "net-follower-growth",
 ]);
 
-/** The DB-only builder can safely supply Reach only when it found one stored snapshot whose boundaries
- * exactly match the requested report period. Its fallback daily-Reach sum carries a tooltip and must never
- * replace the unique period Reach. Account Total Views and follower period totals are not persisted with
- * their authoritative Meta total_value semantics yet, so their DB-only reconstructions are never accepted
- * as replacements for report-level period KPIs. */
+/** The DB-only builder used here returns account-level period KPIs only from persisted TOTAL_VALUE
+ * snapshots. If a snapshot for the requested range is missing, keep the previously validated report value. */
 function isSafeAuthoritativeFreshKpi(id: string, kpi: Record<string, unknown>) {
   if (!AUTHORITATIVE_PERIOD_KPI_IDS.has(id)) return true;
-  if (kpi.available !== true) return false;
-  if (id === "reach") {
-    return kpi.reachMethod === "SNAPSHOT" && kpi.reachAccuracy === "EXACT" && kpi.tooltip === undefined;
-  }
-  return false;
+  return kpi.available === true;
 }
 
 /** Load the Instagram connection for a client. */
@@ -124,8 +113,7 @@ function mergeKpis(existing: unknown, fresh: unknown): unknown {
     const freshKpi = freshById.get(id);
     if (!freshKpi) return kpi;
 
-    // Replace authoritative period KPIs only when the DB contains a semantically equivalent stored value.
-    // Otherwise keep the validated value already stored on the report.
+    // Authoritative period KPIs are replaced only when the DB has a persisted period snapshot.
     if (AUTHORITATIVE_PERIOD_KPI_IDS.has(id) && !isSafeAuthoritativeFreshKpi(id, freshKpi)) return kpi;
 
     return {
@@ -210,8 +198,7 @@ export async function refreshReportData(reportId: string, options: RefreshOption
   if (!report) throw new Error("Report not found.");
   if (report.status === "APPROVED") throw new Error("Approved reports are frozen.");
 
-  const builder = skipMetaApi ? buildStandardReportBlocksFromDatabase : undefined; // allow API-backed builder when not skipped
-  // Currently only the database-only builder is wired; the flag is reserved for future mixed modes.
+  const builder = skipMetaApi ? buildStandardReportBlocksFromStoredPeriodSnapshots : undefined;
   if (!builder) {
     throw new Error("Only skipMetaApi=true is currently supported.");
   }
