@@ -229,6 +229,11 @@ model SocialPost {
   mediaType               String
   mediaUrl                String?
   thumbnailUrl            String?
+  // Our own permanent copy of the display image (see src/lib/media-storage.ts), since Meta's
+  // media_url/thumbnail_url are short-lived signed CDN URLs that expire. Null until the background
+  // sync (or the media-thumbnails backfill script) successfully persists it; the UI falls back to the
+  // raw Meta URL in the meantime.
+  thumbnailStorageKey     String?
   permalink               String?
   publishedAt             DateTime
   mediaSource             MediaSource @default(OWNED)

@@ -60,6 +60,7 @@ type MediaPost = {
   mediaType: string;
   mediaUrl: string | null;
   thumbnailUrl: string | null;
+  thumbnailStorageUrl?: string | null;
   permalink: string | null;
   publishedAt: string;
   metrics: Record<string, number>;
@@ -2741,8 +2742,8 @@ function MediaBlock({
         <div className="media-grid">
           {items.map((item) => (
             <article key={item.id}>
-              {(item.thumbnailUrl ?? item.mediaUrl) && (
-                <img src={item.thumbnailUrl ?? item.mediaUrl ?? ""} alt="" />
+              {(item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl) && (
+                <img src={item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl ?? ""} alt="" />
               )}
               {item.isCollaborative && <span className="media-collab-badge">مشترك</span>}
               {onRemove && (
@@ -3065,8 +3066,8 @@ function MediaLibrary({
               )
             }
           >
-            {(post.thumbnailUrl ?? post.mediaUrl) && (
-              <img src={post.thumbnailUrl ?? post.mediaUrl ?? ""} alt="" />
+            {(post.thumbnailStorageUrl ?? post.thumbnailUrl ?? post.mediaUrl) && (
+              <img src={post.thumbnailStorageUrl ?? post.thumbnailUrl ?? post.mediaUrl ?? ""} alt="" />
             )}
             {post.isCollaborative && <span className="media-collab-badge">مشترك</span>}
             <MediaMetrics metrics={post.metrics} />
@@ -4269,8 +4270,8 @@ function MediaPrint({
     <div className="print-media-grid">
       {items.map((item) => (
         <article key={item.id}>
-          {(item.thumbnailUrl ?? item.mediaUrl) && (
-            <img src={item.thumbnailUrl ?? item.mediaUrl ?? ""} alt="" />
+          {(item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl) && (
+            <img src={item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl ?? ""} alt="" />
           )}
           <div className="print-media-metrics">
             {keys.map((key) => (

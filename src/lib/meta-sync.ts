@@ -4,6 +4,7 @@ import { decryptToken } from "@/lib/token-encryption";
 import { ConnectorError } from "@/lib/connectors/types";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
+import { mediaThumbnailKey, persistMediaThumbnail } from "@/lib/media-storage";
 
 const { metaSyncMinIntervalMs } = getHistoricalBackfillConfig();
 const graphTimeoutMs = 30_000;
@@ -235,11 +236,21 @@ async function upsertPost(
 ) {
   const { metrics, metricAvailability, metricAvailabilityState } = buildPostRecord(item, insights);
   const publishedAt = new Date(item.timestamp!);
+
+  // Persist our own permanent copy of the display image, since Meta's media_url/thumbnail_url are
+  // short-lived signed CDN URLs. Best-effort: on any failure this stays undefined so Prisma leaves a
+  // previously-stored key untouched rather than wiping it out.
+  const displaySourceUrl = item.thumbnail_url ?? item.media_url;
+  const thumbnailStorageKey = displaySourceUrl
+    ? (await persistMediaThumbnail(displaySourceUrl, mediaThumbnailKey(connectionId, item.id))) ?? undefined
+    : undefined;
+
   const baseUpdate = {
     caption: item.caption,
     mediaType: item.media_type!,
     mediaUrl: item.media_url,
     thumbnailUrl: item.thumbnail_url,
+    ...(thumbnailStorageKey ? { thumbnailStorageKey } : {}),
     permalink: item.permalink,
     publishedAt,
     metrics,

@@ -55,7 +55,7 @@ async function deleteSetting(moduleId: string, key: string) {
   await db.setting.deleteMany({ where: { moduleId, key } });
 }
 
-async function getMetaAppCooldownUntil(): Promise<Date | null> {
+export async function getMetaAppCooldownUntil(): Promise<Date | null> {
   const value = await getSetting(metaCooldownModuleId, metaCooldownUntilKey);
   if (!value) return null;
   const date = new Date(value);

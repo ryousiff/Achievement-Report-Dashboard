@@ -64,6 +64,11 @@ const mockDb = vi.hoisted(() => ({
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
 vi.mock("@/lib/token-encryption", () => ({ decryptToken: (token: string) => token }));
+vi.mock("@/lib/media-storage", () => ({
+  mediaThumbnailKey: (connectionId: string, externalPostId: string) => `posts/${connectionId}/${externalPostId}.jpg`,
+  mediaThumbnailUrl: (key: string | null) => (key ? `/api/media/${key}` : null),
+  persistMediaThumbnail: vi.fn(async () => null),
+}));
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch as unknown as typeof fetch;

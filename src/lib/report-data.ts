@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { decryptToken } from "@/lib/token-encryption";
 import { graph } from "@/lib/meta-sync";
 import { splitRangeByMonth } from "@/lib/report-period";
+import { mediaThumbnailUrl } from "@/lib/media-storage";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
@@ -42,7 +43,7 @@ export type ReachResult = {
 };
 
 type PostMetrics = Record<string, number>;
-type ReportPost = { id: string; externalPostId: string; caption: string | null; mediaType: string; mediaUrl: string | null; thumbnailUrl: string | null; permalink: string | null; publishedAt: string; metrics: PostMetrics; metricAvailability: Record<string, string>; metricAvailabilityState: Record<string, string> | null; mediaSource: MediaSource; isCollaborative: boolean; score: number };
+type ReportPost = { id: string; externalPostId: string; caption: string | null; mediaType: string; mediaUrl: string | null; thumbnailUrl: string | null; thumbnailStorageUrl: string | null; permalink: string | null; publishedAt: string; metrics: PostMetrics; metricAvailability: Record<string, string>; metricAvailabilityState: Record<string, string> | null; mediaSource: MediaSource; isCollaborative: boolean; score: number };
 export type ReportBlock = { type: BlockType; title: string; content: Record<string, unknown> };
 
 export function completeDailySeries(periodStart: Date, periodEnd: Date, entries: Array<[string, number]>) {
@@ -87,6 +88,7 @@ export async function reportPosts(clientId: string, periodStart: Date, periodEnd
       mediaType: post.mediaType,
       mediaUrl: post.mediaUrl,
       thumbnailUrl: post.thumbnailUrl,
+      thumbnailStorageUrl: mediaThumbnailUrl(post.thumbnailStorageKey),
       permalink: post.permalink,
       publishedAt: post.publishedAt.toISOString(),
       metrics,
