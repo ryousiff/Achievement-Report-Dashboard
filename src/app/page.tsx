@@ -4056,21 +4056,6 @@ function ReportPreview({
   const [orientation, setOrientation] = useState<"landscape" | "portrait">(
     "landscape",
   );
-  const [coverage, setCoverage] = useState<CoverageState | null>(null);
-  useEffect(() => {
-    if (!clientId) {
-      setCoverage(null);
-      return;
-    }
-    fetch(
-      `/api/clients/${clientId}/coverage?periodStart=${periodStart}&periodEnd=${periodEnd}`,
-    )
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: { coverage?: CoverageState } | null) =>
-        setCoverage(data?.coverage ?? null),
-      )
-      .catch(() => setCoverage(null));
-  }, [clientId, periodStart, periodEnd]);
   const printReport = async () => {
     if (reportId)
       await fetch(`/api/reports/${reportId}/export`, {
@@ -4147,26 +4132,6 @@ function ReportPreview({
               </p>
             </div>
           </header>
-          {coverage && coverage.status !== "COMPLETE" && (
-            <section
-              className="print-coverage-notice"
-              style={{
-                background: "#fff2eb",
-                border: "1px solid #ffcbb5",
-                padding: "16px 24px",
-                margin: "12px 24px 0",
-                borderRadius: "8px",
-                color: "#7f3212",
-              }}
-            >
-              <b>⚠ بيانات جزئية</b>
-              <ul>
-                {coverage.warnings.slice(0, 3).map((warning) => (
-                  <li key={warning}>{warning}</li>
-                ))}
-              </ul>
-            </section>
-          )}
           <main className="print-content">
             {blocks
               .filter((block) => block.page !== "cover")
