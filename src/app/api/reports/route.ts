@@ -4,10 +4,10 @@ import { db } from "@/lib/db";
 import { hasInternalApiAccess } from "@/lib/internal-api";
 import { hasFeature, requireFeature } from "@/lib/access";
 import { createReportDraft, ReportBlockType } from "@/lib/report-template";
-import { buildStandardReportBlocks } from "@/lib/report-data";
 import { refreshReportData } from "@/lib/report-refresh";
 import { enqueueClientSync } from "@/lib/sync-queue";
 import { getCoverage } from "@/lib/report-coverage";
+import { buildStandardReportBlocksPreferStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
 
 import { dateValue, requiredText } from "@/lib/validators";
 
@@ -85,11 +85,11 @@ export async function POST(request: NextRequest) {
     }
     const hasSyncedPosts = template === "standard" && (await db.socialPost.count({ where: { connection: { clientId } } })) > 0;
     const syncQueued = template === "standard" && !hasSyncedPosts ? await enqueueClientSync(clientId) : [];
-    // A report's initial account-level period KPIs must use the validated Meta semantics. The DB-only
-    // refresh path intentionally cannot reconstruct unique Reach / account Total Views / authoritative
-    // follower period totals from daily or media rows alone, so those validated values are established
-    // here and preserved by subsequent DB-only refreshes.
-    const populatedBlocks = template === "standard" ? await buildStandardReportBlocks(clientId, periodStart, periodEnd) : [];
+    // Reuse authoritative account-period snapshots whenever they already exist. Only a recent missing
+    // period falls back to Meta during initial creation; later refresh/export stays database-only.
+    const populatedBlocks = template === "standard"
+      ? await buildStandardReportBlocksPreferStoredPeriodSnapshots(clientId, periodStart, periodEnd)
+      : [];
     const report = await db.report.create({
       data: {
         clientId,
