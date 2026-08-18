@@ -124,3 +124,6 @@ Publish signed webhook events for: analytics sync completed/failed, report draft
 
 Terminal 1: npm run dev
 Terminal 2: npx ngrok http 3000
+
+docker compose logs -f worker
+npx tsx scripts/period-account-snapshots.ts
