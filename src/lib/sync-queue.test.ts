@@ -5,13 +5,19 @@ import { ConnectorError } from "@/lib/connectors";
 const mockDb = vi.hoisted(() => ({
   syncJob: {
     findFirst: vi.fn(),
+    findMany: vi.fn(),
+    create: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn(),
   },
   socialConnection: {
     findUnique: vi.fn(),
+    findMany: vi.fn(),
     updateMany: vi.fn(),
     update: vi.fn(),
+  },
+  socialPost: {
+    count: vi.fn(),
   },
   syncRun: {
     create: vi.fn(),
@@ -28,6 +34,12 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
+
+const mockMediaBackfill = vi.hoisted(() => ({
+  runThumbnailBackfillChunk: vi.fn(),
+  countPendingThumbnails: vi.fn(),
+}));
+vi.mock("@/lib/media-backfill", () => mockMediaBackfill);
 
 const mockMetaSync = vi.hoisted(() => ({
   runIncrementalSync: vi.fn(),
@@ -53,7 +65,7 @@ const mockMetaSyncInsights = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/meta-sync-insights", () => mockMetaSyncInsights);
 
-import { processNextSyncJob } from "@/lib/sync-queue";
+import { processNextSyncJob, runDueThumbnailBackfill } from "@/lib/sync-queue";
 
 function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date }> = {}) {
   return {
@@ -88,6 +100,8 @@ beforeEach(() => {
   mockMetaSync.runHistoricalBackfillChunk.mockReset();
   mockMetaSync.runHistoricalCollaborativeBackfillChunk.mockReset();
   mockMetaSyncInsights.runDailyAccountInsightChunk.mockReset();
+  mockMediaBackfill.runThumbnailBackfillChunk.mockReset();
+  mockMediaBackfill.countPendingThumbnails.mockReset();
 });
 
 describe("processNextSyncJob retry/maxAttempts behavior", () => {
@@ -179,5 +193,108 @@ describe("processNextSyncJob retry/maxAttempts behavior", () => {
     expect(result).toBeNull();
     expect(mockDb.syncJob.update).toHaveBeenCalledWith({ where: { id: job.id }, data: { runAfter: cooldownUntil, lockedAt: null } });
     expect(mockMetaSync.runIncrementalSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("processNextSyncJob THUMBNAIL_BACKFILL handling", () => {
+  it("dispatches to runThumbnailBackfillChunk and schedules a delayed continuation when posts remain", async () => {
+    const job = baseJob({ type: SyncJobType.THUMBNAIL_BACKFILL, attempts: 0, maxAttempts: 5 });
+    setupHappyPathMocks(job);
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    // The initial claim query (status: QUEUED) must still resolve to `job`; the later hasActiveJob
+    // check for the continuation enqueue (status: QUEUED/RUNNING) must resolve to null (no active job).
+    mockDb.syncJob.findFirst.mockImplementation(async ({ where }: { where: { status?: unknown } }) =>
+      where.status === SyncJobStatus.QUEUED ? job : null,
+    );
+    mockDb.syncJob.create.mockResolvedValue({ id: "job-2" });
+    mockMediaBackfill.runThumbnailBackfillChunk.mockResolvedValue({ stored: 5, skipped: 0, remaining: 12 });
+    mockMediaBackfill.countPendingThumbnails.mockResolvedValue(12);
+
+    const result = await processNextSyncJob();
+
+    expect(mockMediaBackfill.runThumbnailBackfillChunk).toHaveBeenCalledWith("conn-1");
+    expect(result).toEqual({ id: job.id, status: "succeeded", posts: 5 });
+    // A continuation job is enqueued, delayed rather than immediate, since remaining > 0.
+    expect(mockDb.syncJob.create).toHaveBeenCalledTimes(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.connectionId).toBe("conn-1");
+    expect(createArgs.data.type).toBe(SyncJobType.THUMBNAIL_BACKFILL);
+    expect(createArgs.data.runAfter.valueOf()).toBeGreaterThan(Date.now());
+  });
+
+  it("does not enqueue a continuation once no posts remain", async () => {
+    const job = baseJob({ type: SyncJobType.THUMBNAIL_BACKFILL, attempts: 0, maxAttempts: 5 });
+    setupHappyPathMocks(job);
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    mockMediaBackfill.runThumbnailBackfillChunk.mockResolvedValue({ stored: 3, skipped: 0, remaining: 0 });
+    mockMediaBackfill.countPendingThumbnails.mockResolvedValue(0);
+
+    const result = await processNextSyncJob();
+
+    expect(result).toEqual({ id: job.id, status: "succeeded", posts: 3 });
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+  });
+
+  it("activates the shared Meta cooldown and stops (reschedules, doesn't loop) when the chunk hits the app-wide rate limit", async () => {
+    const job = baseJob({ type: SyncJobType.THUMBNAIL_BACKFILL, attempts: 0, maxAttempts: 5 });
+    setupHappyPathMocks(job);
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    mockMediaBackfill.runThumbnailBackfillChunk.mockRejectedValue(new ConnectorError("(#4) Application request limit reached", "rate_limited"));
+
+    const result = await processNextSyncJob();
+
+    expect(result).toEqual({ id: job.id, status: "retrying" });
+    // setMetaAppCooldownUntil was invoked (via setSetting -> setting.upsert for the cooldown_until key).
+    const cooldownUpsert = mockDb.setting.upsert.mock.calls.find(([args]) => args.where.moduleId_key.key === "cooldown_until");
+    expect(cooldownUpsert).toBeTruthy();
+    // The failed job itself is rescheduled for later rather than retried immediately in this run.
+    const updateArgs = mockDb.syncJob.update.mock.calls.find(([args]) => args.data?.maxAttempts !== undefined)?.[0];
+    expect(updateArgs.data.status).toBe(SyncJobStatus.QUEUED);
+    expect(updateArgs.data.runAfter.valueOf()).toBeGreaterThan(Date.now());
+    expect(mockMediaBackfill.countPendingThumbnails).not.toHaveBeenCalled();
+  });
+});
+
+describe("runDueThumbnailBackfill", () => {
+  it("enqueues a job for every Instagram connection with pending thumbnails, skipping ones already queued or with nothing pending", async () => {
+    mockDb.setting.createMany.mockResolvedValue({});
+    mockDb.setting.updateMany.mockResolvedValue({ count: 1 }); // claims the periodic check window
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-a" }, // has pending thumbnails, no active job -> enqueue
+      { id: "conn-b" }, // already has an active job -> skip
+      { id: "conn-c" }, // no pending thumbnails -> skip
+    ]);
+    mockDb.syncJob.findFirst.mockImplementation(async ({ where }: { where: { connectionId: string } }) =>
+      where.connectionId === "conn-b" ? { id: "existing-job" } : null,
+    );
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockMediaBackfill.countPendingThumbnails.mockImplementation(async (connectionId: string) => (connectionId === "conn-c" ? 0 : 8));
+
+    const jobs = await runDueThumbnailBackfill();
+
+    expect(jobs).toHaveLength(1);
+    expect(mockDb.syncJob.create).toHaveBeenCalledTimes(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.connectionId).toBe("conn-a");
+    expect(createArgs.data.type).toBe(SyncJobType.THUMBNAIL_BACKFILL);
+  });
+
+  it("does nothing when the periodic check window has not been claimed yet", async () => {
+    mockDb.setting.createMany.mockResolvedValue({});
+    mockDb.setting.updateMany.mockResolvedValue({ count: 0 }); // another worker/tick already claimed it
+
+    const result = await runDueThumbnailBackfill();
+
+    expect(result).toBeNull();
+    expect(mockDb.socialConnection.findMany).not.toHaveBeenCalled();
   });
 });

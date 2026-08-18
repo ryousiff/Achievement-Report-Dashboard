@@ -1,8 +1,9 @@
-import { processNextSyncJob, runDueDailyClientSync } from "./lib/sync-queue";
-import { getSchedulerConfig } from "./lib/env";
+import { processNextSyncJob, runDueDailyClientSync, runDueThumbnailBackfill } from "./lib/sync-queue";
+import { getSchedulerConfig, getThumbnailBackfillConfig } from "./lib/env";
 
 const pollMs = Number(process.env.SYNC_WORKER_POLL_MS ?? 5000);
 const { dailyClientSyncCheckIntervalMs } = getSchedulerConfig();
+const { checkIntervalMs: thumbnailBackfillCheckIntervalMs } = getThumbnailBackfillConfig();
 
 let isDraining = false;
 
@@ -36,7 +37,21 @@ async function maybeRunDailyClientSync() {
   }
 }
 
+// Periodically checks for posts still missing a permanently-stored thumbnail (see
+// src/lib/media-backfill.ts) and enqueues low-priority THUMBNAIL_BACKFILL jobs to catch them up; this
+// never runs a manual per-client script, and each job only processes a small, resumable batch.
+async function maybeRunThumbnailBackfill() {
+  try {
+    await runDueThumbnailBackfill();
+  } catch (error) {
+    console.error("Thumbnail backfill check error:", error instanceof Error ? error.message : error);
+  }
+}
+
 void startPolling();
 
 void maybeRunDailyClientSync();
 setInterval(() => { void maybeRunDailyClientSync(); }, dailyClientSyncCheckIntervalMs);
+
+void maybeRunThumbnailBackfill();
+setInterval(() => { void maybeRunThumbnailBackfill(); }, thumbnailBackfillCheckIntervalMs);

@@ -2,7 +2,7 @@ import { BackfillStatus, Platform, SyncJobStatus, SyncJobType, SyncRunStatus } f
 import { db } from "@/lib/db";
 import { ConnectorError, getConnectorForPlatform } from "@/lib/connectors";
 import { MetaSyncError, runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, runIncrementalSync, runRecentInsightRefresh } from "@/lib/meta-sync";
-import { getHistoricalBackfillConfig, getSchedulerConfig } from "@/lib/env";
+import { getHistoricalBackfillConfig, getSchedulerConfig, getThumbnailBackfillConfig } from "@/lib/env";
 import { logError, logEvent } from "@/lib/observability";
 
 const schedulerModuleId = "scheduler";
@@ -305,6 +305,44 @@ export async function runDueDailyClientSync() {
   return null;
 }
 
+const thumbnailBackfillModuleId = "thumbnail_backfill";
+const thumbnailBackfillCheckKey = "nextCheckAt";
+
+/** Atomically claims the periodic "is it time to look for posts missing a stored thumbnail" check,
+ * the same optimistic-claim shape as claimDailyClientSyncWindow/processNextSyncJob: only one worker
+ * process (and only once per configured interval) ever proceeds past this. */
+async function claimThumbnailBackfillCheckWindow(intervalMs: number) {
+  const now = new Date();
+  await db.setting.createMany({ data: [{ moduleId: thumbnailBackfillModuleId, key: thumbnailBackfillCheckKey, value: now.toISOString() }], skipDuplicates: true });
+  const claimed = await db.setting.updateMany({
+    where: { moduleId: thumbnailBackfillModuleId, key: thumbnailBackfillCheckKey, value: { lte: now.toISOString() } },
+    data: { value: new Date(now.getTime() + intervalMs).toISOString() },
+  });
+  return claimed.count > 0;
+}
+
+/** Periodically (see worker.ts) looks across every Instagram connection for posts still missing a
+ * permanently-stored thumbnail (src/lib/media-storage.ts) and enqueues one THUMBNAIL_BACKFILL job per
+ * connection that needs it — never more than one at a time per connection (enqueueJob already
+ * dedupes), and each job only processes a small batch before rescheduling itself, so this never turns
+ * into a large burst of Meta requests. New posts already cache their thumbnail during normal
+ * upsertPost(); this only ever picks up old posts left over from before that existed, or ones whose
+ * persist attempt failed at the time. */
+export async function runDueThumbnailBackfill() {
+  const { checkIntervalMs } = getThumbnailBackfillConfig();
+  if (!(await claimThumbnailBackfillCheckWindow(checkIntervalMs))) return null;
+
+  const connections = await db.socialConnection.findMany({ where: { platform: Platform.INSTAGRAM }, select: { id: true } });
+  const jobs = [];
+  for (const connection of connections) {
+    if (await hasActiveJob(connection.id, SyncJobType.THUMBNAIL_BACKFILL)) continue;
+    const { countPendingThumbnails } = await import("@/lib/media-backfill");
+    const pending = await countPendingThumbnails(connection.id);
+    if (pending > 0) jobs.push(await enqueueJob(connection.id, SyncJobType.THUMBNAIL_BACKFILL));
+  }
+  return jobs;
+}
+
 function delayFor(attempts: number, retryAfterMs?: number) {
   const config = getHistoricalBackfillConfig();
   const base = retryAfterMs !== undefined
@@ -341,6 +379,11 @@ async function runJob(connectionId: string, platform: Platform, type: SyncJobTyp
     if (type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC) {
       const { runDailyAccountInsightChunk } = await import("@/lib/meta-sync-insights");
       return runDailyAccountInsightChunk(connectionId);
+    }
+    if (type === SyncJobType.THUMBNAIL_BACKFILL) {
+      const { runThumbnailBackfillChunk } = await import("@/lib/media-backfill");
+      const result = await runThumbnailBackfillChunk(connectionId);
+      return { posts: result.stored };
     }
   }
   const connector = getConnectorForPlatform(platform);
@@ -434,6 +477,17 @@ export async function processNextSyncJob() {
     if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) {
       const updated = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { collaborativeBackfillStatus: true } });
       if (updated?.collaborativeBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+    }
+    // Thumbnail backfill is deliberately low priority: unlike historical backfill's immediate
+    // continuation, its next batch is spaced out by a delay so it never turns into another tight
+    // Meta-request loop competing with normal account-insight/media sync.
+    if (job.type === SyncJobType.THUMBNAIL_BACKFILL) {
+      const { countPendingThumbnails } = await import("@/lib/media-backfill");
+      const remaining = await countPendingThumbnails(job.connectionId);
+      if (remaining > 0) {
+        const { continuationDelayMs } = getThumbnailBackfillConfig();
+        await enqueueJob(job.connectionId, SyncJobType.THUMBNAIL_BACKFILL, new Date(Date.now() + continuationDelayMs));
+      }
     }
     return { id: job.id, status: "succeeded", posts: result.posts };
   } catch (error) {

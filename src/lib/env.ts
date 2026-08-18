@@ -26,6 +26,17 @@ export function getHistoricalBackfillConfig() {
   };
 }
 
+/** Low-priority background backfill of permanent post-thumbnail storage (see src/lib/media-storage.ts
+ * and src/lib/media-backfill.ts). Kept deliberately small/slow-paced so it never competes meaningfully
+ * with normal account-insight/media sync for Meta's app-level request budget. */
+export function getThumbnailBackfillConfig() {
+  return {
+    batchSize: numberFromEnv("THUMBNAIL_BACKFILL_BATCH_SIZE", 15),
+    continuationDelayMs: numberFromEnv("THUMBNAIL_BACKFILL_CONTINUATION_DELAY_MS", 5 * 60 * 1000),
+    checkIntervalMs: numberFromEnv("THUMBNAIL_BACKFILL_CHECK_INTERVAL_MS", 10 * 60 * 1000),
+  };
+}
+
 export function getSchedulerConfig() {
   return {
     dailyClientSyncIntervalMs: numberFromEnv("DAILY_CLIENT_SYNC_INTERVAL_MS", 24 * 60 * 60 * 1000),
