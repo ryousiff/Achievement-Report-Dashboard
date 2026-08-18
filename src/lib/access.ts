@@ -22,23 +22,13 @@ export const features = [
 
 export type Feature = (typeof features)[number];
 
+// Role-based restrictions have been intentionally removed: every authenticated user gets every
+// feature, regardless of ADMIN/EDITOR/VIEWER. The Role enum/column is kept (for display and any
+// future need to reintroduce distinctions), but it no longer affects what a user can do.
 export const roleFeatures: Record<Role, Feature[]> = {
   [Role.ADMIN]: [...features],
-  [Role.EDITOR]: [
-    "view_dashboard",
-    "view_reports",
-    "create_report",
-    "edit_report",
-    "approve_report",
-    "export_report",
-    "manage_clients",
-    "connect_meta",
-    "assign_accounts",
-  ],
-  [Role.VIEWER]: [
-    "view_dashboard",
-    "view_reports",
-  ],
+  [Role.EDITOR]: [...features],
+  [Role.VIEWER]: [...features],
 };
 
 export function hasFeature(role: Role, feature: Feature) {
