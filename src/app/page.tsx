@@ -237,10 +237,12 @@ const copy = {
     reviewReports: "تقارير بانتظار المراجعة",
     instagramAccounts: "حسابات إنستغرام متصلة",
     completedReports: "تقارير مكتملة هذا الشهر",
-    thisMonth: "+2 هذا الشهر",
     reviewNeeded: "تحتاج إلى مراجعتك",
-    lastSync: "آخر مزامنة منذ 12 د",
-    compared: "+6 عن الشهر الماضي",
+    allReviewed: "لا تقارير بانتظار المراجعة",
+    noNewClients: "لا عملاء جدد هذا الشهر",
+    noSyncYet: "لم تتم المزامنة بعد",
+    syncedJustNow: "آخر مزامنة الآن",
+    noChangeFromLastMonth: "بدون تغيير عن الشهر الماضي",
     reach: "نمو الوصول",
     reachDesc: "إجمالي الوصول عبر حسابات إنستغرام المتصلة",
     period: "آخر 30 يوماً",
@@ -355,10 +357,12 @@ const copy = {
     reviewReports: "Reports to review",
     instagramAccounts: "Connected Instagram accounts",
     completedReports: "Completed this month",
-    thisMonth: "+2 this month",
     reviewNeeded: "Needs your review",
-    lastSync: "Last synced 12 min ago",
-    compared: "+6 from last month",
+    allReviewed: "Nothing needs review",
+    noNewClients: "No new clients this month",
+    noSyncYet: "Not synced yet",
+    syncedJustNow: "Last synced just now",
+    noChangeFromLastMonth: "No change from last month",
     reach: "Reach growth",
     reachDesc: "Total reach across connected Instagram accounts",
     period: "Last 30 days",
@@ -1650,9 +1654,12 @@ function Dashboard({
   const [data, setData] = useState<{
     stats: {
       activeClients: number;
+      newClientsThisMonth: number;
       needsReview: number;
       completedThisMonth: number;
+      completedLastMonth: number;
       instagramAccounts: number;
+      lastInstagramSyncAt: string | null;
     };
     accounts: Array<{
       id: string;
@@ -1694,12 +1701,37 @@ function Dashboard({
   const recent = data?.recent ?? [];
   const stats = data?.stats ?? {
     activeClients: 0,
+    newClientsThisMonth: 0,
     needsReview: 0,
     completedThisMonth: 0,
+    completedLastMonth: 0,
     instagramAccounts: 0,
+    lastInstagramSyncAt: null,
   };
 
   const rtl = t.dashboard === "الرئيسية";
+  const newClientsChange =
+    stats.newClientsThisMonth > 0
+      ? (rtl ? `+${stats.newClientsThisMonth} هذا الشهر` : `+${stats.newClientsThisMonth} this month`)
+      : t.noNewClients;
+  const reviewChange = stats.needsReview > 0 ? t.reviewNeeded : t.allReviewed;
+  const lastSyncChange = (() => {
+    if (!stats.lastInstagramSyncAt) return t.noSyncYet;
+    const minutes = Math.max(0, Math.round((Date.now() - new Date(stats.lastInstagramSyncAt).valueOf()) / 60000));
+    if (minutes < 1) return t.syncedJustNow;
+    if (minutes < 60) return rtl ? `آخر مزامنة منذ ${minutes} د` : `Last synced ${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return rtl ? `آخر مزامنة منذ ${hours} س` : `Last synced ${hours}h ago`;
+    const days = Math.round(hours / 24);
+    return rtl ? `آخر مزامنة منذ ${days} يوم` : `Last synced ${days}d ago`;
+  })();
+  const completedDiff = stats.completedThisMonth - stats.completedLastMonth;
+  const completedChange =
+    completedDiff === 0
+      ? t.noChangeFromLastMonth
+      : rtl
+        ? `${completedDiff > 0 ? "+" : ""}${completedDiff} عن الشهر الماضي`
+        : `${completedDiff > 0 ? "+" : ""}${completedDiff} from last month`;
   const greeting = t.greeting.replace(
     "{name}",
     user?.name ?? (rtl ? "روان" : "Rawan"),
@@ -1740,27 +1772,28 @@ function Dashboard({
         <Metric
           label={t.activeClients}
           value={loading ? "..." : formatValue(stats.activeClients)}
-          change={t.thisMonth}
+          change={loading ? "" : newClientsChange}
           Icon={Users}
         />
         <Metric
           label={t.reviewReports}
           value={loading ? "..." : formatValue(stats.needsReview)}
-          change={t.reviewNeeded}
+          change={loading ? "" : reviewChange}
           Icon={AlertCircle}
-          warn
+          warn={stats.needsReview > 0}
         />
         <Metric
           label={t.instagramAccounts}
           value={loading ? "..." : formatValue(stats.instagramAccounts)}
-          change={t.lastSync}
+          change={loading ? "" : lastSyncChange}
           Icon={Instagram}
         />
         <Metric
           label={t.completedReports}
           value={loading ? "..." : formatValue(stats.completedThisMonth)}
-          change={t.compared}
+          change={loading ? "" : completedChange}
           Icon={CheckCircle2}
+          warn={completedDiff < 0}
         />
       </section>
       <section className="card">

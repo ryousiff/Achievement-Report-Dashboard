@@ -31,6 +31,11 @@ export async function activeClientsCount() {
   return db.client.count({ where: { active: true } });
 }
 
+/** New clients created within the current calendar month, for the "+N this month" dashboard subtitle. */
+export async function newClientsThisMonthCount() {
+  return db.client.count({ where: { createdAt: { gte: startOfMonth(), lte: endOfMonth() } } });
+}
+
 export async function reportsNeedingReviewCount() {
   return db.report.count({ where: { status: ReportStatus.NEEDS_REVIEW } });
 }
@@ -44,8 +49,31 @@ export async function completedReportsThisMonthCount() {
   });
 }
 
+/** Same as completedReportsThisMonthCount, for the previous calendar month, so the dashboard can show
+ * an actual "+N/-N from last month" comparison instead of a fixed placeholder. */
+export async function completedReportsLastMonthCount() {
+  const lastMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1));
+  return db.report.count({
+    where: {
+      status: { in: [ReportStatus.APPROVED, ReportStatus.EXPORTED] },
+      createdAt: { gte: startOfMonth(lastMonth), lte: endOfMonth(lastMonth) },
+    },
+  });
+}
+
 export async function connectedInstagramAccountsCount() {
   return db.socialConnection.count({ where: { platform: "INSTAGRAM" } });
+}
+
+/** Most recent successful sync across every Instagram connection, for the "last synced N ago"
+ * dashboard subtitle. Null when no Instagram connection has ever synced successfully. */
+export async function mostRecentInstagramSyncAt(): Promise<Date | null> {
+  const connection = await db.socialConnection.findFirst({
+    where: { platform: "INSTAGRAM", lastSuccessfulSyncAt: { not: null } },
+    orderBy: { lastSuccessfulSyncAt: "desc" },
+    select: { lastSuccessfulSyncAt: true },
+  });
+  return connection?.lastSuccessfulSyncAt ?? null;
 }
 
 export async function recentReports(limit = 5) {
