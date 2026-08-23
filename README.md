@@ -127,3 +127,10 @@ Terminal 2: npx ngrok http 3000
 
 docker compose logs -f worker
 npx tsx scripts/period-account-snapshots.ts
+docker compose exec -T postgres psql -U kaan -d kaan_reports -c '
+SELECT
+  COUNT(*) FILTER (WHERE "thumbnailStorageKey" IS NOT NULL) AS stored,
+  COUNT(*) FILTER (WHERE "thumbnailStorageKey" IS NULL) AS remaining,
+  COUNT(*) AS total
+FROM "SocialPost";
+'
