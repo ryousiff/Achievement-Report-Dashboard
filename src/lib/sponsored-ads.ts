@@ -4,6 +4,8 @@
  * a row never requires Meta Ads API access. `actualSpend` is real money already spent, not a
  * planned budget. */
 
+import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
+
 export type SponsoredAdStatus = "UPCOMING" | "ACTIVE" | "FINISHED";
 
 export const DEFAULT_SPONSORED_AD_CURRENCY = "BHD";
@@ -28,6 +30,11 @@ export type SponsoredAdFields = {
   currency: string;
   startDate: Date;
   endDate: Date;
+  // Which ClientAdBudget (calendar month) this ad's actualSpend counts against. Deliberately explicit
+  // rather than derived from startDate — an ad can start in one month and end in another, so the
+  // employee chooses the budget month/year themselves (see src/lib/ad-budget.ts).
+  budgetYear: number;
+  budgetMonth: number;
   metaAdAccountId: string | null;
   metaAdId: string | null;
   paidReach: number | null;
@@ -87,6 +94,17 @@ export function parseSponsoredAdCreateInput(body: unknown): SponsoredAdParseResu
   if (!endDate || endDate === "invalid") return { ok: false, error: "Enter a valid end date." };
   if (endDate.valueOf() < startDate.valueOf()) return { ok: false, error: "End date must be on or after the start date." };
 
+  // Deliberately required and never derived from startDate — the employee must explicitly choose
+  // which monthly budget this ad's spend counts against (see ad-budget.ts).
+  const budgetYear = readOptionalNumber(raw.budgetYear);
+  if (budgetYear === undefined || budgetYear === null || budgetYear === "invalid" || !isValidBudgetYear(budgetYear)) {
+    return { ok: false, error: "Choose a valid budget year." };
+  }
+  const budgetMonth = readOptionalNumber(raw.budgetMonth);
+  if (budgetMonth === undefined || budgetMonth === null || budgetMonth === "invalid" || !isValidBudgetMonth(budgetMonth)) {
+    return { ok: false, error: "Choose a valid budget month." };
+  }
+
   const currencyRaw = readOptionalString(raw.currency);
   const currency = currencyRaw ? currencyRaw.toUpperCase() : DEFAULT_SPONSORED_AD_CURRENCY;
 
@@ -115,6 +133,8 @@ export function parseSponsoredAdCreateInput(body: unknown): SponsoredAdParseResu
       currency,
       startDate,
       endDate,
+      budgetYear,
+      budgetMonth,
       metaAdAccountId: readOptionalString(raw.metaAdAccountId) ?? null,
       metaAdId: readOptionalString(raw.metaAdId) ?? null,
       paidReach: numericValues.paidReach as number | null,
@@ -167,6 +187,21 @@ export function parseSponsoredAdUpdateInput(body: unknown): SponsoredAdParseResu
   }
   if (startDate && endDate && endDate.valueOf() < startDate.valueOf()) {
     return { ok: false, error: "End date must be on or after the start date." };
+  }
+
+  if ("budgetYear" in raw) {
+    const budgetYear = readOptionalNumber(raw.budgetYear);
+    if (budgetYear === undefined || budgetYear === null || budgetYear === "invalid" || !isValidBudgetYear(budgetYear)) {
+      return { ok: false, error: "Choose a valid budget year." };
+    }
+    data.budgetYear = budgetYear;
+  }
+  if ("budgetMonth" in raw) {
+    const budgetMonth = readOptionalNumber(raw.budgetMonth);
+    if (budgetMonth === undefined || budgetMonth === null || budgetMonth === "invalid" || !isValidBudgetMonth(budgetMonth)) {
+      return { ok: false, error: "Choose a valid budget month." };
+    }
+    data.budgetMonth = budgetMonth;
   }
 
   if ("metaAdAccountId" in raw) data.metaAdAccountId = readOptionalString(raw.metaAdAccountId) ?? null;

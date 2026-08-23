@@ -22,6 +22,8 @@ type SerializableSponsoredAd = {
   currency: string;
   startDate: Date;
   endDate: Date;
+  budgetYear: number;
+  budgetMonth: number;
   metaAdAccountId: string | null;
   metaAdId: string | null;
   paidReach: number | null;
@@ -57,6 +59,8 @@ export function serializeSponsoredAd(ad: SerializableSponsoredAd) {
     currency: ad.currency,
     startDate: ad.startDate.toISOString(),
     endDate: ad.endDate.toISOString(),
+    budgetYear: ad.budgetYear,
+    budgetMonth: ad.budgetMonth,
     metaAdAccountId: ad.metaAdAccountId,
     metaAdId: ad.metaAdId,
     paidReach: ad.paidReach,

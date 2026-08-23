@@ -29,6 +29,8 @@ describe("parseSponsoredAdCreateInput", () => {
     actualSpend: 150.5,
     startDate: "2026-06-01",
     endDate: "2026-06-10",
+    budgetYear: 2026,
+    budgetMonth: 6,
   };
 
   it("accepts a minimal valid payload tied to a social post and defaults currency to BHD", () => {
@@ -39,6 +41,8 @@ describe("parseSponsoredAdCreateInput", () => {
     expect(result.data.actualSpend).toBe(150.5);
     expect(result.data.title).toBeNull();
     expect(result.data.startDate.toISOString()).toContain("2026-06-01");
+    expect(result.data.budgetYear).toBe(2026);
+    expect(result.data.budgetMonth).toBe(6);
   });
 
   it("accepts a manual ad with a title and postUrl but no socialPostId", () => {
@@ -48,8 +52,26 @@ describe("parseSponsoredAdCreateInput", () => {
       actualSpend: 50,
       startDate: "2026-06-01",
       endDate: "2026-06-05",
+      budgetYear: 2026,
+      budgetMonth: 6,
     });
     expect(result.ok).toBe(true);
+  });
+
+  it("rejects a missing or invalid budget year/month, and does not guess it from startDate", () => {
+    expect(parseSponsoredAdCreateInput({ ...validBody, budgetYear: undefined }).ok).toBe(false);
+    expect(parseSponsoredAdCreateInput({ ...validBody, budgetMonth: undefined }).ok).toBe(false);
+    expect(parseSponsoredAdCreateInput({ ...validBody, budgetMonth: 13 }).ok).toBe(false);
+    expect(parseSponsoredAdCreateInput({ ...validBody, budgetYear: 1999 }).ok).toBe(false);
+  });
+
+  it("allows assigning the budget month independently of the ad's own start/end dates (e.g. an ad spanning two months)", () => {
+    const result = parseSponsoredAdCreateInput({ ...validBody, startDate: "2026-06-25", endDate: "2026-07-05", budgetYear: 2026, budgetMonth: 7 });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.budgetMonth).toBe(7);
+      expect(result.data.startDate.toISOString()).toContain("2026-06-25");
+    }
   });
 
   it("rejects a payload with no socialPostId, title, or postUrl", () => {
@@ -141,5 +163,16 @@ describe("parseSponsoredAdUpdateInput", () => {
     const result = parseSponsoredAdUpdateInput({});
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.data).toEqual({});
+  });
+
+  it("allows moving an ad to a different budget month/year", () => {
+    const result = parseSponsoredAdUpdateInput({ budgetYear: 2026, budgetMonth: 8 });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual({ budgetYear: 2026, budgetMonth: 8 });
+  });
+
+  it("rejects an invalid budget month/year on update", () => {
+    expect(parseSponsoredAdUpdateInput({ budgetMonth: 0 }).ok).toBe(false);
+    expect(parseSponsoredAdUpdateInput({ budgetYear: 1999 }).ok).toBe(false);
   });
 });

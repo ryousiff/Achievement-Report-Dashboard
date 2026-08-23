@@ -123,6 +123,7 @@ model Client {
   connections   SocialConnection[]
   reports       Report[]
   sponsoredAds  SponsoredAd[]
+  adBudgets     ClientAdBudget[]
 }
 
 model MetaProfile {
@@ -291,6 +292,9 @@ model SocialPostMetricSnapshot {
 // Ads API access is available, to enrich/verify the same row. Status (upcoming/active/finished) is
 // derived from startDate/endDate rather than stored — see computeSponsoredAdStatus() in
 // src/lib/sponsored-ads.ts.
+// `budgetYear`/`budgetMonth` is the monthly planned-budget bucket (see ClientAdBudget) this ad's
+// actualSpend counts against. It is a deliberate, explicit choice by the employee rather than being
+// derived from startDate, because an ad can start in one month and end in another.
 model SponsoredAd {
   id              String      @id @default(cuid())
   clientId        String
@@ -301,6 +305,8 @@ model SponsoredAd {
   currency        String      @default("BHD")
   startDate       DateTime
   endDate         DateTime
+  budgetYear      Int
+  budgetMonth     Int
   metaAdAccountId String?
   metaAdId        String?
   paidReach       Int?
@@ -315,7 +321,26 @@ model SponsoredAd {
   socialPost      SocialPost? @relation(fields: [socialPostId], references: [id], onDelete: SetNull)
 
   @@index([clientId, startDate])
+  @@index([clientId, budgetYear, budgetMonth])
   @@index([socialPostId])
+}
+
+// A client's planned advertising budget for one calendar month. `plannedBudget` is entered by an
+// employee; `actualSpend`/`remainingBudget`/`budgetUsedPercentage`/ad count are always calculated on
+// the fly from SponsoredAd rows assigned to this (clientId, year, month) — never stored, so they can
+// never drift out of sync with the underlying ad records. See src/lib/ad-budget.ts.
+model ClientAdBudget {
+  id            String   @id @default(cuid())
+  clientId      String
+  year          Int
+  month         Int
+  plannedBudget Decimal  @db.Decimal(12, 3)
+  currency      String   @default("BHD")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  client        Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, year, month])
 }
 
 model SocialInsightSnapshot {

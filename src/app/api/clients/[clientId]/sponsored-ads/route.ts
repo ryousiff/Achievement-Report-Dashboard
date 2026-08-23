@@ -3,12 +3,22 @@ import { db } from "@/lib/db";
 import { requireFeature } from "@/lib/access";
 import { parseSponsoredAdCreateInput } from "@/lib/sponsored-ads";
 import { serializeSponsoredAd, sponsoredAdPostSelect } from "@/lib/sponsored-ads-serializer";
+import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
 
+/** Optional `year`/`month` query params scope the list to a single budget month (the Sponsored Ads
+ * month view); omitting both returns every ad for the client, as before. */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
   if (!(await requireFeature(request, "manage_sponsored_ads"))) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
+  const yearParam = request.nextUrl.searchParams.get("year");
+  const monthParam = request.nextUrl.searchParams.get("month");
+  const year = yearParam !== null ? Number(yearParam) : undefined;
+  const month = monthParam !== null ? Number(monthParam) : undefined;
+  if ((yearParam !== null && !isValidBudgetYear(year)) || (monthParam !== null && !isValidBudgetMonth(month))) {
+    return NextResponse.json({ error: "Invalid year/month filter." }, { status: 400 });
+  }
   const ads = await db.sponsoredAd.findMany({
-    where: { clientId },
+    where: { clientId, ...(year !== undefined ? { budgetYear: year } : {}), ...(month !== undefined ? { budgetMonth: month } : {}) },
     orderBy: { startDate: "desc" },
     include: { socialPost: { select: sponsoredAdPostSelect } },
   });
