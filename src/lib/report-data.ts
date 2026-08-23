@@ -4,6 +4,7 @@ import { decryptToken } from "@/lib/token-encryption";
 import { graph } from "@/lib/meta-sync";
 import { splitRangeByMonth } from "@/lib/report-period";
 import { mediaThumbnailUrl } from "@/lib/media-storage";
+import { resolveReportPostMetrics, summarizePostMetricsAccuracy, type PostMetricsSource } from "@/lib/post-metric-snapshots";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
@@ -43,7 +44,7 @@ export type ReachResult = {
 };
 
 type PostMetrics = Record<string, number>;
-type ReportPost = { id: string; externalPostId: string; caption: string | null; mediaType: string; mediaUrl: string | null; thumbnailUrl: string | null; thumbnailStorageUrl: string | null; permalink: string | null; publishedAt: string; metrics: PostMetrics; metricAvailability: Record<string, string>; metricAvailabilityState: Record<string, string> | null; mediaSource: MediaSource; isCollaborative: boolean; score: number };
+type ReportPost = { id: string; externalPostId: string; caption: string | null; mediaType: string; mediaUrl: string | null; thumbnailUrl: string | null; thumbnailStorageUrl: string | null; permalink: string | null; publishedAt: string; metrics: PostMetrics; metricAvailability: Record<string, string>; metricAvailabilityState: Record<string, string> | null; mediaSource: MediaSource; isCollaborative: boolean; score: number; metricsSource: PostMetricsSource };
 export type ReportBlock = { type: BlockType; title: string; content: Record<string, unknown> };
 
 export function completeDailySeries(periodStart: Date, periodEnd: Date, entries: Array<[string, number]>) {
@@ -74,13 +75,30 @@ function kpi(id: string, label: string, value: string, available = true, extra?:
 }
 
 function mediaBlock(title: string, body: string, posts: ReportPost[], display: string[], refreshKey: ReportRefreshKey) {
-  return { type: BlockType.MEDIA, title, content: { body, mediaItems: posts, mediaDisplay: display, autoFilled: true, refreshKey } };
+  return { type: BlockType.MEDIA, title, content: { body, mediaItems: posts, mediaDisplay: display, autoFilled: true, refreshKey, postMetricsAccuracy: summarizePostMetricsAccuracy(posts.map((post) => post.metricsSource)) } };
 }
 
-export async function reportPosts(clientId: string, periodStart: Date, periodEnd: Date) {
+/** Post-level metrics for an already-completed (finalized) calendar month come from the immutable
+ * `SocialPostMetricSnapshot` for that post/month rather than the post's current, still-drifting
+ * `SocialPost.metrics` — see post-metric-snapshots.ts. Posts whose publish month is still open keep
+ * using their live metrics, matching the live media library. `now` is only overridable for tests. */
+export async function reportPosts(clientId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
   const posts = await db.socialPost.findMany({ where: { connection: { clientId }, publishedAt: { gte: periodStart, lte: periodEnd } }, orderBy: { publishedAt: "desc" } });
+  const resolved = await resolveReportPostMetrics(posts.map((post) => ({ id: post.id, publishedAt: post.publishedAt, metrics: post.metrics as PostMetrics })), now);
   return posts.map((post): ReportPost => {
-    const metrics = post.metrics as PostMetrics;
+    const liveMetrics = post.metrics as PostMetrics;
+    const resolvedEntry = resolved.get(post.id)!;
+    const metrics: PostMetrics = {
+      ...liveMetrics,
+      views: resolvedEntry.metrics.views,
+      total_interactions: resolvedEntry.metrics.totalInteractions,
+      likes: resolvedEntry.metrics.likes,
+      comments: resolvedEntry.metrics.comments,
+      saved: resolvedEntry.metrics.saved,
+      shares: resolvedEntry.metrics.shares,
+      follows: resolvedEntry.metrics.follows,
+      ...(resolvedEntry.metrics.totalViews !== null ? { total_views: resolvedEntry.metrics.totalViews } : {}),
+    };
     const item = {
       id: post.id,
       externalPostId: post.externalPostId,
@@ -97,6 +115,7 @@ export async function reportPosts(clientId: string, periodStart: Date, periodEnd
       mediaSource: post.mediaSource,
       isCollaborative: post.mediaSource === MediaSource.COLLABORATIVE,
       score: 0,
+      metricsSource: resolvedEntry.source,
     };
     return { ...item, score: score(item) };
   });
@@ -888,8 +907,8 @@ export async function buildStandardReportBlocksFromDatabase(clientId: string, pe
   });
 }
 
-export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}): Promise<ReportBlock[]> {
-  const posts = await reportPosts(clientId, periodStart, periodEnd);
+export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}, now: Date = new Date()): Promise<ReportBlock[]> {
+  const posts = await reportPosts(clientId, periodStart, periodEnd, now);
   const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
   const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
   // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
@@ -982,10 +1001,29 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     );
   }
 
+  // Post-level totals (organic views, likes, comments, saved, shares, total interactions) come from
+  // reportPosts()'s already-resolved metrics (LIVE for open months, an immutable SNAPSHOT for finalized
+  // ones). When a finalized month is missing its snapshot, reportPosts() falls back to current lifetime
+  // metrics and flags it — surface that here as a visible (but explicitly non-authoritative) value so
+  // refreshReportData() knows never to silently let it overwrite an already-saved report value.
+  const postMetricsAccuracy = summarizePostMetricsAccuracy(posts.map((post) => post.metricsSource));
+  const postMetricsIsFallback = postMetricsAccuracy === "LIFETIME_FALLBACK";
+  const POST_METRICS_FALLBACK_TOOLTIP = "لا تتوفر لقطة تاريخية محفوظة لكل منشورات هذه الفترة بعد؛ القيمة معروضة من أحدث بيانات المنشور وقد لا تعكس القيمة النهائية للشهر بدقة.";
+  const postMetricKpi = (id: string, label: string, metric: ReportMetric) => {
+    const available = hasMetric(metric);
+    return kpi(
+      id,
+      label,
+      available ? totals[metric].toLocaleString() : "غير متاح",
+      available && !postMetricsIsFallback,
+      available && postMetricsIsFallback ? { badge: "تقديري", tooltip: POST_METRICS_FALLBACK_TOOLTIP } : undefined,
+    );
+  };
+
   return [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
-    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, kpi("views", metricLabel.views, hasMetric("views") ? totals.views.toLocaleString() : "غير متاح", hasMetric("views")), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
-    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [kpi("total_interactions", metricLabel.total_interactions, hasMetric("total_interactions") ? totals.total_interactions.toLocaleString() : "غير متاح", hasMetric("total_interactions")), kpi("likes", metricLabel.likes, hasMetric("likes") ? totals.likes.toLocaleString() : "غير متاح", hasMetric("likes")), kpi("comments", metricLabel.comments, hasMetric("comments") ? totals.comments.toLocaleString() : "غير متاح", hasMetric("comments")), kpi("saved", "حفظ", hasMetric("saved") ? totals.saved.toLocaleString() : "غير متاح", hasMetric("saved")), kpi("shares", "مشاركة", hasMetric("shares") ? totals.shares.toLocaleString() : "غير متاح", hasMetric("shares"))], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [postMetricKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), postMetricKpi("likes", metricLabel.likes, "likes"), postMetricKpi("comments", metricLabel.comments, "comments"), postMetricKpi("saved", "حفظ", "saved"), postMetricKpi("shares", "مشاركة", "shares")], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
     mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"], "media-top-follows"),
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),

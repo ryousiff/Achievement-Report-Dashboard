@@ -18,6 +18,7 @@ export const features = [
   "manage_settings",
   "run_historical_sync",
   "connect_meta_system_user",
+  "manage_sponsored_ads",
 ] as const;
 
 export type Feature = (typeof features)[number];

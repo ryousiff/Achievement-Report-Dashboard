@@ -8,6 +8,7 @@ const mockDb = vi.hoisted(() => ({
     update: vi.fn(),
   },
   socialPost: { findMany: vi.fn(), count: vi.fn() },
+  socialPostMetricSnapshot: { findMany: vi.fn() },
   socialInsightSnapshot: {
     findFirst: vi.fn(),
     findMany: vi.fn(),
@@ -58,6 +59,8 @@ beforeEach(() => {
   mockDb.report.update.mockReset();
   mockDb.socialPost.findMany.mockReset();
   mockDb.socialPost.count.mockReset();
+  mockDb.socialPostMetricSnapshot.findMany.mockReset();
+  mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([]);
   mockDb.socialInsightSnapshot.findFirst.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
   mockDb.socialInsightSnapshot.count.mockReset();
@@ -233,6 +236,70 @@ describe("refreshReportData", () => {
     expect(refreshKeys).not.toContain("kpi-content-type");
     expect(refreshKeys).toContain("kpi-overview");
     expect(refreshKeys).toContain("notes-recommendations");
+  });
+
+  it("preserves saved post-metric KPI values and top-post rankings for a finalized month with no captured snapshot", async () => {
+    // Report period is July, already finalized relative to the real clock; no SocialPostMetricSnapshot
+    // rows exist yet (feature rollout gap), so reportPosts() falls back to (drifted) current lifetime
+    // metrics and flags it — refreshReportData must not let that silently overwrite what was saved.
+    const julyPost = {
+      id: "p1",
+      externalPostId: "ig-1",
+      caption: "July post",
+      mediaType: "IMAGE",
+      mediaUrl: null,
+      thumbnailUrl: null,
+      permalink: null,
+      publishedAt: new Date("2020-07-15T00:00:00.000Z"), // long-finalized month
+      metrics: { views: 999999, total_interactions: 999999, likes: 0, comments: 0, saved: 0, shares: 0, follows: 0 },
+      metricAvailability: { views: "returned", total_interactions: "returned" },
+      metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE" },
+      mediaSource: MediaSource.OWNED,
+      score: 0,
+    };
+    const report = {
+      ...createReport([
+        {
+          type: BlockType.KPI,
+          position: 0,
+          content: {
+            body: "نظرة عامة",
+            refreshKey: "kpi-overview",
+            kpis: [{ id: "views", label: "مشاهدات المنشورات العضوية", value: "714,848", available: true }],
+          },
+        },
+        {
+          type: BlockType.MEDIA,
+          position: 1,
+          content: {
+            body: "أعلى المنشورات",
+            refreshKey: "media-top-views",
+            mediaItems: [{ id: "p1", metrics: { views: 714848 } }],
+          },
+        },
+      ]),
+      periodStart: new Date("2020-07-01T00:00:00.000Z"),
+      periodEnd: new Date("2020-07-31T23:59:59.999Z"),
+    };
+
+    mockDb.report.findUnique.mockResolvedValue(report);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockDb.socialPost.findMany.mockResolvedValue([julyPost]);
+    mockDb.socialPost.count.mockResolvedValue(1);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.count.mockResolvedValue(1);
+    mockDb.report.update.mockResolvedValue({});
+
+    await refreshReportData("report-1");
+
+    const updateData = mockDb.report.update.mock.calls[0][0].data as { blocks: { create: Array<{ content: Record<string, unknown> }> } };
+    const overviewKpis = updateData.blocks.create[0].content.kpis as Array<{ id: string; value: string }>;
+    expect(overviewKpis.find((k) => k.id === "views")?.value).toBe("714,848"); // untouched, not the drifted 999,999
+
+    const mediaItems = updateData.blocks.create[1].content.mediaItems as Array<{ id: string; metrics: { views: number } }>;
+    expect(mediaItems.find((item) => item.id === "p1")?.metrics.views).toBe(714848); // untouched ranking/value
   });
 
   it("throws when the report is approved", async () => {

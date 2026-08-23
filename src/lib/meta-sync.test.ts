@@ -52,13 +52,17 @@ const mockDb = vi.hoisted(() => ({
         stores.posts.set(key, updated);
         return updated;
       }
-      stores.posts.set(key, { ...create });
+      stores.posts.set(key, { id: key, ...create });
       return stores.posts.get(key);
     }),
     findMany: vi.fn(async () => Array.from(stores.posts.values())),
     aggregate: vi.fn(async () => ({ _min: { publishedAt: null }, _max: { publishedAt: null }, _count: 0 })),
   },
   socialInsightSnapshot: { findMany: vi.fn(async () => []) },
+  socialPostMetricSnapshot: {
+    findUnique: vi.fn(async () => null),
+    upsert: vi.fn(async () => null),
+  },
   syncJob: { create: vi.fn(async (data: unknown) => data), findFirst: vi.fn(async () => null) },
 }));
 

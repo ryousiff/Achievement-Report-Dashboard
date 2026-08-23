@@ -27,10 +27,20 @@ const AUTHORITATIVE_PERIOD_KPI_IDS = new Set([
   "follows",
   "followers-lost",
   "net-follower-growth",
+  // Post-level totals for a finalized month: report-data.ts sets `available: false` on these whenever
+  // reportPosts() had to fall back to a post's current lifetime metrics instead of an immutable
+  // per-month snapshot (see post-metric-snapshots.ts), so the same gate below protects them too.
+  "views",
+  "total_interactions",
+  "likes",
+  "comments",
+  "saved",
+  "shares",
 ]);
 
-/** The DB-only builder used here returns account-level period KPIs only from persisted TOTAL_VALUE
- * snapshots. If a snapshot for the requested range is missing, keep the previously validated report value. */
+/** The DB-only builder used here returns account-level (and finalized post-level) period KPIs only
+ * from persisted, non-drifting sources. If one is missing/unstable for the requested range, keep the
+ * previously validated report value instead of silently replacing it. */
 function isSafeAuthoritativeFreshKpi(id: string, kpi: Record<string, unknown>) {
   if (!AUTHORITATIVE_PERIOD_KPI_IDS.has(id)) return true;
   return kpi.available === true;
@@ -188,7 +198,15 @@ function mergeBlockContent(existing: ReportBlock, fresh: ReportBlock): ReportBlo
     merged.chartUnavailable = freshContent.chartUnavailable;
     merged.unavailableReason = freshContent.unavailableReason;
   } else if (refreshKey?.startsWith("media-")) {
-    merged.mediaItems = mergeMediaItems(existingContent.mediaItems, freshContent.mediaItems);
+    // Never let a top-posts/media block whose fresh computation had to fall back to current lifetime
+    // metrics for a finalized month (see post-metric-snapshots.ts) silently overwrite an already-saved,
+    // previously-validated ranking/values — keep the existing block untouched until a real snapshot
+    // (or, for a still-open month, its expected-to-change live data) is confidently available again.
+    if (freshContent.postMetricsAccuracy === "LIFETIME_FALLBACK") {
+      merged.mediaItems = existingContent.mediaItems;
+    } else {
+      merged.mediaItems = mergeMediaItems(existingContent.mediaItems, freshContent.mediaItems);
+    }
   }
 
   return { type: fresh.type, title: merged.title as string, content: merged };

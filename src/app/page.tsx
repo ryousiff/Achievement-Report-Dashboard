@@ -2,6 +2,7 @@
 
 import { type FormEvent, useEffect, useState } from "react";
 import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
+import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import {
   AlertCircle,
   ArrowDown,
@@ -9,6 +10,7 @@ import {
   BarChart3,
   CheckCircle2,
   Eye,
+  ExternalLink,
   Facebook,
   FileText,
   History,
@@ -17,6 +19,7 @@ import {
   LayoutDashboard,
   Link2,
   LogOut,
+  Megaphone,
   Plus,
   RefreshCw,
   Save,
@@ -66,6 +69,37 @@ type MediaPost = {
   metrics: Record<string, number>;
   isCollaborative?: boolean;
   score: number;
+};
+type SponsoredAdStatus = "UPCOMING" | "ACTIVE" | "FINISHED";
+type SponsoredAd = {
+  id: string;
+  clientId: string;
+  socialPostId: string | null;
+  title: string | null;
+  postUrl: string | null;
+  actualSpend: number;
+  currency: string;
+  startDate: string;
+  endDate: string;
+  metaAdAccountId: string | null;
+  metaAdId: string | null;
+  paidReach: number | null;
+  impressions: number | null;
+  clicks: number | null;
+  ctr: number | null;
+  cpc: number | null;
+  cpm: number | null;
+  status: SponsoredAdStatus;
+  socialPost: {
+    id: string;
+    caption: string | null;
+    permalink: string | null;
+    mediaType: string;
+    mediaUrl: string | null;
+    thumbnailUrl: string | null;
+    thumbnailStorageUrl: string | null;
+    publishedAt: string;
+  } | null;
 };
 type MetricPresentation = "cards" | "line" | "bar";
 type Block = {
@@ -4960,6 +4994,7 @@ function ClientWorkspace({
           </div>
         </section>
       )}
+      {selectedClient && <SponsoredAdsSection clientId={selectedClient.id} />}
       <section className="card archived-clients">
         <div className="card-title">
           <div>
@@ -5012,6 +5047,623 @@ function ClientWorkspace({
         />
       )}
     </section>
+  );
+}
+
+const sponsoredAdStatusLabels: Record<SponsoredAdStatus, string> = {
+  UPCOMING: "قادم",
+  ACTIVE: "نشط",
+  FINISHED: "منتهٍ",
+};
+
+function SponsoredAdsSection({ clientId }: { clientId: string }) {
+  const [ads, setAds] = useState<SponsoredAd[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [showModal, setShowModal] = useState(false);
+  const [editingAd, setEditingAd] = useState<SponsoredAd | null>(null);
+  const [confirmDeleteAd, setConfirmDeleteAd] = useState<SponsoredAd | null>(
+    null,
+  );
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const load = async () => {
+    setLoading(true);
+    const response = await fetch(`/api/clients/${clientId}/sponsored-ads`);
+    if (response.ok) {
+      const data = (await response.json()) as { ads?: SponsoredAd[] };
+      setAds(data.ads ?? []);
+      setError("");
+    } else {
+      setError("تعذر تحميل الإعلانات الممولة.");
+    }
+    setLoading(false);
+  };
+  useEffect(() => {
+    void load();
+  }, [clientId]);
+  const deleteAd = async (ad: SponsoredAd) => {
+    setConfirmDeleteAd(null);
+    setDeletingId(ad.id);
+    const response = await fetch(
+      `/api/clients/${clientId}/sponsored-ads/${ad.id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) setError("تعذر حذف الإعلان.");
+    else setAds((current) => current.filter((item) => item.id !== ad.id));
+    setDeletingId(null);
+  };
+  const openCreate = () => {
+    setEditingAd(null);
+    setShowModal(true);
+  };
+  const openEdit = (ad: SponsoredAd) => {
+    setEditingAd(ad);
+    setShowModal(true);
+  };
+  const formatDate = (value: string) =>
+    new Date(value).toLocaleDateString("ar", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  const formatSpend = (ad: SponsoredAd) =>
+    `${ad.actualSpend.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 3 })} ${ad.currency}`;
+  return (
+    <section className="card sponsored-ads">
+      <div className="card-title">
+        <div>
+          <h2>الإعلانات الممولة</h2>
+          <p>تتبّع المنشورات المدفوعة والإنفاق الفعلي عليها بدلاً من جدول Google.</p>
+        </div>
+        <button className="btn primary compact" onClick={openCreate}>
+          <Plus size={15} />
+          إضافة إعلان
+        </button>
+      </div>
+      {error && <small className="client-error">{error}</small>}
+      {loading ? (
+        <p className="account-empty">جارٍ التحميل...</p>
+      ) : ads.length === 0 ? (
+        <div className="empty-template">
+          <div>
+            <Megaphone size={30} />
+            <strong>لا توجد إعلانات ممولة بعد</strong>
+            <span>أضيفي أول إعلان ممول لهذا العميل.</span>
+          </div>
+        </div>
+      ) : (
+        <div className="sponsored-ads-table">
+          <div className="sponsored-ads-head">
+            <span>المنشور</span>
+            <span>الرابط</span>
+            <span>الإنفاق الفعلي</span>
+            <span>تاريخ البدء</span>
+            <span>تاريخ الانتهاء</span>
+            <span>الحالة</span>
+            <span />
+          </div>
+          {ads.map((ad) => {
+            const thumb =
+              ad.socialPost?.thumbnailStorageUrl ??
+              ad.socialPost?.thumbnailUrl ??
+              ad.socialPost?.mediaUrl ??
+              null;
+            const link = ad.postUrl ?? ad.socialPost?.permalink ?? null;
+            return (
+              <div className="sponsored-ad-row" key={ad.id}>
+                <div className="sponsored-ad-title">
+                  {thumb ? (
+                    <img
+                      className="sponsored-ad-thumb"
+                      src={thumb}
+                      alt={ad.title ?? ad.socialPost?.caption ?? "إعلان"}
+                    />
+                  ) : (
+                    <span className="sponsored-ad-thumb-empty">
+                      <Megaphone size={18} />
+                    </span>
+                  )}
+                  <span>
+                    <b>
+                      {ad.title ??
+                        ad.socialPost?.caption?.slice(0, 40) ??
+                        "إعلان بدون عنوان"}
+                    </b>
+                    <small>
+                      {ad.socialPost
+                        ? "من منشورات Instagram"
+                        : "إدخال يدوي"}
+                    </small>
+                  </span>
+                </div>
+                {link ? (
+                  <a
+                    className="btn quiet compact"
+                    href={link}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLink size={13} />
+                    فتح
+                  </a>
+                ) : (
+                  <span className="account-empty">لا يوجد رابط</span>
+                )}
+                <span>{formatSpend(ad)}</span>
+                <span>{formatDate(ad.startDate)}</span>
+                <span>{formatDate(ad.endDate)}</span>
+                <span
+                  className={`sponsored-ad-status ${ad.status.toLowerCase()}`}
+                >
+                  {sponsoredAdStatusLabels[ad.status]}
+                </span>
+                <div className="sponsored-ad-actions">
+                  <button
+                    className="mini"
+                    onClick={() => openEdit(ad)}
+                    aria-label="تعديل"
+                  >
+                    <Settings size={13} />
+                  </button>
+                  <button
+                    className="mini danger"
+                    disabled={deletingId === ad.id}
+                    onClick={() => setConfirmDeleteAd(ad)}
+                    aria-label="حذف"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {showModal && (
+        <SponsoredAdModal
+          clientId={clientId}
+          editingAd={editingAd}
+          onClose={() => setShowModal(false)}
+          onSaved={async () => {
+            setShowModal(false);
+            await load();
+          }}
+        />
+      )}
+      {confirmDeleteAd && (
+        <ConfirmDialog
+          title="حذف الإعلان الممول؟"
+          message={`حذف ${confirmDeleteAd.title ?? confirmDeleteAd.socialPost?.caption ?? "هذا الإعلان"} نهائياً؟`}
+          confirmLabel="حذف"
+          cancelLabel="إلغاء"
+          onCancel={() => setConfirmDeleteAd(null)}
+          onConfirm={() => void deleteAd(confirmDeleteAd)}
+        />
+      )}
+    </section>
+  );
+}
+
+const sponsoredAdCurrencies = ["BHD", "USD", "SAR", "AED", "KWD"];
+
+function SponsoredAdModal({
+  clientId,
+  editingAd,
+  onClose,
+  onSaved,
+}: {
+  clientId: string;
+  editingAd: SponsoredAd | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const toDateInput = (value?: string) =>
+    value ? new Date(value).toISOString().slice(0, 10) : "";
+  const [mode, setMode] = useState<"post" | "manual">(
+    editingAd && !editingAd.socialPostId ? "manual" : "post",
+  );
+  const [posts, setPosts] = useState<MediaPost[]>([]);
+  const [postsLoading, setPostsLoading] = useState(false);
+  const [postSearch, setPostSearch] = useState("");
+  const [selectedPostId, setSelectedPostId] = useState<string | null>(
+    editingAd?.socialPostId ?? null,
+  );
+  const [selectedPostPreview, setSelectedPostPreview] = useState<
+    SponsoredAd["socialPost"] | null
+  >(editingAd?.socialPost ?? null);
+  const [title, setTitle] = useState(editingAd?.title ?? "");
+  const [postUrl, setPostUrl] = useState(editingAd?.postUrl ?? "");
+  const [actualSpend, setActualSpend] = useState(
+    editingAd ? String(editingAd.actualSpend) : "",
+  );
+  const [currency, setCurrency] = useState(
+    editingAd?.currency ?? DEFAULT_SPONSORED_AD_CURRENCY,
+  );
+  const [startDate, setStartDate] = useState(
+    toDateInput(editingAd?.startDate) ||
+      new Date().toISOString().slice(0, 10),
+  );
+  const [endDate, setEndDate] = useState(
+    toDateInput(editingAd?.endDate) || new Date().toISOString().slice(0, 10),
+  );
+  const [showMetaFields, setShowMetaFields] = useState(
+    Boolean(
+      editingAd?.metaAdAccountId ||
+        editingAd?.metaAdId ||
+        editingAd?.paidReach ||
+        editingAd?.impressions ||
+        editingAd?.clicks,
+    ),
+  );
+  const [metaAdAccountId, setMetaAdAccountId] = useState(
+    editingAd?.metaAdAccountId ?? "",
+  );
+  const [metaAdId, setMetaAdId] = useState(editingAd?.metaAdId ?? "");
+  const [paidReach, setPaidReach] = useState(
+    editingAd?.paidReach != null ? String(editingAd.paidReach) : "",
+  );
+  const [impressions, setImpressions] = useState(
+    editingAd?.impressions != null ? String(editingAd.impressions) : "",
+  );
+  const [clicks, setClicks] = useState(
+    editingAd?.clicks != null ? String(editingAd.clicks) : "",
+  );
+  const [ctr, setCtr] = useState(
+    editingAd?.ctr != null ? String(editingAd.ctr) : "",
+  );
+  const [cpc, setCpc] = useState(
+    editingAd?.cpc != null ? String(editingAd.cpc) : "",
+  );
+  const [cpm, setCpm] = useState(
+    editingAd?.cpm != null ? String(editingAd.cpm) : "",
+  );
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (mode !== "post" || posts.length > 0) return;
+    setPostsLoading(true);
+    void (async () => {
+      const response = await fetch(
+        `/api/clients/${clientId}/posts?periodStart=2015-01-01&periodEnd=${new Date().toISOString().slice(0, 10)}`,
+      );
+      if (response.ok) {
+        const data = (await response.json()) as { posts?: MediaPost[] };
+        setPosts(data.posts ?? []);
+      }
+      setPostsLoading(false);
+    })();
+  }, [mode, clientId]);
+  const filteredPosts = posts.filter((post) =>
+    post.caption?.toLowerCase().includes(postSearch.toLowerCase()),
+  );
+  const selectPost = (post: MediaPost) => {
+    setSelectedPostId(post.id);
+    setSelectedPostPreview({
+      id: post.id,
+      caption: post.caption,
+      permalink: post.permalink,
+      mediaType: post.mediaType,
+      mediaUrl: post.mediaUrl,
+      thumbnailUrl: post.thumbnailUrl,
+      thumbnailStorageUrl: post.thumbnailStorageUrl ?? null,
+      publishedAt: post.publishedAt,
+    });
+  };
+  const save = async () => {
+    setError("");
+    if (mode === "post" && !selectedPostId) {
+      setError("اختاري منشوراً أو بدّلي إلى الإدخال اليدوي.");
+      return;
+    }
+    if (mode === "manual" && !title.trim() && !postUrl.trim()) {
+      setError("أدخلي عنوان الإعلان أو رابط المنشور.");
+      return;
+    }
+    const spend = Number(actualSpend);
+    if (!Number.isFinite(spend) || spend < 0) {
+      setError("أدخلي مبلغ إنفاق فعلي صحيح.");
+      return;
+    }
+    if (!startDate || !endDate) {
+      setError("أدخلي تاريخ البدء والانتهاء.");
+      return;
+    }
+    if (new Date(endDate).valueOf() < new Date(startDate).valueOf()) {
+      setError("يجب أن يكون تاريخ الانتهاء بعد تاريخ البدء أو مساوياً له.");
+      return;
+    }
+    setSaving(true);
+    const payload = {
+      socialPostId: mode === "post" ? selectedPostId : null,
+      title: mode === "manual" ? title.trim() || null : null,
+      postUrl: mode === "manual" ? postUrl.trim() || null : null,
+      actualSpend: spend,
+      currency,
+      startDate,
+      endDate,
+      metaAdAccountId: metaAdAccountId.trim() || null,
+      metaAdId: metaAdId.trim() || null,
+      paidReach: paidReach ? Number(paidReach) : null,
+      impressions: impressions ? Number(impressions) : null,
+      clicks: clicks ? Number(clicks) : null,
+      ctr: ctr ? Number(ctr) : null,
+      cpc: cpc ? Number(cpc) : null,
+      cpm: cpm ? Number(cpm) : null,
+    };
+    const response = await fetch(
+      editingAd
+        ? `/api/clients/${clientId}/sponsored-ads/${editingAd.id}`
+        : `/api/clients/${clientId}/sponsored-ads`,
+      {
+        method: editingAd ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    const data = (await response.json()) as { error?: string };
+    setSaving(false);
+    if (!response.ok) {
+      setError(data.error ?? "تعذر حفظ الإعلان.");
+      return;
+    }
+    await onSaved();
+  };
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="card sponsored-ad-modal"
+        role="dialog"
+        aria-modal="true"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="modal-head">
+          <div>
+            <h2>{editingAd ? "تعديل الإعلان الممول" : "إضافة إعلان ممول"}</h2>
+            <p>الإنفاق المُدخل هو الإنفاق الفعلي، وليس ميزانية مخططة.</p>
+          </div>
+          <button className="mini" onClick={onClose}>
+            <X size={17} />
+          </button>
+        </div>
+        <div className="media-library-tabs">
+          <button
+            className={mode === "post" ? "active" : ""}
+            onClick={() => setMode("post")}
+          >
+            من منشورات العميل
+          </button>
+          <button
+            className={mode === "manual" ? "active" : ""}
+            onClick={() => setMode("manual")}
+          >
+            إدخال يدوي
+          </button>
+        </div>
+        {mode === "post" ? (
+          <div className="sponsored-ad-post-picker">
+            <input
+              placeholder="ابحثي بنص المنشور..."
+              value={postSearch}
+              onChange={(event) => setPostSearch(event.target.value)}
+            />
+            {selectedPostPreview && (
+              <div className="sponsored-ad-selected-post">
+                {(selectedPostPreview.thumbnailStorageUrl ??
+                  selectedPostPreview.thumbnailUrl ??
+                  selectedPostPreview.mediaUrl) && (
+                  <img
+                    src={
+                      selectedPostPreview.thumbnailStorageUrl ??
+                      selectedPostPreview.thumbnailUrl ??
+                      selectedPostPreview.mediaUrl ??
+                      undefined
+                    }
+                    alt={selectedPostPreview.caption ?? "منشور محدد"}
+                  />
+                )}
+                <span>
+                  {selectedPostPreview.caption?.slice(0, 60) ??
+                    "منشور محدد"}
+                  <small>
+                    سيتم استخدام رابط المنشور تلقائياً:{" "}
+                    {selectedPostPreview.permalink ?? "—"}
+                  </small>
+                </span>
+              </div>
+            )}
+            {postsLoading ? (
+              <p className="account-empty">جارٍ تحميل المنشورات...</p>
+            ) : (
+              <div className="media-library-grid sponsored-ad-post-grid">
+                {filteredPosts.map((post) => {
+                  const thumb =
+                    post.thumbnailStorageUrl ??
+                    post.thumbnailUrl ??
+                    post.mediaUrl;
+                  return (
+                    <button
+                      key={post.id}
+                      type="button"
+                      className={
+                        selectedPostId === post.id ? "selected" : ""
+                      }
+                      onClick={() => selectPost(post)}
+                    >
+                      {thumb ? (
+                        <img src={thumb} alt={post.caption ?? "منشور"} />
+                      ) : (
+                        <span className="sponsored-ad-thumb-empty">
+                          <ImageIcon size={18} />
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="sponsored-ad-manual-fields">
+            <label>
+              عنوان الإعلان
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="اسم يوضّح الإعلان"
+              />
+            </label>
+            <label>
+              رابط المنشور
+              <input
+                value={postUrl}
+                onChange={(event) => setPostUrl(event.target.value)}
+                placeholder="https://instagram.com/p/..."
+              />
+            </label>
+          </div>
+        )}
+        <div className="sponsored-ad-form-grid">
+          <label>
+            الإنفاق الفعلي
+            <input
+              type="number"
+              min={0}
+              step="0.001"
+              value={actualSpend}
+              onChange={(event) => setActualSpend(event.target.value)}
+            />
+          </label>
+          <label>
+            العملة
+            <select
+              value={currency}
+              onChange={(event) => setCurrency(event.target.value)}
+            >
+              {sponsoredAdCurrencies.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            تاريخ البدء
+            <input
+              type="date"
+              value={startDate}
+              onChange={(event) => setStartDate(event.target.value)}
+            />
+          </label>
+          <label>
+            تاريخ الانتهاء
+            <input
+              type="date"
+              value={endDate}
+              onChange={(event) => setEndDate(event.target.value)}
+            />
+          </label>
+        </div>
+        <button
+          type="button"
+          className="btn quiet compact sponsored-ad-meta-toggle"
+          onClick={() => setShowMetaFields((current) => !current)}
+        >
+          {showMetaFields ? "إخفاء بيانات Meta Ads" : "بيانات Meta Ads (اختياري، لاحقاً)"}
+        </button>
+        {showMetaFields && (
+          <div className="sponsored-ad-form-grid">
+            <label>
+              معرّف حساب الإعلانات
+              <input
+                value={metaAdAccountId}
+                onChange={(event) => setMetaAdAccountId(event.target.value)}
+              />
+            </label>
+            <label>
+              معرّف الإعلان
+              <input
+                value={metaAdId}
+                onChange={(event) => setMetaAdId(event.target.value)}
+              />
+            </label>
+            <label>
+              الوصول المدفوع
+              <input
+                type="number"
+                min={0}
+                value={paidReach}
+                onChange={(event) => setPaidReach(event.target.value)}
+              />
+            </label>
+            <label>
+              مرات الظهور
+              <input
+                type="number"
+                min={0}
+                value={impressions}
+                onChange={(event) => setImpressions(event.target.value)}
+              />
+            </label>
+            <label>
+              النقرات
+              <input
+                type="number"
+                min={0}
+                value={clicks}
+                onChange={(event) => setClicks(event.target.value)}
+              />
+            </label>
+            <label>
+              CTR
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={ctr}
+                onChange={(event) => setCtr(event.target.value)}
+              />
+            </label>
+            <label>
+              CPC
+              <input
+                type="number"
+                min={0}
+                step="0.001"
+                value={cpc}
+                onChange={(event) => setCpc(event.target.value)}
+              />
+            </label>
+            <label>
+              CPM
+              <input
+                type="number"
+                min={0}
+                step="0.001"
+                value={cpm}
+                onChange={(event) => setCpm(event.target.value)}
+              />
+            </label>
+          </div>
+        )}
+        {error && <small className="client-error">{error}</small>}
+        <div className="modal-actions">
+          <span />
+          <div>
+            <button className="btn quiet" onClick={onClose}>
+              إلغاء
+            </button>
+            <button
+              className="btn primary"
+              disabled={saving}
+              onClick={() => void save()}
+            >
+              <Save size={16} />
+              {saving ? "جارٍ الحفظ..." : "حفظ"}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 

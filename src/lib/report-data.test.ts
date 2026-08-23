@@ -4,6 +4,7 @@ import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAcco
 
 const mockDb = vi.hoisted(() => ({
   socialPost: { findMany: vi.fn() },
+  socialPostMetricSnapshot: { findMany: vi.fn(async (): Promise<Array<Record<string, unknown>>> => []), findUnique: vi.fn(async () => null), upsert: vi.fn() },
   socialInsightSnapshot: { findMany: vi.fn(), findFirst: vi.fn(), upsert: vi.fn() },
   socialConnection: { findFirst: vi.fn() },
 }));
@@ -23,6 +24,11 @@ beforeEach(() => {
   clearFollowersCache();
   clearViewsCache();
   mockDb.socialPost.findMany.mockReset();
+  mockDb.socialPostMetricSnapshot.findMany.mockReset();
+  mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([]);
+  mockDb.socialPostMetricSnapshot.findUnique.mockReset();
+  mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
+  mockDb.socialPostMetricSnapshot.upsert.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
   mockDb.socialInsightSnapshot.findFirst.mockReset();
   mockDb.socialInsightSnapshot.upsert.mockReset();
@@ -100,6 +106,132 @@ describe("reportPosts", () => {
     expect(collab?.mediaSource).toBe(MediaSource.COLLABORATIVE);
     expect(collab?.isCollaborative).toBe(true);
     expect(owned?.isCollaborative).toBe(false);
+  });
+});
+
+describe("reportPosts — historical metric snapshot drift regression", () => {
+  function julyPost(liveViews: number) {
+    return {
+      id: "p1",
+      externalPostId: "ig-1",
+      caption: "July post",
+      mediaType: "IMAGE",
+      mediaUrl: null,
+      thumbnailUrl: null,
+      permalink: null,
+      publishedAt: new Date("2026-07-15T00:00:00.000Z"),
+      metrics: { views: liveViews, total_interactions: 10, likes: 5, comments: 1, saved: 1, shares: 1, follows: 1 },
+      metricAvailability: { views: "returned" },
+      metricAvailabilityState: { views: "AVAILABLE" },
+      mediaSource: MediaSource.OWNED,
+    };
+  }
+
+  it("does not let a July post's August view growth change an already-finalized July report", async () => {
+    // A finalized snapshot was captured for July at 714,848 views before the post kept gaining views in August.
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([
+      { postId: "p1", views: 714848, totalViews: null, totalInteractions: 10, likes: 5, comments: 1, saved: 1, shares: 1, follows: 1 },
+    ]);
+    // SocialPost.metrics has since drifted upward because the post is still within the recent-refresh window.
+    mockDb.socialPost.findMany.mockResolvedValue([julyPost(724692)]);
+
+    const now = new Date("2026-08-23T00:00:00.000Z");
+    const posts = await reportPosts("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"), now);
+
+    expect(posts[0].metrics.views).toBe(714848);
+    expect(posts[0].metricsSource).toBe("SNAPSHOT");
+  });
+
+  it("current SocialPost.metrics keeps updating, and a report for the still-open month sees the newer value", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([{ ...julyPost(500), publishedAt: new Date("2026-08-05T00:00:00.000Z") }]);
+
+    const now = new Date("2026-08-23T00:00:00.000Z"); // August has not ended yet
+    const posts = await reportPosts("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-31T23:59:59.999Z"), now);
+
+    expect(mockDb.socialPostMetricSnapshot.findMany).not.toHaveBeenCalled();
+    expect(posts[0].metrics.views).toBe(500); // live value used as-is for the open month
+    expect(posts[0].metricsSource).toBe("LIVE");
+  });
+
+  it("uses the current lifetime value (flagged) for a finalized month with no captured snapshot yet, instead of pretending it is authoritative", async () => {
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialPost.findMany.mockResolvedValue([julyPost(714848)]);
+
+    const now = new Date("2026-08-23T00:00:00.000Z");
+    const posts = await reportPosts("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"), now);
+
+    expect(posts[0].metrics.views).toBe(714848);
+    expect(posts[0].metricsSource).toBe("LIFETIME_FALLBACK");
+  });
+});
+
+describe("buildStandardReportBlocks — historical metric snapshot drift regression", () => {
+  function postWithViews(id: string, publishedAt: string, liveViews: number, follows = 0) {
+    return {
+      id,
+      externalPostId: `ig-${id}`,
+      caption: `Post ${id}`,
+      mediaType: "IMAGE",
+      mediaUrl: null,
+      thumbnailUrl: null,
+      permalink: null,
+      publishedAt: new Date(publishedAt),
+      metrics: { views: liveViews, total_interactions: liveViews, likes: 0, comments: 0, saved: 0, shares: 0, follows },
+      metricAvailability: { views: "returned", total_interactions: "returned" },
+      metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE" },
+      mediaSource: MediaSource.OWNED,
+    };
+  }
+
+  it("keeps top-post rankings for a finalized month based on the July snapshot, not the drifted live metrics", async () => {
+    // Live data (as of August) makes p2 look bigger than p1 — but the July snapshot says the opposite.
+    mockDb.socialPost.findMany.mockResolvedValue([
+      postWithViews("p1", "2026-07-05T00:00:00.000Z", 500), // drifted-up live value
+      postWithViews("p2", "2026-07-10T00:00:00.000Z", 300),
+    ]);
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([
+      { postId: "p1", views: 200, totalViews: null, totalInteractions: 200, likes: 0, comments: 0, saved: 0, shares: 0, follows: 0 },
+      { postId: "p2", views: 900, totalViews: null, totalInteractions: 900, likes: 0, comments: 0, saved: 0, shares: 0, follows: 0 },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    setGraphReachValue(0);
+
+    const now = new Date("2026-08-23T00:00:00.000Z");
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"), {}, now);
+
+    const topViewsBlock = blocks.find((block) => block.title === "أعلى المنشورات من حيث المشاهدات العضوية");
+    const mediaItems = (topViewsBlock!.content as Record<string, unknown>).mediaItems as Array<{ id: string; metrics: { views: number } }>;
+    expect(mediaItems[0].id).toBe("p2"); // 900 (snapshot) beats 200 (snapshot), even though live views say the opposite
+    expect(mediaItems[0].metrics.views).toBe(900);
+
+    const overviewKpi = blocks.find((block) => block.title === "أهم الإحصائيات");
+    const overviewKpis = (overviewKpi!.content as Record<string, unknown>).kpis as Array<{ id: string; value: string }>;
+    expect(overviewKpis.find((k) => k.id === "views")?.value).toBe("1,100"); // 200 + 900 from snapshots, not 500 + 300 live
+  });
+
+  it("leaves account-level TOTAL_VALUE reach/views/follower resolvers untouched by post-level snapshot logic", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([postWithViews("p1", "2026-07-05T00:00:00.000Z", 100)]);
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([
+      { postId: "p1", views: 50, totalViews: null, totalInteractions: 50, likes: 0, comments: 0, saved: 0, shares: 0, follows: 0 },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockImplementation(async ({ where }: { where: { metric: string } }) => {
+      if (where.metric === "reach") return [{ periodEnd: new Date("2026-07-31T07:00:00.000Z"), value: 300 }];
+      return [];
+    });
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    setGraphReachValue(300);
+
+    const now = new Date("2026-08-23T00:00:00.000Z");
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-07-31T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"), {}, now);
+    const overviewKpi = blocks.find((block) => block.title === "أهم الإحصائيات");
+    const kpis = (overviewKpi!.content as Record<string, unknown>).kpis as Array<{ id: string; value: string; available: boolean }>;
+    // Account-level reach still comes from the (unchanged) account TOTAL_VALUE resolver, unaffected by
+    // the post-level snapshot mechanism above.
+    expect(kpis.find((k) => k.id === "reach")?.value).toBe("300");
+    expect(kpis.find((k) => k.id === "reach")?.available).toBe(true);
   });
 });
 

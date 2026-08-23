@@ -5,6 +5,8 @@ import { ConnectorError } from "@/lib/connectors/types";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { mediaThumbnailKey, persistMediaThumbnail } from "@/lib/media-storage";
+import { persistPostMetricSnapshot } from "@/lib/post-metric-snapshots";
+import { logError } from "@/lib/observability";
 
 const { metaSyncMinIntervalMs } = getHistoricalBackfillConfig();
 const graphTimeoutMs = 30_000;
@@ -258,7 +260,7 @@ async function upsertPost(
     metricAvailabilityState,
     lastInsightRefreshAt: new Date(),
   };
-  await db.socialPost.upsert({
+  const record = await db.socialPost.upsert({
     where: { connectionId_externalPostId: { connectionId, externalPostId: item.id } },
     create: {
       ...baseUpdate,
@@ -277,6 +279,14 @@ async function upsertPost(
       mediaMetadata: source === MediaSource.OWNED ? (mediaMetadata ? mediaMetadata as Prisma.InputJsonValue : undefined) : undefined,
     },
   });
+
+  // Best-effort: capture/advance the immutable per-month historical snapshot for this post. Never
+  // lets a snapshot-persistence failure break the primary sync (see post-metric-snapshots.ts).
+  try {
+    await persistPostMetricSnapshot(record.id, publishedAt, metrics);
+  } catch (error) {
+    logError("post_metric_snapshot.persist_failed", error, { connectionId, externalPostId: item.id });
+  }
 }
 
 function connectionSelect() {
