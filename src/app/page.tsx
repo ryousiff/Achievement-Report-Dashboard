@@ -5,6 +5,12 @@ import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import { DEFAULT_AD_BUDGET_CURRENCY } from "@/lib/ad-budget";
 import {
+  COVERAGE_READY_MESSAGE,
+  isCoverageReady,
+  mapCoverageCheckFailure,
+  summarizeCoverageIssues,
+} from "@/lib/report-readiness";
+import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
@@ -2246,19 +2252,39 @@ function ReportBuilder({
     : null;
   const [exporting, setExporting] = useState(false);
   const [coverage, setCoverage] = useState<CoverageState | null>(null);
-  useEffect(() => {
+  const [coverageCheckError, setCoverageCheckError] = useState<string | null>(
+    null,
+  );
+  const [checkingCoverage, setCheckingCoverage] = useState(false);
+  // Re-checks the current data-coverage/readiness state only — it never triggers a sync, backfill,
+  // or any Meta API call itself; it just reads whatever the background worker has already produced
+  // (GET /api/clients/:id/coverage). Used both on mount/period change and by the employee-facing
+  // "تحديث حالة البيانات" button below.
+  const checkCoverageStatus = async () => {
     if (!clientId) {
       setCoverage(null);
+      setCoverageCheckError(null);
       return;
     }
-    fetch(
-      `/api/clients/${clientId}/coverage?periodStart=${periodStart}&periodEnd=${periodEnd}`,
-    )
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: { coverage?: CoverageState } | null) =>
-        setCoverage(data?.coverage ?? null),
-      )
-      .catch(() => setCoverage(null));
+    setCheckingCoverage(true);
+    try {
+      const response = await fetch(
+        `/api/clients/${clientId}/coverage?periodStart=${periodStart}&periodEnd=${periodEnd}`,
+      );
+      if (!response.ok) throw new Error(`Coverage check failed with status ${response.status}`);
+      const data = (await response.json()) as { coverage?: CoverageState };
+      setCoverage(data.coverage ?? null);
+      setCoverageCheckError(null);
+    } catch (error) {
+      // Never show the raw technical error (e.g. "fetch failed") to employees — log it for
+      // developers and keep whatever coverage state we already knew about instead of wiping it out.
+      console.error("coverage_check_failed", error);
+      setCoverageCheckError(mapCoverageCheckFailure(error));
+    }
+    setCheckingCoverage(false);
+  };
+  useEffect(() => {
+    void checkCoverageStatus();
   }, [clientId, periodStart, periodEnd]);
   // TODO: re-enable once Google Slides export is fully verified.
   const canExportSlides =
@@ -2291,10 +2317,8 @@ function ReportBuilder({
     }
     setExporting(false);
   };
-  const coverageIssues =
-    coverage && coverage.status !== "COMPLETE"
-      ? coverage.warnings.slice(0, 3)
-      : [];
+  const coverageIssues = summarizeCoverageIssues(coverage, coverageCheckError);
+  const coverageReady = isCoverageReady(coverage, coverageCheckError);
   const readinessIssues = [
     ...(!lastSyncedAt ? ["لم يتم تحديث بيانات التقرير أثناء هذه الجلسة"] : []),
     ...coverageIssues,
@@ -2369,14 +2393,34 @@ function ReportBuilder({
           </button>
         </div>
       </section>
-      {reportStatus !== "APPROVED" && readinessIssues.length > 0 && (
+      {reportStatus !== "APPROVED" && (
         <div className="report-readiness">
-          <b>قبل الاعتماد</b>
-          <ul>
-            {readinessIssues.map((issue) => (
-              <li key={issue}>{issue}</li>
-            ))}
-          </ul>
+          <div className="report-readiness-head">
+            <b>قبل الاعتماد</b>
+            <button
+              type="button"
+              className="btn quiet compact"
+              disabled={checkingCoverage}
+              onClick={() => void checkCoverageStatus()}
+            >
+              <RefreshCw size={13} />
+              {checkingCoverage ? "جارٍ التحقق..." : "تحديث حالة البيانات"}
+            </button>
+          </div>
+          {readinessIssues.length > 0 ? (
+            <>
+              <ul>
+                {readinessIssues.map((issue) => (
+                  <li key={issue}>⚠️ {issue}</li>
+                ))}
+              </ul>
+              <p>ننصح بالانتظار حتى تكتمل المزامنة قبل اعتماد التقرير.</p>
+            </>
+          ) : (
+            <p className="report-readiness-ok">
+              {coverageReady ? COVERAGE_READY_MESSAGE : "لا توجد ملاحظات حالياً."}
+            </p>
+          )}
         </div>
       )}
       <div className="notice">

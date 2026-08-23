@@ -4,7 +4,7 @@ import { getCoverage } from "@/lib/report-coverage";
 
 const mockDb = vi.hoisted(() => ({
   socialConnection: { findUnique: vi.fn() },
-  syncJob: { findMany: vi.fn() },
+  syncJob: { findMany: vi.fn(), create: vi.fn() },
   socialPost: { aggregate: vi.fn(), findMany: vi.fn() },
   socialInsightSnapshot: { findMany: vi.fn() },
 }));
@@ -18,6 +18,7 @@ vi.mock("@/lib/report-data", () => ({ periodAccountReachForRange: mockPeriodAcco
 function resetMocks() {
   mockDb.socialConnection.findUnique.mockReset();
   mockDb.syncJob.findMany.mockReset();
+  mockDb.syncJob.create.mockReset();
   mockDb.socialPost.aggregate.mockReset();
   mockDb.socialPost.findMany.mockReset();
   mockDb.socialInsightSnapshot.findMany.mockReset();
@@ -169,8 +170,78 @@ describe("getCoverage", () => {
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("PARTIAL");
     expect(coverage.collaborativeBackfillStatus).toBe(BackfillStatus.NOT_STARTED);
-    expect(coverage.warnings.some((w) => w.includes("تعاونية"))).toBe(true);
+    // Employee-facing wording: friendly "still syncing", not the old "غير مكتملة" phrasing, and
+    // never a raw technical error.
+    expect(coverage.warnings).toContain("بيانات المنشورات التعاونية لا تزال قيد المزامنة لهذه الفترة.");
     expect(coverage.reachStatus).toBe("DAILY_COMPLETE");
+  });
+
+  it("uses the friendly 'still syncing' wording for incomplete normal-post coverage, not the old technical phrasing", async () => {
+    resetMocks();
+    mockDb.socialConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      clientId: "client-1",
+      historicalBackfillStatus: BackfillStatus.PARTIAL,
+      historicalBackfillStart: new Date("2026-01-01T00:00:00.000Z"),
+      historicalBackfillLastError: null,
+      collaborativeBackfillStatus: BackfillStatus.COMPLETED,
+      collaborativeBackfillStart: new Date("2026-01-01T00:00:00.000Z"),
+      collaborativeBackfillLastError: null,
+      reachCoverageStart: new Date("2026-08-01T00:00:00.000Z"),
+      reachDays28CoverageStart: new Date("2026-08-01T00:00:00.000Z"),
+      followerCountCoverageStart: new Date("2026-08-01T00:00:00.000Z"),
+      accountInsightsLastSyncedAt: new Date("2026-08-04T00:00:00.000Z"),
+      accountInsightsBackfillCompletedAt: new Date("2026-08-04T00:00:00.000Z"),
+      accountInsightsLastError: null,
+      // null (not "before periodEnd") so the middle-branch warnings are skipped and the generic
+      // "still incomplete" fallback fires.
+      lastSuccessfulSyncAt: null,
+    });
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockDb.socialPost.aggregate
+      .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-08-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-08-07T00:00:00.000Z") }, _count: 2 })
+      .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-08-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-08-07T00:00:00.000Z") } });
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+
+    const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
+    expect(coverage.warnings).toContain("بيانات المنشورات لا تزال قيد المزامنة لهذه الفترة.");
+    expect(coverage.warnings.every((warning) => !warning.includes("غير مكتملة"))).toBe(true);
+  });
+
+  it("is a read-only status check: it never creates/enqueues a SyncJob", async () => {
+    resetMocks();
+    mockDb.socialConnection.findUnique.mockResolvedValue({
+      id: "conn-1",
+      clientId: "client-1",
+      historicalBackfillStatus: BackfillStatus.PARTIAL,
+      historicalBackfillStart: new Date("2026-01-01T00:00:00.000Z"),
+      historicalBackfillLastError: null,
+      collaborativeBackfillStatus: BackfillStatus.NOT_STARTED,
+      collaborativeBackfillStart: null,
+      collaborativeBackfillLastError: null,
+      reachCoverageStart: null,
+      reachDays28CoverageStart: null,
+      followerCountCoverageStart: null,
+      accountInsightsLastSyncedAt: null,
+      accountInsightsBackfillCompletedAt: null,
+      accountInsightsLastError: null,
+      lastSuccessfulSyncAt: null,
+    });
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockDb.socialPost.aggregate
+      .mockResolvedValueOnce({ _min: { publishedAt: null }, _max: { publishedAt: null }, _count: 0 })
+      .mockResolvedValueOnce({ _min: { publishedAt: null }, _max: { publishedAt: null } });
+    mockDb.socialPost.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+
+    await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
+
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
   });
 
   it("marks reach PERIOD_UNAVAILABLE for a 31-day month even when daily snapshots are present", async () => {

@@ -288,13 +288,13 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     } else if (connection.lastSuccessfulSyncAt && connection.lastSuccessfulSyncAt < periodEnd) {
       warnings.push("آخر مزامنة ناجحة قبل نهاية الفترة؛ قد تكون المنشورات الأحدث غير متزامنة.");
     } else {
-      warnings.push("تغطية المنشورات غير مكتملة.");
+      warnings.push("بيانات المنشورات لا تزال قيد المزامنة لهذه الفترة.");
     }
   }
 
   if (connection.collaborativeBackfillStatus !== BackfillStatus.COMPLETED) {
-    warnings.push("مزامنة المنشورات التعاونية غير مكتملة لهذه الفترة.");
-    missingRanges.push(buildMissingRange(periodStart, periodEnd, "مزامنة المنشورات التعاونية غير مكتملة."));
+    warnings.push("بيانات المنشورات التعاونية لا تزال قيد المزامنة لهذه الفترة.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, "بيانات المنشورات التعاونية لا تزال قيد المزامنة."));
   }
 
   if (reachStatus === "PERIOD_UNAVAILABLE") {
