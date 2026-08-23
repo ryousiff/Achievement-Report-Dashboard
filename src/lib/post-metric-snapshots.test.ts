@@ -130,6 +130,34 @@ describe("resolveReportPostMetrics", () => {
     expect(resolved.get("p1")?.source).toBe("LIFETIME_FALLBACK");
     expect(resolved.get("p1")?.metrics.views).toBe(400);
   });
+
+  it("performance: resolves any number of finalized posts with a single bulk findMany call, not one query per post", async () => {
+    const now = new Date("2026-08-15T00:00:00.000Z");
+    const posts = Array.from({ length: 25 }, (_, i) => ({
+      id: `p${i}`,
+      publishedAt: new Date("2026-07-10T00:00:00.000Z"),
+      metrics: { views: i },
+    }));
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue(
+      posts.map((post, i) => ({
+        postId: post.id,
+        views: 1000 + i,
+        totalViews: null,
+        totalInteractions: 0,
+        likes: 0,
+        comments: 0,
+        saved: 0,
+        shares: 0,
+        follows: 0,
+      })),
+    );
+
+    const resolved = await resolveReportPostMetrics(posts, now);
+
+    expect(mockDb.socialPostMetricSnapshot.findMany).toHaveBeenCalledTimes(1);
+    expect(resolved.size).toBe(25);
+    expect(resolved.get("p10")?.metrics.views).toBe(1010);
+  });
 });
 
 describe("summarizePostMetricsAccuracy", () => {

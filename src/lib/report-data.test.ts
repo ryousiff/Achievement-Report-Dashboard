@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BackfillStatus, MediaSource } from "@prisma/client";
-import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, periodAccountViews, dailyFollowerMovement, currentFollowersCount, clearReachCache, clearFollowersCache, clearViewsCache, type ReachResult } from "@/lib/report-data";
+import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, periodAccountViews, dailyFollowerMovement, dailyFollowerMovementFromDatabase, currentFollowersCount, clearReachCache, clearFollowersCache, clearViewsCache, type ReachResult } from "@/lib/report-data";
 
 const mockDb = vi.hoisted(() => ({
   socialPost: { findMany: vi.fn() },
@@ -442,6 +442,7 @@ describe("dailyFollowerMovement", () => {
     mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
     mockDecryptToken.mockReturnValue("token-123");
     mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
     mockDb.socialInsightSnapshot.upsert.mockResolvedValue(null);
     mockGraph.mockResolvedValue({
       data: [{
@@ -467,6 +468,79 @@ describe("dailyFollowerMovement", () => {
     const metrics = upsertCalls.map((call) => call[0].create.metric);
     expect(metrics).toContain("followers_gained");
     expect(metrics).toContain("followers_lost");
+  });
+
+  it("performance: uses a single pair of bulk queries (not one query per day) when every day is already stored, and never calls Meta", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockDb.socialInsightSnapshot.findMany.mockImplementation(async ({ where }: { where: { metric: string } }) => {
+      if (where.metric === "followers_gained") {
+        return [
+          { periodStart: new Date("2026-08-01T07:00:00.000Z"), value: 10 },
+          { periodStart: new Date("2026-08-02T07:00:00.000Z"), value: 11 },
+          { periodStart: new Date("2026-08-03T07:00:00.000Z"), value: 12 },
+        ];
+      }
+      if (where.metric === "followers_lost") {
+        return [
+          { periodStart: new Date("2026-08-01T07:00:00.000Z"), value: 3 },
+          { periodStart: new Date("2026-08-02T07:00:00.000Z"), value: 4 },
+          { periodStart: new Date("2026-08-03T07:00:00.000Z"), value: 5 },
+        ];
+      }
+      return [];
+    });
+
+    const result = await dailyFollowerMovement("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
+
+    expect(result.complete).toBe(true);
+    expect(result.gainedSeries.map(([, v]) => v)).toEqual([10, 11, 12]);
+    expect(result.lostSeries.map(([, v]) => v)).toEqual([3, 4, 5]);
+    expect(result.netSeries.map(([, v]) => v)).toEqual([7, 7, 7]);
+    // Exactly one findMany call per metric (gained, lost) — not one per day of the period.
+    expect(mockDb.socialInsightSnapshot.findMany).toHaveBeenCalledTimes(2);
+    expect(mockGraph).not.toHaveBeenCalled();
+    expect(mockDb.socialInsightSnapshot.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("dailyFollowerMovementFromDatabase", () => {
+  it("performance: reads a 31-day period using exactly two bulk queries instead of two queries per day", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    const days = Array.from({ length: 31 }, (_, i) => i + 1);
+    mockDb.socialInsightSnapshot.findMany.mockImplementation(async ({ where }: { where: { metric: string } }) => {
+      const value = where.metric === "followers_gained" ? 2 : 1;
+      return days.map((day) => ({ periodStart: new Date(`2026-07-${String(day).padStart(2, "0")}T07:00:00.000Z`), value }));
+    });
+
+    const result = await dailyFollowerMovementFromDatabase("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(result.complete).toBe(true);
+    expect(result.gainedSeries).toHaveLength(31);
+    expect(result.gainedSeries.every(([, v]) => v === 2)).toBe(true);
+    expect(result.lostSeries.every(([, v]) => v === 1)).toBe(true);
+    // Exactly one findMany call per metric for the whole 31-day range — not 62 (2 per day).
+    expect(mockDb.socialInsightSnapshot.findMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("only counts a day as present when both gained and lost snapshots exist for it, matching the previous per-day matching semantics", async () => {
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDb.socialInsightSnapshot.findMany.mockImplementation(async ({ where }: { where: { metric: string } }) => {
+      if (where.metric === "followers_gained") {
+        return [
+          { periodStart: new Date("2026-08-01T07:00:00.000Z"), value: 5 },
+          { periodStart: new Date("2026-08-02T07:00:00.000Z"), value: 6 },
+        ];
+      }
+      // Day 2's "lost" snapshot is missing, so day 2 must be excluded even though "gained" exists.
+      return [{ periodStart: new Date("2026-08-01T07:00:00.000Z"), value: 1 }];
+    });
+
+    const result = await dailyFollowerMovementFromDatabase("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-02T23:59:59.999Z"));
+
+    expect(result.complete).toBe(false);
+    expect(result.gainedSeries).toEqual([["2026-08-01", 5], ["2026-08-02", 0]]);
+    expect(result.lostSeries).toEqual([["2026-08-01", 1], ["2026-08-02", 0]]);
   });
 });
 

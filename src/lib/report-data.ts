@@ -83,7 +83,28 @@ function mediaBlock(title: string, body: string, posts: ReportPost[], display: s
  * `SocialPost.metrics` — see post-metric-snapshots.ts. Posts whose publish month is still open keep
  * using their live metrics, matching the live media library. `now` is only overridable for tests. */
 export async function reportPosts(clientId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
-  const posts = await db.socialPost.findMany({ where: { connection: { clientId }, publishedAt: { gte: periodStart, lte: periodEnd } }, orderBy: { publishedAt: "desc" } });
+  // Explicit select: this runs on every report build/refresh/export, potentially over hundreds of
+  // posts for a multi-month period. Skips mediaMetadata (can hold owner/collaborator objects),
+  // connectionId, and sync bookkeeping fields (lastInsightRefreshAt, syncedAt) that ReportPost never uses.
+  const posts = await db.socialPost.findMany({
+    where: { connection: { clientId }, publishedAt: { gte: periodStart, lte: periodEnd } },
+    orderBy: { publishedAt: "desc" },
+    select: {
+      id: true,
+      externalPostId: true,
+      caption: true,
+      mediaType: true,
+      mediaUrl: true,
+      thumbnailUrl: true,
+      thumbnailStorageKey: true,
+      permalink: true,
+      publishedAt: true,
+      metrics: true,
+      metricAvailability: true,
+      metricAvailabilityState: true,
+      mediaSource: true,
+    },
+  });
   const resolved = await resolveReportPostMetrics(posts.map((post) => ({ id: post.id, publishedAt: post.publishedAt, metrics: post.metrics as PostMetrics })), now);
   return posts.map((post): ReportPost => {
     const liveMetrics = post.metrics as PostMetrics;
@@ -652,8 +673,32 @@ async function fetchAndStoreDailyFollowerMovement(
   }
 }
 
-/** Build a daily gained/lost/net series for the period by fetching follows_and_unfollows one day at a time.
- * Values are stored in SocialInsightSnapshot for reuse. */
+/** Bulk-fetch every stored daily followers_gained/followers_lost DAY snapshot already covering
+ * [periodStart, periodEnd] in exactly two queries (instead of one query per metric per day), keyed
+ * by the calendar day (YYYY-MM-DD, UTC) each snapshot's periodStart falls on. */
+async function fetchStoredDailyFollowerMovement(clientId: string, periodStart: Date, periodEnd: Date) {
+  // Day snapshots are stored with periodStart/periodEnd at 07:00 UTC (see fetchAndStoreDailyFollowerMovement),
+  // one calendar day after the day they describe, so widen the query range by a day on each side.
+  const rangeStart = startOfDayUTC(periodStart);
+  const rangeEnd = addDaysUTC(periodEnd, 1);
+  const [gainedRows, lostRows] = await Promise.all([
+    db.socialInsightSnapshot.findMany({
+      where: { connection: { clientId }, metric: "followers_gained", periodType: InsightPeriodType.DAY, periodStart: { gte: rangeStart, lte: rangeEnd } },
+      select: { periodStart: true, value: true },
+    }),
+    db.socialInsightSnapshot.findMany({
+      where: { connection: { clientId }, metric: "followers_lost", periodType: InsightPeriodType.DAY, periodStart: { gte: rangeStart, lte: rangeEnd } },
+      select: { periodStart: true, value: true },
+    }),
+  ]);
+  const gainedByDay = new Map(gainedRows.map((row) => [row.periodStart.toISOString().slice(0, 10), row.value]));
+  const lostByDay = new Map(lostRows.map((row) => [row.periodStart.toISOString().slice(0, 10), row.value]));
+  return { gainedByDay, lostByDay };
+}
+
+/** Build a daily gained/lost/net series for the period, preferring already-stored snapshots (fetched
+ * in a small bounded number of bulk queries up front) and only calling Meta for days genuinely
+ * missing from the database. Newly-fetched days are stored in SocialInsightSnapshot for reuse. */
 export async function dailyFollowerMovement(clientId: string, periodStart: Date, periodEnd: Date): Promise<DailyFollowerMovement> {
   const connection = await fetchConnection(clientId);
   if (!connection || !connection.externalAccountId || !connection.encryptedToken) {
@@ -661,43 +706,13 @@ export async function dailyFollowerMovement(clientId: string, periodStart: Date,
   }
   const token = decryptToken(connection.encryptedToken);
   const expected = daysBetweenInclusive(periodStart, periodEnd);
-  const gainedByDay = new Map<string, number>();
-  const lostByDay = new Map<string, number>();
+  const { gainedByDay, lostByDay } = await fetchStoredDailyFollowerMovement(clientId, periodStart, periodEnd);
 
   const current = startOfDayUTC(periodStart);
   const end = startOfDayUTC(periodEnd);
   while (current <= end) {
     const day = current.toISOString().slice(0, 10);
-    // Check stored snapshots first
-    const periodEnd = new Date(current);
-    periodEnd.setUTCDate(periodEnd.getUTCDate() + 1);
-    periodEnd.setUTCHours(7);
-    const periodStartDay = new Date(periodEnd);
-    periodStartDay.setUTCDate(periodStartDay.getUTCDate() - 1);
-    const stored = await db.socialInsightSnapshot.findFirst({
-      where: {
-        connection: { clientId },
-        metric: "followers_gained",
-        periodType: InsightPeriodType.DAY,
-        periodStart: periodStartDay,
-        periodEnd,
-      },
-      select: { value: true },
-    });
-    const storedLost = await db.socialInsightSnapshot.findFirst({
-      where: {
-        connection: { clientId },
-        metric: "followers_lost",
-        periodType: InsightPeriodType.DAY,
-        periodStart: periodStartDay,
-        periodEnd,
-      },
-      select: { value: true },
-    });
-    if (stored && storedLost) {
-      gainedByDay.set(day, stored.value);
-      lostByDay.set(day, storedLost.value);
-    } else {
+    if (!(gainedByDay.has(day) && lostByDay.has(day))) {
       const fetched = await fetchAndStoreDailyFollowerMovement(connection.id, connection.externalAccountId, token, current);
       if (fetched) {
         gainedByDay.set(day, fetched.gained);
@@ -839,35 +854,30 @@ export async function periodAccountViewsFromDatabase(clientId: string, periodSta
   return { value, accuracy: "EXACT", method: "SNAPSHOT", tooltip: DB_ONLY_POST_SUM_VIEWS_TOOLTIP };
 }
 
-/** Read daily gained/lost follower snapshots without fetching from Meta. */
+/** Read daily gained/lost follower snapshots without fetching from Meta, in exactly two bulk queries
+ * regardless of period length (instead of two queries per day). */
 export async function dailyFollowerMovementFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<DailyFollowerMovement> {
   const connection = await fetchConnection(clientId);
   if (!connection) return { gainedSeries: [], lostSeries: [], netSeries: [], complete: false };
   const expected = daysBetweenInclusive(periodStart, periodEnd);
-  const gainedByDay = new Map<string, number>();
-  const lostByDay = new Map<string, number>();
+  const { gainedByDay, lostByDay } = await fetchStoredDailyFollowerMovement(clientId, periodStart, periodEnd);
   const current = startOfDayUTC(periodStart);
   const end = startOfDayUTC(periodEnd);
+  const matchedGained = new Map<string, number>();
+  const matchedLost = new Map<string, number>();
   while (current <= end) {
     const day = current.toISOString().slice(0, 10);
-    const periodEndDay = new Date(current);
-    periodEndDay.setUTCDate(periodEndDay.getUTCDate() + 1);
-    periodEndDay.setUTCHours(7);
-    const periodStartDay = new Date(periodEndDay);
-    periodStartDay.setUTCDate(periodStartDay.getUTCDate() - 1);
-    const [stored, storedLost] = await Promise.all([
-      db.socialInsightSnapshot.findFirst({ where: { connection: { clientId }, metric: "followers_gained", periodType: InsightPeriodType.DAY, periodStart: periodStartDay, periodEnd: periodEndDay }, select: { value: true } }),
-      db.socialInsightSnapshot.findFirst({ where: { connection: { clientId }, metric: "followers_lost", periodType: InsightPeriodType.DAY, periodStart: periodStartDay, periodEnd: periodEndDay }, select: { value: true } }),
-    ]);
-    if (stored && storedLost) {
-      gainedByDay.set(day, stored.value);
-      lostByDay.set(day, storedLost.value);
+    const gained = gainedByDay.get(day);
+    const lost = lostByDay.get(day);
+    if (gained !== undefined && lost !== undefined) {
+      matchedGained.set(day, gained);
+      matchedLost.set(day, lost);
     }
     current.setUTCDate(current.getUTCDate() + 1);
   }
-  const complete = gainedByDay.size >= expected;
-  const gainedSeries = completeDailySeries(periodStart, periodEnd, [...gainedByDay.entries()]);
-  const lostSeries = completeDailySeries(periodStart, periodEnd, [...lostByDay.entries()]);
+  const complete = matchedGained.size >= expected;
+  const gainedSeries = completeDailySeries(periodStart, periodEnd, [...matchedGained.entries()]);
+  const lostSeries = completeDailySeries(periodStart, periodEnd, [...matchedLost.entries()]);
   const netSeries: Array<[string, number]> = gainedSeries.map(([day, gained], i) => [day, gained - lostSeries[i][1]]);
   return { gainedSeries, lostSeries, netSeries, complete };
 }
@@ -908,17 +918,37 @@ export async function buildStandardReportBlocksFromDatabase(clientId: string, pe
 }
 
 export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}, now: Date = new Date()): Promise<ReportBlock[]> {
-  const posts = await reportPosts(clientId, periodStart, periodEnd, now);
-  const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
-  const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
   // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
   // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
   const days = daysBetweenInclusive(periodStart, periodEnd);
   const resolve = { ...defaultReportDataResolvers, ...resolvers };
-  const reach = await resolve.reach(clientId, periodStart, periodEnd);
-  const followers = await resolve.followers(clientId, periodStart, periodEnd);
-  const totalViews = await resolve.views(clientId, periodStart, periodEnd);
+
+  // These reads are all independent of each other (none consumes another's result), so resolve them
+  // concurrently instead of one-by-one — this is the dominant cost of building a report and doing it
+  // sequentially previously added their latencies together for no reason.
+  const [posts, reach, followers, totalViews, dailyMovement, reachDailySnapshots] = await Promise.all([
+    reportPosts(clientId, periodStart, periodEnd, now),
+    resolve.reach(clientId, periodStart, periodEnd),
+    resolve.followers(clientId, periodStart, periodEnd),
+    resolve.views(clientId, periodStart, periodEnd),
+    days <= 31
+      ? resolve.dailyFollowerMovement(clientId, periodStart, periodEnd)
+      : Promise.resolve({ complete: false, gainedSeries: [] as Array<[string, number]>, lostSeries: [] as Array<[string, number]>, netSeries: [] as Array<[string, number]> }),
+    // Optional: expose SUM(daily reach) as a clearly labelled, separate metric. Never used as unique reach.
+    db.socialInsightSnapshot.findMany({
+      where: {
+        connection: { clientId },
+        metric: "reach",
+        periodType: InsightPeriodType.DAY,
+        periodEnd: { gte: startOfDayUTC(periodStart), lte: endOfDayUTC(periodEnd) },
+      },
+      select: { value: true },
+    }),
+  ]);
+
+  const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
+  const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
   const hasReach = reach.value !== null;
   const hasFollows = followers.gained !== null;
   const hasTotalViews = totalViews.value !== null;
@@ -930,7 +960,6 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const topViews = topBy("views");
   const topFollows = topBy("follows");
 
-  const dailyMovement = days <= 31 ? await resolve.dailyFollowerMovement(clientId, periodStart, periodEnd) : { complete: false, gainedSeries: [] as Array<[string, number]>, lostSeries: [] as Array<[string, number]>, netSeries: [] as Array<[string, number]> };
   const expectedFollowerDays = daysBetweenInclusive(periodStart, periodEnd);
   const followerDataComplete = dailyMovement.complete && dailyMovement.gainedSeries.length >= expectedFollowerDays;
   // The daily chart has its own data source (a per-day `follows_and_unfollows` breakdown call) which is
@@ -966,16 +995,6 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     kpi("reach", metricLabel.reach, hasReach ? totals.reach.toLocaleString() : "غير متاح", hasReach, reach.accuracy === "ESTIMATED" ? { ...reachExtra, badge: "تقديري" } : reachExtra),
   ];
 
-  // Optional: expose SUM(daily reach) as a clearly labelled, separate metric. Never use it as unique reach.
-  const reachDailySnapshots = await db.socialInsightSnapshot.findMany({
-    where: {
-      connection: { clientId },
-      metric: "reach",
-      periodType: InsightPeriodType.DAY,
-      periodEnd: { gte: startOfDayUTC(periodStart), lte: endOfDayUTC(periodEnd) },
-    },
-    select: { value: true },
-  });
   if (reachDailySnapshots.length > 0) {
     reachKpis.push(kpi("daily-reach-sum", "مجموع الوصول اليومي", reachDailySnapshots.reduce((sum, s) => sum + s.value, 0).toLocaleString(), true, { tooltip: SUM_DAILY_TOOLTIP }));
   }

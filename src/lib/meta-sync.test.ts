@@ -55,6 +55,12 @@ const mockDb = vi.hoisted(() => ({
       stores.posts.set(key, { id: key, ...create });
       return stores.posts.get(key);
     }),
+    update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+      const entry = [...stores.posts.values()].find((post) => post.id === where.id);
+      if (!entry) return null;
+      Object.assign(entry, data);
+      return entry;
+    }),
     findMany: vi.fn(async () => Array.from(stores.posts.values())),
     aggregate: vi.fn(async () => ({ _min: { publishedAt: null }, _max: { publishedAt: null }, _count: 0 })),
   },
@@ -78,6 +84,7 @@ const mockFetch = vi.fn();
 globalThis.fetch = mockFetch as unknown as typeof fetch;
 
 import { runIncrementalSync, runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, MetaSyncError } from "@/lib/meta-sync";
+import { persistMediaThumbnail } from "@/lib/media-storage";
 
 const defaultConnection = {
   id: "conn-1",
@@ -312,6 +319,54 @@ describe("runIncrementalSync", () => {
     expect(result.posts).toBe(1);
     const post = stores.posts.get("conn-1:collab-1")!;
     expect(post.mediaSource).toBe(MediaSource.COLLABORATIVE);
+  });
+
+  it("performance: does not block sync on thumbnail persistence (fire-and-forget), and only writes thumbnailStorageKey once it resolves", async () => {
+    setupConnection();
+    setFetch(defaultMatches({
+      media: paginatedPage([mediaItem("owned-1")]),
+      collaborative_media: emptyPage(),
+    }));
+    let resolveThumbnail!: (value: string | null) => void;
+    const deferred = new Promise<string | null>((resolve) => {
+      resolveThumbnail = resolve;
+    });
+    vi.mocked(persistMediaThumbnail).mockImplementationOnce(() => deferred);
+
+    const result = await runIncrementalSync("conn-1");
+    expect(result.posts).toBe(1);
+
+    const post = stores.posts.get("conn-1:owned-1")!;
+    expect(post).toBeDefined();
+    expect(post.metrics.views).toBe(100); // core post/metric sync already completed
+    // The thumbnail persist promise has not resolved yet — sync did not wait for it.
+    expect(post.thumbnailStorageKey).toBeUndefined();
+
+    resolveThumbnail("posts/conn-1/owned-1.jpg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(post.thumbnailStorageKey).toBe("posts/conn-1/owned-1.jpg");
+  });
+
+  it("performance: never re-downloads/re-uploads a thumbnail that is already cached for a post", async () => {
+    setupConnection();
+    stores.posts.set("conn-1:owned-1", {
+      id: "conn-1:owned-1",
+      connectionId: "conn-1",
+      externalPostId: "owned-1",
+      thumbnailStorageKey: "posts/conn-1/owned-1.jpg",
+      metrics: {},
+    });
+    setFetch(defaultMatches({
+      media: paginatedPage([mediaItem("owned-1")]), // re-encountered on a later incremental sync
+      collaborative_media: emptyPage(),
+    }));
+
+    await runIncrementalSync("conn-1");
+
+    expect(persistMediaThumbnail).not.toHaveBeenCalled();
+    const post = stores.posts.get("conn-1:owned-1")!;
+    expect(post.thumbnailStorageKey).toBe("posts/conn-1/owned-1.jpg"); // untouched
   });
 
   it("does not store an unavailable collaborative insight as zero", async () => {

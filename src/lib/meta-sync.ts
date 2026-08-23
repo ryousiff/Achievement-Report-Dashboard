@@ -239,20 +239,16 @@ async function upsertPost(
   const { metrics, metricAvailability, metricAvailabilityState } = buildPostRecord(item, insights);
   const publishedAt = new Date(item.timestamp!);
 
-  // Persist our own permanent copy of the display image, since Meta's media_url/thumbnail_url are
-  // short-lived signed CDN URLs. Best-effort: on any failure this stays undefined so Prisma leaves a
-  // previously-stored key untouched rather than wiping it out.
-  const displaySourceUrl = item.thumbnail_url ?? item.media_url;
-  const thumbnailStorageKey = displaySourceUrl
-    ? (await persistMediaThumbnail(displaySourceUrl, mediaThumbnailKey(connectionId, item.id))) ?? undefined
-    : undefined;
-
+  // Post/metric persistence must not wait on thumbnail caching (a remote image download + MinIO
+  // upload) — it never touches thumbnailStorageKey here, on either create or update, so an existing
+  // cached thumbnail is never at risk of being cleared. Caching happens afterwards, in the background
+  // (see below); the existing THUMBNAIL_BACKFILL job remains the safety net for any post that ends up
+  // still missing a thumbnail (failed attempt, or the process exiting before it finished).
   const baseUpdate = {
     caption: item.caption,
     mediaType: item.media_type!,
     mediaUrl: item.media_url,
     thumbnailUrl: item.thumbnail_url,
-    ...(thumbnailStorageKey ? { thumbnailStorageKey } : {}),
     permalink: item.permalink,
     publishedAt,
     metrics,
@@ -279,6 +275,23 @@ async function upsertPost(
       mediaMetadata: source === MediaSource.OWNED ? (mediaMetadata ? mediaMetadata as Prisma.InputJsonValue : undefined) : undefined,
     },
   });
+
+  // Persist our own permanent copy of the display image, since Meta's media_url/thumbnail_url are
+  // short-lived signed CDN URLs. Skipped entirely once a thumbnail is already cached for this post —
+  // a post's image never changes after publish, so re-downloading and re-uploading the same bytes on
+  // every subsequent incremental sync / recent-insight refresh would be pure waste; the existing
+  // thumbnailStorageKey is reused instead (THUMBNAIL_BACKFILL remains the catch-up path for posts that
+  // still have none). Fire-and-forget: never awaited, so it cannot slow down sync, and any failure here
+  // is silently caught (logged) rather than surfaced — only successful persists ever write the key.
+  const displaySourceUrl = item.thumbnail_url ?? item.media_url;
+  if (displaySourceUrl && !record.thumbnailStorageKey) {
+    void persistMediaThumbnail(displaySourceUrl, mediaThumbnailKey(connectionId, item.id))
+      .then((thumbnailStorageKey) => {
+        if (!thumbnailStorageKey) return undefined;
+        return db.socialPost.update({ where: { id: record.id }, data: { thumbnailStorageKey } });
+      })
+      .catch((error) => logError("media.thumbnail.persist_failed", error, { connectionId, externalPostId: item.id }));
+  }
 
   // Best-effort: capture/advance the immutable per-month historical snapshot for this post. Never
   // lets a snapshot-persistence failure break the primary sync (see post-metric-snapshots.ts).

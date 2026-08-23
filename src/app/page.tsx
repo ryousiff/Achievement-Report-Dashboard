@@ -632,7 +632,7 @@ export default function Home() {
   }, []);
   const refreshClients = async () => {
     const response = await fetch("/api/clients");
-    if (!response.ok) return;
+    if (!response.ok) return [];
     const data = (await response.json()) as { clients?: WorkspaceClient[] };
     const clients = data.clients ?? [];
     setWorkspaceClients(clients);
@@ -641,6 +641,7 @@ export default function Home() {
         ? current
         : (clients[0]?.id ?? null),
     );
+    return clients;
   };
   const waitForClientSync = async (
     clientId: string,
@@ -4766,7 +4767,7 @@ function ClientWorkspace({
   clients: WorkspaceClient[];
   selectedClientId: string | null;
   onSelect: (id: string) => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<WorkspaceClient[]>;
   onCreated: (client: WorkspaceClient) => Promise<void>;
   user: WorkspaceUser | null;
 }) {
@@ -5894,7 +5895,7 @@ function ConnectedAccounts({
 }: {
   t: Dictionary;
   clients: WorkspaceClient[];
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<WorkspaceClient[]>;
   user: WorkspaceUser | null;
 }) {
   const [profiles, setProfiles] = useState<MetaProfile[]>([]);
@@ -5997,17 +5998,15 @@ function ConnectedAccounts({
     clientId: string,
     attempt = 0,
   ): Promise<void> => {
-    const response = await fetch("/api/clients");
-    const data = response.ok
-      ? ((await response.json()) as { clients?: WorkspaceClient[] })
-      : { clients: [] };
-    const client = data.clients?.find((item) => item.id === clientId);
+    // A single onRefresh() call both fetches the latest clients (from the server) and updates the
+    // parent's client list state — reuse its result instead of a second, separate /api/clients fetch.
+    const [clients] = await Promise.all([onRefresh(), refreshProfiles()]);
+    const client = clients.find((item) => item.id === clientId);
     const active = client?.connections?.some((connection) =>
       connection.syncJobs?.some(
         (job) => job.status === "QUEUED" || job.status === "RUNNING",
       ),
     );
-    await Promise.all([onRefresh(), refreshProfiles()]);
     if (active && attempt < 60) {
       await new Promise((resolve) => setTimeout(resolve, 3000));
       return pollSyncStatus(clientId, attempt + 1);
@@ -6075,12 +6074,9 @@ function ConnectedAccounts({
     clientId: string,
     attempt = 0,
   ): Promise<void> => {
-    const response = await fetch("/api/clients");
-    const data = response.ok
-      ? ((await response.json()) as { clients?: WorkspaceClient[] })
-      : { clients: [] };
-    const client = data.clients?.find((item) => item.id === clientId);
-    await Promise.all([onRefresh(), refreshProfiles()]);
+    // See pollSyncStatus above: reuse onRefresh()'s result instead of a second /api/clients fetch.
+    const [clients] = await Promise.all([onRefresh(), refreshProfiles()]);
+    const client = clients.find((item) => item.id === clientId);
     const active = client ? backfillInProgress(client) : false;
     if (active && attempt < 60) {
       await new Promise((resolve) => setTimeout(resolve, 5000));

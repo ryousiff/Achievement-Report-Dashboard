@@ -1,5 +1,6 @@
 import { BlockType, Prisma, SyncJobStatus } from "@prisma/client";
 import { db } from "@/lib/db";
+import { logEvent } from "@/lib/observability";
 import {
   REPORT_DATA_DRIVEN_REFRESH_KEYS,
   type ReportBlock,
@@ -215,6 +216,7 @@ function mergeBlockContent(existing: ReportBlock, fresh: ReportBlock): ReportBlo
 /** Refresh all data-driven blocks in a report from the database, preserving manual content.
  *  Does not make new Meta API calls when skipMetaApi is true (default). */
 export async function refreshReportData(reportId: string, options: RefreshOptions = {}) {
+  const startedAt = Date.now();
   const { skipMetaApi } = { ...DEFAULT_OPTIONS, ...options };
 
   const report = await db.report.findUnique({
@@ -284,6 +286,14 @@ export async function refreshReportData(reportId: string, options: RefreshOption
         })),
       },
     },
+  });
+
+  logEvent("report.refresh.completed", {
+    reportId,
+    clientId: report.clientId,
+    blocks: mergedBlocks.length,
+    coverageStatus: coverage.status,
+    durationMs: Date.now() - startedAt,
   });
 
   return {
