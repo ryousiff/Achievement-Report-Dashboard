@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InsightPeriodType, Platform } from "@prisma/client";
-import { runMonthEndCloseout, isLastDaysOfMonth } from "@/lib/month-end-closeout";
+import { runMonthEndCloseout, runReportPeriodCloseout, isLastDaysOfMonth } from "@/lib/month-end-closeout";
 
 const mockDb = vi.hoisted(() => ({
   socialConnection: { findUnique: vi.fn() },
@@ -255,6 +255,29 @@ describe("runMonthEndCloseout", () => {
     mockMetaSyncInsights.fetchAndStoreAccountInsight.mockRejectedValue(new Error("rate limited"));
 
     await expect(runMonthEndCloseout("conn-1", new Date("2026-09-02T00:00:00.000Z"))).rejects.toThrow("rate limited");
+  });
+
+  it("targets an explicitly requested older report period without resyncing the entire history", async () => {
+    mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
+    setSnapshotMocks({ reachDays: 29 });
+    mockDb.socialPost.count.mockResolvedValue(0);
+
+    const result = await runReportPeriodCloseout("conn-1", new Date("2026-08-01"), new Date("2026-08-31"), new Date("2026-09-15"));
+
+    expect(result.completed).toBe(false);
+    expect(mockMetaSyncInsights.fetchAndStoreAccountInsight).toHaveBeenCalled();
+  });
+
+  it("returns completed when the explicitly requested older report period is already complete", async () => {
+    mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
+    setSnapshotMocks();
+    mockDb.socialPost.count.mockResolvedValue(0);
+
+    const result = await runReportPeriodCloseout("conn-1", new Date("2026-08-01"), new Date("2026-08-31"), new Date("2026-09-15"));
+
+    expect(result.completed).toBe(true);
+    expect(mockMetaSyncInsights.fetchCompletedMonthTotals).not.toHaveBeenCalled();
+    expect(mockMetaSyncInsights.fetchAndStoreAccountInsight).not.toHaveBeenCalled();
   });
 });
 

@@ -51,18 +51,34 @@ async function requireInstagramConnection(connectionId: string) {
   return connection;
 }
 
-async function findFirstIncompleteCompletedMonth(connectionId: string, now: Date): Promise<{ period: CompletedMonthPeriod; readiness: Awaited<ReturnType<typeof monthReadinessMetrics>> } | null> {
+async function findFirstIncompleteCompletedMonthInRange(
+  connectionId: string,
+  now: Date,
+  options?: { minStart?: Date; maxEnd?: Date },
+): Promise<{ period: CompletedMonthPeriod; readiness: Awaited<ReturnType<typeof monthReadinessMetrics>> } | null> {
   const config = getHistoricalBackfillConfig();
   const overallStart = calculateBackfillStart(new Date(), config.months);
   const lookbackFloor = new Date(Date.now() - config.accountInsightMaxLookbackDays * 24 * 60 * 60 * 1000);
   const baseFrom = overallStart > lookbackFloor ? overallStart : lookbackFloor;
-  const candidates = completedMonthsWithinLookback(now, baseFrom);
+  const candidates = completedMonthsWithinLookback(now, baseFrom).filter((period) => {
+    if (options?.minStart && period.end < options.minStart) return false;
+    if (options?.maxEnd && period.start > options.maxEnd) return false;
+    return true;
+  });
   for (const period of candidates) {
     if (!isMonthFinalized(period.end, now)) continue;
     const readiness = await monthReadinessMetrics(connectionId, period, now);
     if (!readiness.ready) return { period, readiness };
   }
   return null;
+}
+
+export async function isMonthEndCloseoutDue(connectionId: string, now: Date = new Date()) {
+  return (await findFirstIncompleteCompletedMonthInRange(connectionId, now)) !== null;
+}
+
+export async function isReportPeriodCloseoutDue(connectionId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
+  return (await findFirstIncompleteCompletedMonthInRange(connectionId, now, { minStart: periodStart, maxEnd: periodEnd })) !== null;
 }
 
 async function monthReadinessMetrics(connectionId: string, period: CompletedMonthPeriod, now: Date) {
@@ -266,48 +282,74 @@ async function refreshPostsInMonth(
   return { refreshed: posts.length, hasMore: posts.length >= CLOSEOUT_POST_REFRESH_BATCH_SIZE };
 }
 
-/** One bounded, targeted closeout run for the most recent finalized calendar month that still lacks
- * required report data. Fetches only missing account totals, missing daily reach/follower snapshots,
- * and refreshes a small batch of stale posts. Returns `completed: true` only when no more work is
- * detected for that month; otherwise the scheduler will re-enqueue another chunk. */
-export async function runMonthEndCloseout(connectionId: string, now: Date = new Date()) {
-  const connection = await requireInstagramConnection(connectionId);
+async function runCloseoutForPeriod(
+  connection: Awaited<ReturnType<typeof requireInstagramConnection>>,
+  target: CompletedMonthPeriod,
+  now: Date,
+  context: { logLabel: string; periodTag?: string } = { logLabel: "month_end_closeout" },
+  initialReadiness?: Awaited<ReturnType<typeof monthReadinessMetrics>>,
+) {
   const token = decryptToken(connection.encryptedToken);
-  const targetInfo = await findFirstIncompleteCompletedMonth(connectionId, now);
-  if (!targetInfo) {
-    logEvent("month_end_closeout.nothing_to_close", { connectionId });
-    return { posts: 0, completed: true };
-  }
-
-  const { period: target, readiness: initialReadiness } = targetInfo;
   const targetMonthKey = `${target.start.getUTCFullYear()}-${String(target.start.getUTCMonth() + 1).padStart(2, "0")}`;
-  logEvent("month_end_closeout.started", { connectionId, targetMonth: targetMonthKey });
+  logEvent(`${context.logLabel}.started`, { connectionId: connection.id, targetMonth: targetMonthKey, periodTag: context.periodTag });
 
+  const readiness = initialReadiness ?? (await monthReadinessMetrics(connection.id, target, now));
   let workDone = false;
 
-  if (!initialReadiness.totalMetricsReady) {
-    const ok = await fetchMissingAccountTotals(connectionId, connection.externalAccountId, token, target);
+  if (!readiness.totalMetricsReady) {
+    const ok = await fetchMissingAccountTotals(connection.id, connection.externalAccountId, token, target);
     if (ok) workDone = true;
   }
 
-  if (!initialReadiness.dailyReachReady || !initialReadiness.dailyFollowersReady) {
-    const { fetchedAny } = await fetchMissingDailySnapshots(connectionId, connection.externalAccountId, token, target, now);
+  if (!readiness.dailyReachReady || !readiness.dailyFollowersReady) {
+    const { fetchedAny } = await fetchMissingDailySnapshots(connection.id, connection.externalAccountId, token, target, now);
     if (fetchedAny) workDone = true;
   }
 
-  const postRefresh = await refreshPostsInMonth(connectionId, connection.externalAccountId, token, target);
+  const postRefresh = await refreshPostsInMonth(connection.id, connection.externalAccountId, token, target);
   if (postRefresh.refreshed > 0) workDone = true;
 
-  const finalReadiness = await monthReadinessMetrics(connectionId, target, now);
+  const finalReadiness = await monthReadinessMetrics(connection.id, target, now);
   const completed = finalReadiness.ready && !postRefresh.hasMore;
 
-  logEvent("month_end_closeout.finished", {
-    connectionId,
+  logEvent(`${context.logLabel}.finished`, {
+    connectionId: connection.id,
     targetMonth: targetMonthKey,
+    periodTag: context.periodTag,
     completed,
     workDone,
     postsRefreshed: postRefresh.refreshed,
   });
 
   return { posts: postRefresh.refreshed, completed };
+}
+
+/** One bounded, targeted closeout run for the most recent finalized calendar month that still lacks
+ * required report data. Fetches only missing account totals, missing daily reach/follower snapshots,
+ * and refreshes a small batch of stale posts. Returns `completed: true` only when no more work is
+ * detected for that month; otherwise the scheduler will re-enqueue another chunk. */
+export async function runMonthEndCloseout(connectionId: string, now: Date = new Date()) {
+  const connection = await requireInstagramConnection(connectionId);
+  const targetInfo = await findFirstIncompleteCompletedMonthInRange(connectionId, now);
+  if (!targetInfo) {
+    logEvent("month_end_closeout.nothing_to_close", { connectionId });
+    return { posts: 0, completed: true };
+  }
+  return runCloseoutForPeriod(connection, targetInfo.period, now, { logLabel: "month_end_closeout" }, targetInfo.readiness);
+}
+
+/** Targeted closeout for an explicitly requested report period (e.g., an older month opened by an
+ * employee). Processes one incomplete finalized calendar month within the period per run and returns
+ * `completed: true` only once every month in the range is ready. */
+export async function runReportPeriodCloseout(connectionId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
+  const connection = await requireInstagramConnection(connectionId);
+  const targetInfo = await findFirstIncompleteCompletedMonthInRange(connectionId, now, { minStart: periodStart, maxEnd: periodEnd });
+  if (!targetInfo) {
+    logEvent("report_period_closeout.nothing_to_close", { connectionId, periodStart: periodStart.toISOString(), periodEnd: periodEnd.toISOString() });
+    return { posts: 0, completed: true };
+  }
+  return runCloseoutForPeriod(connection, targetInfo.period, now, {
+    logLabel: "report_period_closeout",
+    periodTag: `${periodStart.toISOString()}_${periodEnd.toISOString()}`,
+  }, targetInfo.readiness);
 }

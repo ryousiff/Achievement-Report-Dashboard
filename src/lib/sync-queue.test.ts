@@ -67,11 +67,14 @@ vi.mock("@/lib/meta-sync-insights", () => mockMetaSyncInsights);
 
 const mockMonthEndCloseout = vi.hoisted(() => ({
   runMonthEndCloseout: vi.fn(),
+  runReportPeriodCloseout: vi.fn(),
   isLastDaysOfMonth: vi.fn(),
+  isMonthEndCloseoutDue: vi.fn(),
+  isReportPeriodCloseoutDue: vi.fn(),
 }));
 vi.mock("@/lib/month-end-closeout", () => mockMonthEndCloseout);
 
-import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueMonthlyReportPreparation, runDueThumbnailBackfill } from "@/lib/sync-queue";
+import { prioritizeReportPeriod, processNextSyncJob, recoverStalledHistoricalBackfills, runDueMonthlyReportPreparation, runDueThumbnailBackfill } from "@/lib/sync-queue";
 
 function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date; priority: number }> = {}) {
   return {
@@ -422,7 +425,9 @@ describe("runDueMonthlyReportPreparation", () => {
     mockDb.syncJob.findFirst.mockResolvedValue(null);
     mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
     mockDb.setting.findUnique.mockResolvedValue(null);
+    mockDb.socialPost.count.mockResolvedValue(0);
     mockMonthEndCloseout.isLastDaysOfMonth.mockReturnValue(false);
+    mockMonthEndCloseout.isMonthEndCloseoutDue.mockResolvedValue(false);
   });
 
   afterEach(() => {
@@ -431,6 +436,7 @@ describe("runDueMonthlyReportPreparation", () => {
 
   it("enqueues current-month sync jobs for every Instagram connection", async () => {
     mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }, { id: "conn-b" }]);
+    mockDb.socialPost.count.mockResolvedValue(5);
 
     const jobs = await runDueMonthlyReportPreparation();
     expect(jobs).not.toBeNull();
@@ -443,6 +449,7 @@ describe("runDueMonthlyReportPreparation", () => {
   });
 
   it("enqueues a month-end closeout job for the previous finalized month", async () => {
+    mockMonthEndCloseout.isMonthEndCloseoutDue.mockResolvedValue(true);
     mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
 
     const jobs = await runDueMonthlyReportPreparation();
@@ -469,6 +476,60 @@ describe("runDueMonthlyReportPreparation", () => {
     const result = await runDueMonthlyReportPreparation();
 
     expect(result).toBeNull();
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue fresh Meta work when current-month data is already sufficiently fresh", async () => {
+    const now = new Date();
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      {
+        id: "conn-a",
+        lastIncrementalSyncAt: new Date(now.valueOf() - 30 * 60 * 1000),
+        accountInsightsLastSyncedAt: new Date(now.valueOf() - 3 * 60 * 60 * 1000),
+        accountInsightsBackfillCompletedAt: new Date("2025-01-01T00:00:00.000Z"),
+      },
+    ]);
+    mockDb.socialPost.count.mockResolvedValue(0);
+
+    await runDueMonthlyReportPreparation();
+
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("prioritizeReportPeriod", () => {
+  beforeEach(() => {
+    mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockMonthEndCloseout.isReportPeriodCloseoutDue.mockResolvedValue(true);
+  });
+
+  it("enqueues a REPORT_PERIOD_CLOSEOUT job at P0 for an explicitly selected older period", async () => {
+    await prioritizeReportPeriod("client-1", new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-30T00:00:00.000Z"));
+
+    expect(mockDb.syncJob.create).toHaveBeenCalledTimes(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.type).toBe(SyncJobType.REPORT_PERIOD_CLOSEOUT);
+    expect(createArgs.data.priority).toBeGreaterThanOrEqual(100);
+    expect(createArgs.data.payload).toEqual({
+      periodStart: "2026-06-01T00:00:00.000Z",
+      periodEnd: "2026-06-30T00:00:00.000Z",
+    });
+  });
+
+  it("does not enqueue a duplicate job for the same period", async () => {
+    mockDb.syncJob.findFirst.mockResolvedValue({ id: "existing-period-job" });
+
+    await prioritizeReportPeriod("client-1", new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-30T00:00:00.000Z"));
+
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when the period is already complete", async () => {
+    mockMonthEndCloseout.isReportPeriodCloseoutDue.mockResolvedValue(false);
+
+    await prioritizeReportPeriod("client-1", new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-30T00:00:00.000Z"));
+
     expect(mockDb.syncJob.create).not.toHaveBeenCalled();
   });
 });

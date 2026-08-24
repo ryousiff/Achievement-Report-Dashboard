@@ -1,8 +1,14 @@
-import { BackfillStatus, Platform, SyncJobStatus, SyncJobType, SyncRunStatus } from "@prisma/client";
+import { BackfillStatus, Platform, Prisma, SyncJobStatus, SyncJobType, SyncRunStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ConnectorError, getConnectorForPlatform } from "@/lib/connectors";
 import { MetaSyncError, runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, runIncrementalSync, runRecentInsightRefresh } from "@/lib/meta-sync";
-import { isLastDaysOfMonth, runMonthEndCloseout } from "@/lib/month-end-closeout";
+import {
+  isLastDaysOfMonth,
+  isMonthEndCloseoutDue,
+  isReportPeriodCloseoutDue,
+  runMonthEndCloseout,
+  runReportPeriodCloseout,
+} from "@/lib/month-end-closeout";
 import { isMonthFinalized, monthPeriodUTC } from "@/lib/post-metric-snapshots";
 import { getHistoricalBackfillConfig, getSchedulerConfig, getThumbnailBackfillConfig } from "@/lib/env";
 import { logError, logEvent } from "@/lib/observability";
@@ -44,7 +50,13 @@ async function hasActiveJob(connectionId: string, type: SyncJobType) {
   return db.syncJob.findFirst({ where: { connectionId, type, status: { in: [SyncJobStatus.QUEUED, SyncJobStatus.RUNNING] } } });
 }
 
-async function enqueueJob(connectionId: string, type: SyncJobType, priority: number = 0, runAfter?: Date) {
+async function enqueueJob(
+  connectionId: string,
+  type: SyncJobType,
+  priority: number = 0,
+  runAfter?: Date,
+  payload?: Prisma.InputJsonValue | null,
+) {
   const existing = await hasActiveJob(connectionId, type);
   if (existing) {
     // Boost the priority of an already-active job if the scheduler now considers it more urgent.
@@ -54,7 +66,9 @@ async function enqueueJob(connectionId: string, type: SyncJobType, priority: num
     }
     return existing;
   }
-  return db.syncJob.create({ data: { connectionId, type, priority, runAfter: runAfter ?? new Date() } });
+  return db.syncJob.create({
+    data: { connectionId, type, priority, payload: payload ?? undefined, runAfter: runAfter ?? new Date() },
+  });
 }
 
 async function getSetting(moduleId: string, key: string): Promise<string | null> {
@@ -335,15 +349,64 @@ async function claimMonthlyReportPrepWindow(intervalMs: number) {
   return claimed.count > 0;
 }
 
+function isStale(lastAt: Date | null, maxAgeMs: number, now: Date) {
+  if (!lastAt) return true;
+  return now.valueOf() - lastAt.valueOf() >= maxAgeMs;
+}
+
+async function isIncrementalSyncDue(connection: { id: string; lastIncrementalSyncAt: Date | null }, now: Date) {
+  const { monthlyPrepIncrementalMinIntervalMs } = getSchedulerConfig();
+  const existing = await hasActiveJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC);
+  if (existing) return false;
+  return isStale(connection.lastIncrementalSyncAt, monthlyPrepIncrementalMinIntervalMs, now);
+}
+
+async function isDailyAccountInsightSyncDue(
+  connection: { id: string; accountInsightsLastSyncedAt: Date | null; accountInsightsBackfillCompletedAt: Date | null },
+  now: Date,
+) {
+  const { monthlyPrepAccountInsightsMinIntervalMs } = getSchedulerConfig();
+  const existing = await hasActiveJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC);
+  if (existing) return false;
+  // If the historical backfill has already reached the floor, we still need to refresh today's window,
+  // but not more often than the configured minimum interval.
+  return isStale(connection.accountInsightsLastSyncedAt, monthlyPrepAccountInsightsMinIntervalMs, now);
+}
+
+async function isRecentPostInsightRefreshDue(connectionId: string, now: Date) {
+  const { monthlyPrepRecentPostInsightMaxAgeMs } = getSchedulerConfig();
+  const { recentPostRefreshDays } = getHistoricalBackfillConfig();
+  const existing = await hasActiveJob(connectionId, SyncJobType.RECENT_POST_INSIGHT_REFRESH);
+  if (existing) return false;
+  const windowStart = new Date(now.valueOf() - recentPostRefreshDays * 24 * 60 * 60 * 1000);
+  const staleBefore = new Date(now.valueOf() - monthlyPrepRecentPostInsightMaxAgeMs);
+  const staleCount = await db.socialPost.count({
+    where: {
+      connectionId,
+      publishedAt: { gte: windowStart, lte: now },
+      OR: [{ lastInsightRefreshAt: null }, { lastInsightRefreshAt: { lt: staleBefore } }],
+    },
+  });
+  return staleCount > 0;
+}
+
 /** Continuously prepares the current calendar month and prioritizes the previous month for closeout once
  * the month has ended. Near month-end, current-month jobs are boosted so the report is almost ready
- * before the month closes. All enqueues are deduplicated so the scheduler can run frequently without
- * creating duplicate jobs. */
+ * before the month closes. The scheduler checks every 15 minutes but only enqueues work that is actually
+ * missing or stale; active jobs are deduplicated, and Meta cooldowns/holds are respected. */
 export async function runDueMonthlyReportPreparation() {
   const { monthlyReportPrepIntervalMs, monthEndPriorityBoostFinalDays } = getSchedulerConfig();
   if (!(await claimMonthlyReportPrepWindow(monthlyReportPrepIntervalMs))) return null;
 
-  const connections = await db.socialConnection.findMany({ where: { platform: Platform.INSTAGRAM }, select: { id: true } });
+  const connections = await db.socialConnection.findMany({
+    where: { platform: Platform.INSTAGRAM },
+    select: {
+      id: true,
+      lastIncrementalSyncAt: true,
+      accountInsightsLastSyncedAt: true,
+      accountInsightsBackfillCompletedAt: true,
+    },
+  });
   const now = new Date();
   const runAfter = await nextInstagramJobRunAfter();
   const currentMonthPriority = isLastDaysOfMonth(now, monthEndPriorityBoostFinalDays)
@@ -352,20 +415,69 @@ export async function runDueMonthlyReportPreparation() {
 
   const jobs = [];
   for (const connection of connections) {
-    // P0: close out the previous calendar month once it has ended.
+    // P0: close out the previous calendar month once it has ended and only if it still needs work.
     const previousMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
     const previousMonth = monthPeriodUTC(previousMonthStart);
-    if (isMonthFinalized(previousMonth.periodEnd, now)) {
+    if (isMonthFinalized(previousMonth.periodEnd, now) && (await isMonthEndCloseoutDue(connection.id, now))) {
       jobs.push(await enqueueJob(connection.id, SyncJobType.MONTH_END_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT, runAfter ?? undefined));
     }
 
-    // P1: keep the current month continuously in sync.
-    jobs.push(await enqueueJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC, currentMonthPriority, runAfter ?? undefined));
-    jobs.push(await enqueueJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC, currentMonthPriority, runAfter ?? undefined));
-    jobs.push(await enqueueJob(connection.id, SyncJobType.RECENT_POST_INSIGHT_REFRESH, currentMonthPriority, runAfter ?? undefined));
+    // P1: keep the current month continuously in sync, but only enqueue each job type when its data is
+    // actually stale or missing. This prevents the 15-minute scheduler from creating an endless stream
+    // of fresh Meta API calls when the client is already up to date.
+    if (await isIncrementalSyncDue(connection, now)) {
+      jobs.push(await enqueueJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC, currentMonthPriority, runAfter ?? undefined));
+    }
+    if (await isDailyAccountInsightSyncDue(connection, now)) {
+      jobs.push(await enqueueJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC, currentMonthPriority, runAfter ?? undefined));
+    }
+    if (await isRecentPostInsightRefreshDue(connection.id, now)) {
+      jobs.push(await enqueueJob(connection.id, SyncJobType.RECENT_POST_INSIGHT_REFRESH, currentMonthPriority, runAfter ?? undefined));
+    }
   }
 
   logEvent("sync.monthly_prep.triggered", { connections: connections.length, jobs: jobs.filter(Boolean).length });
+  return jobs.filter(Boolean);
+}
+
+async function enqueueReportPeriodCloseout(
+  connectionId: string,
+  periodStart: Date,
+  periodEnd: Date,
+  priority: number,
+  runAfter?: Date,
+) {
+  const payload = { periodStart: periodStart.toISOString(), periodEnd: periodEnd.toISOString() };
+  const existing = await db.syncJob.findFirst({
+    where: {
+      connectionId,
+      type: SyncJobType.REPORT_PERIOD_CLOSEOUT,
+      status: { in: [SyncJobStatus.QUEUED, SyncJobStatus.RUNNING] },
+      payload: { equals: payload },
+    },
+  });
+  if (existing) return existing;
+  return enqueueJob(connectionId, SyncJobType.REPORT_PERIOD_CLOSEOUT, priority, runAfter, payload);
+}
+
+/** P0 enqueue for an explicitly opened report period. Does not run a full historical resync; it only
+ * enqueues a targeted closeout job for the requested period if that period still has missing final data.
+ * If the period is already complete or an identical job is already queued/running, no new job is created. */
+export async function prioritizeReportPeriod(clientId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
+  const connections = await db.socialConnection.findMany({
+    where: { clientId, platform: Platform.INSTAGRAM },
+    select: { id: true },
+  });
+  const runAfter = await nextInstagramJobRunAfter();
+  const jobs = [];
+  for (const connection of connections) {
+    const due = await isReportPeriodCloseoutDue(connection.id, periodStart, periodEnd, now);
+    if (due) {
+      jobs.push(
+        await enqueueReportPeriodCloseout(connection.id, periodStart, periodEnd, JobPriority.MONTH_END_CLOSEOUT, runAfter ?? undefined),
+      );
+    }
+  }
   return jobs.filter(Boolean);
 }
 
@@ -492,7 +604,12 @@ export async function recoverStalledHistoricalBackfills() {
 /** Dispatches a job to the right sync function. Instagram-specific job types bypass the generic
  * SocialConnector.syncConnection() interface entirely (so stub connectors for other platforms are
  * completely unaffected by any of this); everything else still goes through the generic connector. */
-async function runJob(connectionId: string, platform: Platform, type: SyncJobType) {
+async function runJob(
+  connectionId: string,
+  platform: Platform,
+  job: { id: string; type: SyncJobType; payload: Prisma.JsonValue | null },
+) {
+  const { type } = job;
   if (platform === Platform.INSTAGRAM) {
     if (type === SyncJobType.HISTORICAL_MEDIA_BACKFILL) return runHistoricalBackfillChunk(connectionId);
     if (type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) return runHistoricalCollaborativeBackfillChunk(connectionId);
@@ -504,6 +621,14 @@ async function runJob(connectionId: string, platform: Platform, type: SyncJobTyp
     }
     if (type === SyncJobType.MONTH_END_CLOSEOUT) {
       const result = await runMonthEndCloseout(connectionId);
+      return { posts: result.posts, completed: result.completed };
+    }
+    if (type === SyncJobType.REPORT_PERIOD_CLOSEOUT) {
+      const payload = (job.payload ?? {}) as { periodStart?: string; periodEnd?: string };
+      if (!payload.periodStart || !payload.periodEnd) {
+        throw new Error("REPORT_PERIOD_CLOSEOUT missing periodStart/periodEnd payload");
+      }
+      const result = await runReportPeriodCloseout(connectionId, new Date(payload.periodStart), new Date(payload.periodEnd));
       return { posts: result.posts, completed: result.completed };
     }
     if (type === SyncJobType.THUMBNAIL_BACKFILL) {
@@ -577,7 +702,7 @@ export async function processNextSyncJob() {
   const startedAt = Date.now();
   logEvent("sync.job.started", { jobId: job.id, connectionId: job.connectionId, type: job.type, lockKey: key, platform: connection.platform, attempt: job.attempts + 1 });
   try {
-    const result = await runJob(job.connectionId, connection.platform, job.type);
+    const result = await runJob(job.connectionId, connection.platform, job);
     const now = new Date();
     const connectionUpdate: Record<string, unknown> = { syncLockedUntil: null };
     // Only the legacy generic fields (read by existing UI/readiness checks) get updated here for
@@ -614,6 +739,12 @@ export async function processNextSyncJob() {
     if (job.type === SyncJobType.MONTH_END_CLOSEOUT) {
       if (result && typeof result === "object" && "completed" in result && !result.completed) {
         await enqueueJob(job.connectionId, SyncJobType.MONTH_END_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT);
+      }
+    }
+    // Explicit report-period closeout behaves the same way: re-enqueue with the same target period until complete.
+    if (job.type === SyncJobType.REPORT_PERIOD_CLOSEOUT) {
+      if (result && typeof result === "object" && "completed" in result && !result.completed) {
+        await enqueueJob(job.connectionId, SyncJobType.REPORT_PERIOD_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT, undefined, job.payload);
       }
     }
     // Thumbnail backfill is deliberately low priority: unlike historical backfill's immediate

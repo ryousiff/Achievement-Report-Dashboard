@@ -43,6 +43,9 @@ export function getSchedulerConfig() {
     dailyClientSyncCheckIntervalMs: numberFromEnv("DAILY_CLIENT_SYNC_CHECK_INTERVAL_MS", 60 * 60 * 1000),
     monthlyReportPrepIntervalMs: numberFromEnv("MONTHLY_REPORT_PREP_INTERVAL_MS", 15 * 60 * 1000),
     monthEndPriorityBoostFinalDays: numberFromEnv("MONTH_END_PRIORITY_BOOST_FINAL_DAYS", 3),
+    monthlyPrepIncrementalMinIntervalMs: numberFromEnv("MONTHLY_PREP_INCREMENTAL_MIN_INTERVAL_MS", 60 * 60 * 1000),
+    monthlyPrepAccountInsightsMinIntervalMs: numberFromEnv("MONTHLY_PREP_ACCOUNT_INSIGHTS_MIN_INTERVAL_MS", 4 * 60 * 60 * 1000),
+    monthlyPrepRecentPostInsightMaxAgeMs: numberFromEnv("MONTHLY_PREP_RECENT_POST_INSIGHT_MAX_AGE_MS", 24 * 60 * 60 * 1000),
   };
 }
 

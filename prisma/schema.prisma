@@ -61,6 +61,7 @@ enum SyncJobType {
   STORY_SYNC
   THUMBNAIL_BACKFILL
   MONTH_END_CLOSEOUT
+  REPORT_PERIOD_CLOSEOUT
 }
 
 enum BackfillStatus {
@@ -365,6 +366,7 @@ model SyncJob {
   type         SyncJobType      @default(INCREMENTAL_MEDIA_SYNC)
   status       SyncJobStatus    @default(QUEUED)
   priority     Int              @default(0)
+  payload      Json?
   attempts     Int              @default(0)
   maxAttempts  Int              @default(5)
   runAfter     DateTime         @default(now())
