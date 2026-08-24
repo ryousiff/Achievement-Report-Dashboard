@@ -9,8 +9,7 @@ import { logEvent } from "@/lib/observability";
 export const PREPARING_MONTH_MESSAGE = "جاري تجهيز بيانات الشهر";
 export const CLOSING_MONTH_MESSAGE = "جاري إغلاق بيانات الشهر";
 export const READY_FOR_APPROVAL_MESSAGE = "البيانات جاهزة للاعتماد";
-export const INCOMPLETE_EMPLOYEE_MESSAGE =
-  "تعذّر استكمال التحقق من بعض بيانات التقرير حالياً. تم تسجيل الحالة للمراجعة.";
+export const STALLED_INCOMPLETE_MESSAGE = "بيانات الشهر غير مكتملة، ويجري تجهيز استكمالها تلقائياً.";
 export const NO_CONNECTION_EMPLOYEE_MESSAGE = "لا يوجد ربط بإنستغرام لهذا العميل.";
 
 export type CoverageStatus = "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" | "FAILED";
@@ -320,7 +319,8 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   }
 
   // Final status: SYNCING only when real queued/running work exists. A stale PARTIAL connection
-  // flag without an active job is treated as incomplete, not as actively syncing.
+  // flag without an active job is treated as incomplete, not as actively syncing, and must not use
+  // a "جاري" (in progress) message because nothing is actually running right now.
   let status: CoverageStatus;
   const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerStatus === "PERIOD_AVAILABLE" && insightsComplete;
 
@@ -329,7 +329,6 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     connection.collaborativeBackfillStatus === BackfillStatus.FAILED;
 
   const finalized = isMonthFinalized(periodEnd, new Date());
-  const activeMessage = finalized ? CLOSING_MONTH_MESSAGE : PREPARING_MONTH_MESSAGE;
 
   let warnings: string[] = [];
   if (allComplete) {
@@ -337,16 +336,12 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     warnings = [READY_FOR_APPROVAL_MESSAGE];
   } else if (hasAnyActiveSyncJob) {
     status = "SYNCING";
-    warnings = [activeMessage];
-  } else if (anyBackfillFailed) {
-    status = "FAILED";
-    warnings = [finalized ? CLOSING_MONTH_MESSAGE : INCOMPLETE_EMPLOYEE_MESSAGE];
-  } else if (hasAnyPost || reachDaily.days > 0 || followerCount.days > 0 || postsInPeriod._count > 0) {
-    status = "PARTIAL";
-    warnings = [activeMessage];
+    warnings = [finalized ? CLOSING_MONTH_MESSAGE : PREPARING_MONTH_MESSAGE];
   } else {
-    status = "UNAVAILABLE";
-    warnings = [activeMessage];
+    // Incomplete and nothing is actively running. Tell the employee the data is incomplete and will
+    // be auto-completed, but keep all technical diagnostics in the server logs only.
+    status = anyBackfillFailed ? "FAILED" : hasAnyPost || reachDaily.days > 0 || followerCount.days > 0 || postsInPeriod._count > 0 ? "PARTIAL" : "UNAVAILABLE";
+    warnings = [STALLED_INCOMPLETE_MESSAGE];
   }
 
   // Preserve full technical diagnostics for administrators/developers; never expose raw error

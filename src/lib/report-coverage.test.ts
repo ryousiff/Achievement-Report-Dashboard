@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { BackfillStatus, SyncJobStatus, SyncJobType } from "@prisma/client";
-import { getCoverage, CLOSING_MONTH_MESSAGE, INCOMPLETE_EMPLOYEE_MESSAGE, NO_CONNECTION_EMPLOYEE_MESSAGE, PREPARING_MONTH_MESSAGE, READY_FOR_APPROVAL_MESSAGE } from "@/lib/report-coverage";
+import { getCoverage, CLOSING_MONTH_MESSAGE, NO_CONNECTION_EMPLOYEE_MESSAGE, PREPARING_MONTH_MESSAGE, READY_FOR_APPROVAL_MESSAGE, STALLED_INCOMPLETE_MESSAGE } from "@/lib/report-coverage";
 
 const mockDb = vi.hoisted(() => ({
   socialConnection: { findUnique: vi.fn() },
@@ -107,6 +107,34 @@ describe("getCoverage", () => {
     expect(coverage.postInsightCoverage.missingMetrics).toEqual([]);
   });
 
+  it("returns SYNCING with the closing message when a real MONTH_END_CLOSEOUT job is queued for a finalized month", async () => {
+    resetMocks();
+    mockDb.socialConnection.findUnique.mockResolvedValue(
+      baseConnection({
+        historicalBackfillStatus: BackfillStatus.COMPLETED,
+        collaborativeBackfillStatus: BackfillStatus.COMPLETED,
+      }),
+    );
+    mockDb.syncJob.findMany.mockResolvedValue([{ type: SyncJobType.MONTH_END_CLOSEOUT, status: SyncJobStatus.QUEUED }]);
+    mockDb.socialPost.aggregate
+      .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") }, _count: 2 })
+      .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") } });
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
+    ]);
+    mockDb.socialInsightSnapshot.findMany
+      .mockResolvedValueOnce(Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+    expect(coverage.status).toBe("SYNCING");
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+  });
+
   it("returns SYNCING and a friendly message when a real historical backfill job is queued/running", async () => {
     resetMocks();
     mockDb.socialConnection.findUnique.mockResolvedValue(
@@ -155,7 +183,8 @@ describe("getCoverage", () => {
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).not.toBe("SYNCING");
     expect(coverage.status).toBe("UNAVAILABLE");
-    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
+    expect(coverage.warnings.some((w) => w.includes("جاري"))).toBe(false);
   });
 
   it("returns PARTIAL and a friendly message when coverage is incomplete and no sync is active", async () => {
@@ -191,8 +220,9 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("PARTIAL");
-    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
     expect(coverage.warnings.every((warning) => !warning.includes("بيانات المنشورات التعاونية"))).toBe(true);
+    expect(coverage.warnings.some((w) => w.includes("جاري"))).toBe(false);
   });
 
   it("never exposes raw backfill errors such as 'fetch failed' in employee-facing warnings", async () => {
@@ -217,7 +247,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("FAILED");
-    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
     expect(coverage.warnings.some((w) => w.includes("fetch failed"))).toBe(false);
     expect(coverage.warnings.some((w) => w.includes("Unsupported get request"))).toBe(false);
     expect(coverage.warnings.some((w) => w.includes("PARTIAL") || w.includes("FAILED"))).toBe(false);
@@ -296,7 +326,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).not.toBe("COMPLETE");
-    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
   });
 
   it("reports reach status independently of the simplified employee warning", async () => {
@@ -320,6 +350,6 @@ describe("getCoverage", () => {
     const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
     expect(coverage.reachStatus).toBe("DAYS_28_AVAILABLE");
     expect(coverage.status).toBe("PARTIAL");
-    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
   });
 });

@@ -2414,7 +2414,9 @@ function ReportBuilder({
                   <li key={issue}>⚠️ {issue}</li>
                 ))}
               </ul>
-              <p>ننصح بالانتظار حتى تكتمل المزامنة قبل اعتماد التقرير.</p>
+              {coverage?.status === "SYNCING" && (
+                <p>سيصبح التقرير جاهزاً للاعتماد تلقائياً عند اكتمال البيانات.</p>
+              )}
             </>
           ) : (
             <p className="report-readiness-ok">
