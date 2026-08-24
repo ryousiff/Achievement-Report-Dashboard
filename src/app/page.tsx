@@ -1021,8 +1021,8 @@ export default function Home() {
         };
         syncQueued?: boolean;
       };
-      setDraftId(data.report.id);
-      setBlocks(blocksFromReport(data.report.blocks));
+      // Open the newly created report page immediately after creation.
+      await loadReport(data.report.id);
       setToast(
         template === "standard"
           ? data.syncQueued
