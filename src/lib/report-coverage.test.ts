@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { BackfillStatus, SyncJobStatus, SyncJobType } from "@prisma/client";
-import { getCoverage, INCOMPLETE_EMPLOYEE_MESSAGE, NO_CONNECTION_EMPLOYEE_MESSAGE, SYNCING_EMPLOYEE_MESSAGE } from "@/lib/report-coverage";
+import { getCoverage, CLOSING_MONTH_MESSAGE, INCOMPLETE_EMPLOYEE_MESSAGE, NO_CONNECTION_EMPLOYEE_MESSAGE, PREPARING_MONTH_MESSAGE, READY_FOR_APPROVAL_MESSAGE } from "@/lib/report-coverage";
 
 const mockDb = vi.hoisted(() => ({
   socialConnection: { findUnique: vi.fn() },
@@ -99,7 +99,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
     expect(coverage.status).toBe("COMPLETE");
-    expect(coverage.warnings).toEqual([]);
+    expect(coverage.warnings).toEqual([READY_FOR_APPROVAL_MESSAGE]);
     expect(coverage.mediaCoverage.complete).toBe(true);
     expect(coverage.reachStatus).toBe("PERIOD_AVAILABLE");
     expect(coverage.followerCountCoverage.complete).toBe(true);
@@ -127,7 +127,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
     expect(coverage.status).toBe("SYNCING");
-    expect(coverage.warnings).toEqual([SYNCING_EMPLOYEE_MESSAGE]);
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
   });
 
   it("does not treat PARTIAL without an active job as SYNCING", async () => {
@@ -155,7 +155,7 @@ describe("getCoverage", () => {
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).not.toBe("SYNCING");
     expect(coverage.status).toBe("UNAVAILABLE");
-    expect(coverage.warnings).toEqual([INCOMPLETE_EMPLOYEE_MESSAGE]);
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
   });
 
   it("returns PARTIAL and a friendly message when coverage is incomplete and no sync is active", async () => {
@@ -191,7 +191,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("PARTIAL");
-    expect(coverage.warnings).toEqual([INCOMPLETE_EMPLOYEE_MESSAGE]);
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
     expect(coverage.warnings.every((warning) => !warning.includes("بيانات المنشورات التعاونية"))).toBe(true);
   });
 
@@ -217,7 +217,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).toBe("FAILED");
-    expect(coverage.warnings).toEqual([INCOMPLETE_EMPLOYEE_MESSAGE]);
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
     expect(coverage.warnings.some((w) => w.includes("fetch failed"))).toBe(false);
     expect(coverage.warnings.some((w) => w.includes("Unsupported get request"))).toBe(false);
     expect(coverage.warnings.some((w) => w.includes("PARTIAL") || w.includes("FAILED"))).toBe(false);
@@ -296,7 +296,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-03T23:59:59.999Z"));
     expect(coverage.status).not.toBe("COMPLETE");
-    expect(coverage.warnings).toEqual([INCOMPLETE_EMPLOYEE_MESSAGE]);
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
   });
 
   it("reports reach status independently of the simplified employee warning", async () => {
@@ -320,6 +320,6 @@ describe("getCoverage", () => {
     const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
     expect(coverage.reachStatus).toBe("DAYS_28_AVAILABLE");
     expect(coverage.status).toBe("PARTIAL");
-    expect(coverage.warnings).toEqual([INCOMPLETE_EMPLOYEE_MESSAGE]);
+    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
   });
 });

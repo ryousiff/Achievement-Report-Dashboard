@@ -3,10 +3,12 @@ import { db } from "@/lib/db";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { periodAccountFollowersForRange, periodAccountReachForRange } from "@/lib/report-data";
+import { isMonthFinalized } from "@/lib/post-metric-snapshots";
 import { logEvent } from "@/lib/observability";
 
-export const SYNCING_EMPLOYEE_MESSAGE =
-  "جاري استكمال بيانات التقرير تلقائياً. يمكنك متابعة إعداد التقرير، وسيتم التحقق من اكتمال البيانات قبل الاعتماد.";
+export const PREPARING_MONTH_MESSAGE = "جاري تجهيز بيانات الشهر";
+export const CLOSING_MONTH_MESSAGE = "جاري إغلاق بيانات الشهر";
+export const READY_FOR_APPROVAL_MESSAGE = "البيانات جاهزة للاعتماد";
 export const INCOMPLETE_EMPLOYEE_MESSAGE =
   "تعذّر استكمال التحقق من بعض بيانات التقرير حالياً. تم تسجيل الحالة للمراجعة.";
 export const NO_CONNECTION_EMPLOYEE_MESSAGE = "لا يوجد ربط بإنستغرام لهذا العميل.";
@@ -326,21 +328,25 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
     connection.collaborativeBackfillStatus === BackfillStatus.FAILED;
 
+  const finalized = isMonthFinalized(periodEnd, new Date());
+  const activeMessage = finalized ? CLOSING_MONTH_MESSAGE : PREPARING_MONTH_MESSAGE;
+
   let warnings: string[] = [];
   if (allComplete) {
     status = "COMPLETE";
+    warnings = [READY_FOR_APPROVAL_MESSAGE];
   } else if (hasAnyActiveSyncJob) {
     status = "SYNCING";
-    warnings = [SYNCING_EMPLOYEE_MESSAGE];
+    warnings = [activeMessage];
   } else if (anyBackfillFailed) {
     status = "FAILED";
-    warnings = [INCOMPLETE_EMPLOYEE_MESSAGE];
+    warnings = [finalized ? CLOSING_MONTH_MESSAGE : INCOMPLETE_EMPLOYEE_MESSAGE];
   } else if (hasAnyPost || reachDaily.days > 0 || followerCount.days > 0 || postsInPeriod._count > 0) {
     status = "PARTIAL";
-    warnings = [INCOMPLETE_EMPLOYEE_MESSAGE];
+    warnings = [activeMessage];
   } else {
     status = "UNAVAILABLE";
-    warnings = [INCOMPLETE_EMPLOYEE_MESSAGE];
+    warnings = [activeMessage];
   }
 
   // Preserve full technical diagnostics for administrators/developers; never expose raw error

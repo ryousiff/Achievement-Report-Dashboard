@@ -41,6 +41,8 @@ export function getSchedulerConfig() {
   return {
     dailyClientSyncIntervalMs: numberFromEnv("DAILY_CLIENT_SYNC_INTERVAL_MS", 24 * 60 * 60 * 1000),
     dailyClientSyncCheckIntervalMs: numberFromEnv("DAILY_CLIENT_SYNC_CHECK_INTERVAL_MS", 60 * 60 * 1000),
+    monthlyReportPrepIntervalMs: numberFromEnv("MONTHLY_REPORT_PREP_INTERVAL_MS", 15 * 60 * 1000),
+    monthEndPriorityBoostFinalDays: numberFromEnv("MONTH_END_PRIORITY_BOOST_FINAL_DAYS", 3),
   };
 }
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackfillStatus, Platform, SyncJobStatus, SyncJobType } from "@prisma/client";
 import { ConnectorError } from "@/lib/connectors";
 
@@ -65,9 +65,15 @@ const mockMetaSyncInsights = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/meta-sync-insights", () => mockMetaSyncInsights);
 
-import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueThumbnailBackfill } from "@/lib/sync-queue";
+const mockMonthEndCloseout = vi.hoisted(() => ({
+  runMonthEndCloseout: vi.fn(),
+  isLastDaysOfMonth: vi.fn(),
+}));
+vi.mock("@/lib/month-end-closeout", () => mockMonthEndCloseout);
 
-function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date }> = {}) {
+import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueMonthlyReportPreparation, runDueThumbnailBackfill } from "@/lib/sync-queue";
+
+function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date; priority: number }> = {}) {
   return {
     id: "job-1",
     connectionId: "conn-1",
@@ -100,6 +106,7 @@ beforeEach(() => {
   mockMetaSync.runHistoricalBackfillChunk.mockReset();
   mockMetaSync.runHistoricalCollaborativeBackfillChunk.mockReset();
   mockMetaSyncInsights.runDailyAccountInsightChunk.mockReset();
+  mockMonthEndCloseout.runMonthEndCloseout.mockReset();
   mockMediaBackfill.runThumbnailBackfillChunk.mockReset();
   mockMediaBackfill.countPendingThumbnails.mockReset();
 });
@@ -405,5 +412,105 @@ describe("runDueThumbnailBackfill", () => {
 
     expect(result).toBeNull();
     expect(mockDb.socialConnection.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("runDueMonthlyReportPreparation", () => {
+  beforeEach(() => {
+    mockDb.setting.createMany.mockResolvedValue({});
+    mockDb.setting.updateMany.mockResolvedValue({ count: 1 });
+    mockDb.syncJob.findFirst.mockResolvedValue(null);
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockDb.setting.findUnique.mockResolvedValue(null);
+    mockMonthEndCloseout.isLastDaysOfMonth.mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("enqueues current-month sync jobs for every Instagram connection", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }, { id: "conn-b" }]);
+
+    const jobs = await runDueMonthlyReportPreparation();
+    expect(jobs).not.toBeNull();
+
+    expect(jobs!.length).toBeGreaterThan(0);
+    const types = jobs!.map((job: { type: SyncJobType }) => job.type);
+    expect(types).toContain(SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC);
+    expect(types).toContain(SyncJobType.INCREMENTAL_MEDIA_SYNC);
+    expect(types).toContain(SyncJobType.RECENT_POST_INSIGHT_REFRESH);
+  });
+
+  it("enqueues a month-end closeout job for the previous finalized month", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
+
+    const jobs = await runDueMonthlyReportPreparation();
+    expect(jobs).not.toBeNull();
+
+    expect(jobs!.some((job: { type: SyncJobType }) => job.type === SyncJobType.MONTH_END_CLOSEOUT)).toBe(true);
+  });
+
+  it("boosts current-month job priority during the final days of the month", async () => {
+    mockMonthEndCloseout.isLastDaysOfMonth.mockReturnValue(true);
+    mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
+
+    await runDueMonthlyReportPreparation();
+
+    const created = mockDb.syncJob.create.mock.calls.map((call) => (call[0] as { data: { type: SyncJobType; priority: number } }).data);
+    const daily = created.find((job) => job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC);
+    expect(daily?.priority).toBeGreaterThan(80);
+  });
+
+  it("does nothing when the periodic check window is already claimed", async () => {
+    mockDb.setting.updateMany.mockResolvedValue({ count: 0 });
+    mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
+
+    const result = await runDueMonthlyReportPreparation();
+
+    expect(result).toBeNull();
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("processNextSyncJob priority ordering", () => {
+  it("selects queued jobs by descending priority", async () => {
+    setupHappyPathMocks(baseJob({ id: "job-low", type: SyncJobType.THUMBNAIL_BACKFILL, priority: 10 }));
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    mockMediaBackfill.runThumbnailBackfillChunk.mockResolvedValue({ stored: 1, skipped: 0, remaining: 0 });
+
+    await processNextSyncJob();
+
+    const findArgs = mockDb.syncJob.findFirst.mock.calls[0]?.[0];
+    expect(findArgs.orderBy).toEqual([
+      { priority: "desc" },
+      { runAfter: "asc" },
+      { createdAt: "asc" },
+    ]);
+  });
+
+  it("runs a MONTH_END_CLOSEOUT job before a THUMBNAIL_BACKFILL job", async () => {
+    const closeoutJob = baseJob({ id: "job-closeout", type: SyncJobType.MONTH_END_CLOSEOUT, priority: 100 });
+    const thumbnailJob = baseJob({ id: "job-thumb", type: SyncJobType.THUMBNAIL_BACKFILL, priority: 10 });
+    // Return the closeout job first, simulating the priority ordering.
+    let callIndex = 0;
+    mockDb.syncJob.findFirst.mockImplementation(() => {
+      callIndex += 1;
+      return callIndex === 1 ? closeoutJob : thumbnailJob;
+    });
+    setupHappyPathMocks(closeoutJob);
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    mockMonthEndCloseout.runMonthEndCloseout.mockResolvedValue({ posts: 0, completed: true });
+
+    const result = await processNextSyncJob();
+
+    expect(mockMonthEndCloseout.runMonthEndCloseout).toHaveBeenCalledWith("conn-1");
+    expect(result).toEqual({ id: "job-closeout", status: "succeeded", posts: 0 });
   });
 });

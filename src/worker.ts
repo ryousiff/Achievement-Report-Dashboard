@@ -1,8 +1,8 @@
-import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueDailyClientSync, runDueThumbnailBackfill } from "./lib/sync-queue";
+import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueDailyClientSync, runDueMonthlyReportPreparation, runDueThumbnailBackfill } from "./lib/sync-queue";
 import { getSchedulerConfig, getThumbnailBackfillConfig } from "./lib/env";
 
 const pollMs = Number(process.env.SYNC_WORKER_POLL_MS ?? 5000);
-const { dailyClientSyncCheckIntervalMs } = getSchedulerConfig();
+const { dailyClientSyncCheckIntervalMs, monthlyReportPrepIntervalMs } = getSchedulerConfig();
 const { checkIntervalMs: thumbnailBackfillCheckIntervalMs } = getThumbnailBackfillConfig();
 const stalledHistoricalBackfillRecoveryIntervalMs = 5 * 60 * 1000; // 5 minutes
 
@@ -71,3 +71,16 @@ setInterval(() => { void maybeRunThumbnailBackfill(); }, thumbnailBackfillCheckI
 
 void maybeRecoverStalledHistoricalBackfills();
 setInterval(() => { void maybeRecoverStalledHistoricalBackfills(); }, stalledHistoricalBackfillRecoveryIntervalMs);
+
+// Continuously prepare the current calendar month and, once the month ends, prioritize closing it out
+// so employees can approve/export reports without waiting for a manual historical sync.
+async function maybeRunMonthlyReportPreparation() {
+  try {
+    await runDueMonthlyReportPreparation();
+  } catch (error) {
+    console.error("Monthly report preparation error:", error instanceof Error ? error.message : error);
+  }
+}
+
+void maybeRunMonthlyReportPreparation();
+setInterval(() => { void maybeRunMonthlyReportPreparation(); }, monthlyReportPrepIntervalMs);

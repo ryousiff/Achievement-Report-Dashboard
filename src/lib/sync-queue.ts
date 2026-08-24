@@ -2,13 +2,25 @@ import { BackfillStatus, Platform, SyncJobStatus, SyncJobType, SyncRunStatus } f
 import { db } from "@/lib/db";
 import { ConnectorError, getConnectorForPlatform } from "@/lib/connectors";
 import { MetaSyncError, runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, runIncrementalSync, runRecentInsightRefresh } from "@/lib/meta-sync";
+import { isLastDaysOfMonth, runMonthEndCloseout } from "@/lib/month-end-closeout";
+import { isMonthFinalized, monthPeriodUTC } from "@/lib/post-metric-snapshots";
 import { getHistoricalBackfillConfig, getSchedulerConfig, getThumbnailBackfillConfig } from "@/lib/env";
 import { logError, logEvent } from "@/lib/observability";
 
 const schedulerModuleId = "scheduler";
 const dailyClientSyncKey = "dailyClientSyncNextRunAt";
+const monthlyReportPrepKey = "monthlyReportPrepNextRunAt";
 
 const metaCooldownModuleId = "meta_cooldown";
+
+/** Report-first job priorities. Higher numbers run first. */
+const JobPriority = {
+  MONTH_END_CLOSEOUT: 100,
+  MONTH_END_PREPARATION: 80,
+  DAILY_SYNC: 50,
+  HISTORICAL_BACKFILL: 30,
+  THUMBNAIL_BACKFILL: 10,
+} as const;
 const metaCooldownUntilKey = "cooldown_until";
 const metaCooldownAttemptsKey = "consecutive_rate_limits";
 
@@ -32,10 +44,17 @@ async function hasActiveJob(connectionId: string, type: SyncJobType) {
   return db.syncJob.findFirst({ where: { connectionId, type, status: { in: [SyncJobStatus.QUEUED, SyncJobStatus.RUNNING] } } });
 }
 
-async function enqueueJob(connectionId: string, type: SyncJobType, runAfter?: Date) {
+async function enqueueJob(connectionId: string, type: SyncJobType, priority: number = 0, runAfter?: Date) {
   const existing = await hasActiveJob(connectionId, type);
-  if (existing) return existing;
-  return db.syncJob.create({ data: { connectionId, type, runAfter: runAfter ?? new Date() } });
+  if (existing) {
+    // Boost the priority of an already-active job if the scheduler now considers it more urgent.
+    if (existing.priority < priority) {
+      await db.syncJob.update({ where: { id: existing.id }, data: { priority } });
+      return { ...existing, priority };
+    }
+    return existing;
+  }
+  return db.syncJob.create({ data: { connectionId, type, priority, runAfter: runAfter ?? new Date() } });
 }
 
 async function getSetting(moduleId: string, key: string): Promise<string | null> {
@@ -179,12 +198,12 @@ export async function enqueueClientSync(clientId: string) {
   const jobs = await Promise.all(connections.map(async (connection) => {
     const connector = getConnectorForPlatform(connection.platform);
     if (!connector || !connector.isImplemented) return null;
-    if (connection.platform === Platform.INSTAGRAM) await enqueueJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC, runAfter ?? undefined);
+    if (connection.platform === Platform.INSTAGRAM) await enqueueJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC, JobPriority.DAILY_SYNC, runAfter ?? undefined);
     if (connection.platform === Platform.INSTAGRAM && connection.historicalBackfillStatus === BackfillStatus.NOT_STARTED && connection.collaborativeBackfillStatus === BackfillStatus.NOT_STARTED && !connection.lastSuccessfulSyncAt) {
-      await enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL, runAfter ?? undefined);
-      return enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, runAfter ?? undefined);
+      await enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL, JobPriority.HISTORICAL_BACKFILL, runAfter ?? undefined);
+      return enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL, runAfter ?? undefined);
     }
-    return enqueueJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC, runAfter ?? undefined);
+    return enqueueJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC, JobPriority.DAILY_SYNC, runAfter ?? undefined);
   }));
   return jobs.filter((job) => job !== null);
 }
@@ -227,9 +246,9 @@ export async function enqueueHistoricalBackfill(connectionId: string) {
     if (connection.historicalBackfillStatus === BackfillStatus.RUNNING) {
       const active = await hasActiveJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
       if (active) jobs.push(active);
-      else jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL));
+      else jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL, JobPriority.HISTORICAL_BACKFILL));
     } else {
-      jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL));
+      jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL, JobPriority.HISTORICAL_BACKFILL));
     }
   }
 
@@ -237,9 +256,9 @@ export async function enqueueHistoricalBackfill(connectionId: string) {
     if (connection.collaborativeBackfillStatus === BackfillStatus.RUNNING) {
       const active = await hasActiveJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
       if (active) jobs.push(active);
-      else jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL));
+      else jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL));
     } else {
-      jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL));
+      jobs.push(await enqueueJob(connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL));
     }
   }
 
@@ -260,7 +279,7 @@ export async function reconcileAllHistoricalCollaborativeBackfills() {
       where: { id: connection.id },
       data: { collaborativeBackfillStatus: BackfillStatus.NOT_STARTED, collaborativeBackfillStart: connection.historicalBackfillStart },
     });
-    jobs.push(await enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL));
+    jobs.push(await enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL));
   }
   return jobs;
 }
@@ -305,6 +324,51 @@ export async function runDueDailyClientSync() {
   return null;
 }
 
+/** Atomically claims the monthly report preparation scheduler window. */
+async function claimMonthlyReportPrepWindow(intervalMs: number) {
+  const now = new Date();
+  await db.setting.createMany({ data: [{ moduleId: schedulerModuleId, key: monthlyReportPrepKey, value: now.toISOString() }], skipDuplicates: true });
+  const claimed = await db.setting.updateMany({
+    where: { moduleId: schedulerModuleId, key: monthlyReportPrepKey, value: { lte: now.toISOString() } },
+    data: { value: new Date(now.getTime() + intervalMs).toISOString() },
+  });
+  return claimed.count > 0;
+}
+
+/** Continuously prepares the current calendar month and prioritizes the previous month for closeout once
+ * the month has ended. Near month-end, current-month jobs are boosted so the report is almost ready
+ * before the month closes. All enqueues are deduplicated so the scheduler can run frequently without
+ * creating duplicate jobs. */
+export async function runDueMonthlyReportPreparation() {
+  const { monthlyReportPrepIntervalMs, monthEndPriorityBoostFinalDays } = getSchedulerConfig();
+  if (!(await claimMonthlyReportPrepWindow(monthlyReportPrepIntervalMs))) return null;
+
+  const connections = await db.socialConnection.findMany({ where: { platform: Platform.INSTAGRAM }, select: { id: true } });
+  const now = new Date();
+  const runAfter = await nextInstagramJobRunAfter();
+  const currentMonthPriority = isLastDaysOfMonth(now, monthEndPriorityBoostFinalDays)
+    ? JobPriority.MONTH_END_PREPARATION + 10
+    : JobPriority.MONTH_END_PREPARATION;
+
+  const jobs = [];
+  for (const connection of connections) {
+    // P0: close out the previous calendar month once it has ended.
+    const previousMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const previousMonth = monthPeriodUTC(previousMonthStart);
+    if (isMonthFinalized(previousMonth.periodEnd, now)) {
+      jobs.push(await enqueueJob(connection.id, SyncJobType.MONTH_END_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT, runAfter ?? undefined));
+    }
+
+    // P1: keep the current month continuously in sync.
+    jobs.push(await enqueueJob(connection.id, SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC, currentMonthPriority, runAfter ?? undefined));
+    jobs.push(await enqueueJob(connection.id, SyncJobType.INCREMENTAL_MEDIA_SYNC, currentMonthPriority, runAfter ?? undefined));
+    jobs.push(await enqueueJob(connection.id, SyncJobType.RECENT_POST_INSIGHT_REFRESH, currentMonthPriority, runAfter ?? undefined));
+  }
+
+  logEvent("sync.monthly_prep.triggered", { connections: connections.length, jobs: jobs.filter(Boolean).length });
+  return jobs.filter(Boolean);
+}
+
 const thumbnailBackfillModuleId = "thumbnail_backfill";
 const thumbnailBackfillCheckKey = "nextCheckAt";
 
@@ -338,7 +402,7 @@ export async function runDueThumbnailBackfill() {
     if (await hasActiveJob(connection.id, SyncJobType.THUMBNAIL_BACKFILL)) continue;
     const { countPendingThumbnails } = await import("@/lib/media-backfill");
     const pending = await countPendingThumbnails(connection.id);
-    if (pending > 0) jobs.push(await enqueueJob(connection.id, SyncJobType.THUMBNAIL_BACKFILL));
+    if (pending > 0) jobs.push(await enqueueJob(connection.id, SyncJobType.THUMBNAIL_BACKFILL, JobPriority.THUMBNAIL_BACKFILL));
   }
   return jobs;
 }
@@ -404,7 +468,7 @@ export async function recoverStalledHistoricalBackfills() {
     if (ownedIncomplete) {
       const hasActive = await hasActiveJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
       if (!hasActive) {
-        await enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL, runAfter ?? undefined);
+        await enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL, JobPriority.HISTORICAL_BACKFILL, runAfter ?? undefined);
         enqueued.push({ connectionId: connection.id, type: SyncJobType.HISTORICAL_MEDIA_BACKFILL });
       }
     }
@@ -412,7 +476,7 @@ export async function recoverStalledHistoricalBackfills() {
     if (collabIncomplete) {
       const hasActive = await hasActiveJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
       if (!hasActive) {
-        await enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, runAfter ?? undefined);
+        await enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL, runAfter ?? undefined);
         enqueued.push({ connectionId: connection.id, type: SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL });
       }
     }
@@ -438,6 +502,10 @@ async function runJob(connectionId: string, platform: Platform, type: SyncJobTyp
       const { runDailyAccountInsightChunk } = await import("@/lib/meta-sync-insights");
       return runDailyAccountInsightChunk(connectionId);
     }
+    if (type === SyncJobType.MONTH_END_CLOSEOUT) {
+      const result = await runMonthEndCloseout(connectionId);
+      return { posts: result.posts, completed: result.completed };
+    }
     if (type === SyncJobType.THUMBNAIL_BACKFILL) {
       const { runThumbnailBackfillChunk } = await import("@/lib/media-backfill");
       const result = await runThumbnailBackfillChunk(connectionId);
@@ -452,7 +520,13 @@ async function runJob(connectionId: string, platform: Platform, type: SyncJobTyp
 export async function processNextSyncJob() {
   await recoverStaleJobs();
 
-  const job = await db.syncJob.findFirst({ where: { status: SyncJobStatus.QUEUED, runAfter: { lte: new Date() } }, orderBy: { createdAt: "asc" } });
+  // Highest-priority queued job runs first, then the one waiting longest. This implements the
+  // MONTHLY-REPORT-FIRST ordering (P0 closeout > P1 current-month prep > P2 normal sync > P3 old
+  // historical backfill > P4 thumbnail/maintenance) without starving any queue forever.
+  const job = await db.syncJob.findFirst({
+    where: { status: SyncJobStatus.QUEUED, runAfter: { lte: new Date() } },
+    orderBy: [{ priority: "desc" }, { runAfter: "asc" }, { createdAt: "asc" }],
+  });
   if (!job) return null;
 
   const connection = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { platform: true } });
@@ -530,11 +604,17 @@ export async function processNextSyncJob() {
     // Historical backfill schedules its own continuation job once it knows whether it finished or hit budget.
     if (job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL) {
       const updated = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { historicalBackfillStatus: true } });
-      if (updated?.historicalBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+      if (updated?.historicalBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_MEDIA_BACKFILL, JobPriority.HISTORICAL_BACKFILL);
     }
     if (job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL) {
       const updated = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { collaborativeBackfillStatus: true } });
-      if (updated?.collaborativeBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+      if (updated?.collaborativeBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL);
+    }
+    // Month-end closeout keeps re-enqueuing until the targeted month is fully ready.
+    if (job.type === SyncJobType.MONTH_END_CLOSEOUT) {
+      if (result && typeof result === "object" && "completed" in result && !result.completed) {
+        await enqueueJob(job.connectionId, SyncJobType.MONTH_END_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT);
+      }
     }
     // Thumbnail backfill is deliberately low priority: unlike historical backfill's immediate
     // continuation, its next batch is spaced out by a delay so it never turns into another tight
@@ -544,7 +624,7 @@ export async function processNextSyncJob() {
       const remaining = await countPendingThumbnails(job.connectionId);
       if (remaining > 0) {
         const { continuationDelayMs } = getThumbnailBackfillConfig();
-        await enqueueJob(job.connectionId, SyncJobType.THUMBNAIL_BACKFILL, new Date(Date.now() + continuationDelayMs));
+        await enqueueJob(job.connectionId, SyncJobType.THUMBNAIL_BACKFILL, JobPriority.THUMBNAIL_BACKFILL, new Date(Date.now() + continuationDelayMs));
       }
     }
     return { id: job.id, status: "succeeded", posts: result.posts };

@@ -11,7 +11,7 @@ import { logError } from "@/lib/observability";
 const { metaSyncMinIntervalMs } = getHistoricalBackfillConfig();
 const graphTimeoutMs = 30_000;
 
-type MetaMedia = {
+export type MetaMedia = {
   id: string;
   caption?: string;
   media_type?: string;
@@ -180,7 +180,7 @@ async function fetchInsightBatch(postId: string, token: string, metrics: string[
   }
 }
 
-async function postInsights(postId: string, token: string) {
+export async function postInsights(postId: string, token: string) {
   const results = await Promise.allSettled([
     fetchInsightBatch(postId, token, ["views", "total_views", "reach", "saved", "shares", "total_interactions"]),
     fetchInsightBatch(postId, token, ["follows"]),
@@ -229,7 +229,7 @@ function extractMediaMetadata(item: MetaMedia, source: MediaSource): Record<stri
   return Object.keys(metadata).length > 0 ? metadata : null;
 }
 
-async function upsertPost(
+export async function upsertPost(
   connectionId: string,
   item: MetaMedia,
   insights: { metrics: Record<string, number>; availability: MetricAvailability },

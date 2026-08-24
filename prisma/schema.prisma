@@ -60,6 +60,7 @@ enum SyncJobType {
   DAILY_ACCOUNT_INSIGHT_SYNC
   STORY_SYNC
   THUMBNAIL_BACKFILL
+  MONTH_END_CLOSEOUT
 }
 
 enum BackfillStatus {
@@ -363,6 +364,7 @@ model SyncJob {
   connectionId String
   type         SyncJobType      @default(INCREMENTAL_MEDIA_SYNC)
   status       SyncJobStatus    @default(QUEUED)
+  priority     Int              @default(0)
   attempts     Int              @default(0)
   maxAttempts  Int              @default(5)
   runAfter     DateTime         @default(now())
@@ -375,7 +377,7 @@ model SyncJob {
   connection   SocialConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   runs         SyncRun[]
 
-  @@index([status, runAfter])
+  @@index([status, priority, runAfter])
   @@index([connectionId, type, status])
 }
 

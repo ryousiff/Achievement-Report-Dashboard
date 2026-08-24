@@ -16,7 +16,7 @@ type MetaTotalValueInsight = {
   };
 };
 
-type CompletedMonthPeriod = { start: Date; end: Date };
+export type CompletedMonthPeriod = { start: Date; end: Date };
 type MonthlyAccountTotals = { reach: number; views: number; gained: number; lost: number };
 
 const periodTypeToMetaPeriod: Record<InsightPeriodType, string> = {
@@ -101,7 +101,7 @@ function windowStartFor(periodEnd: Date, periodType: InsightPeriodType): Date {
   return start;
 }
 
-async function fetchAndStoreAccountInsight(
+export async function fetchAndStoreAccountInsight(
   connectionId: string,
   accountId: string,
   token: string,
@@ -187,7 +187,7 @@ async function fetchWindowTotals(accountId: string, token: string, since: Date, 
 
 /** Fetch the validated account totals for one completed calendar month. 28/29/30-day months use one
  * Meta total_value window. A 31-day month uses the same A+B-C composition already validated by reports. */
-async function fetchCompletedMonthTotals(accountId: string, token: string, period: CompletedMonthPeriod): Promise<MonthlyAccountTotals | null> {
+export async function fetchCompletedMonthTotals(accountId: string, token: string, period: CompletedMonthPeriod): Promise<MonthlyAccountTotals | null> {
   const days = daysBetweenInclusive(period.start, period.end);
   if (days <= 30) return fetchWindowTotals(accountId, token, period.start, addDaysUTC(period.end, 1));
   if (days !== 31) return null;
@@ -208,7 +208,7 @@ async function fetchCompletedMonthTotals(accountId: string, token: string, perio
   };
 }
 
-async function storeCompletedMonthTotals(connectionId: string, period: CompletedMonthPeriod, totals: MonthlyAccountTotals) {
+export async function storeCompletedMonthTotals(connectionId: string, period: CompletedMonthPeriod, totals: MonthlyAccountTotals) {
   const periodStart = startOfDayUTC(period.start);
   const periodEnd = endOfDayUTC(period.end);
   const values: Record<(typeof authoritativePeriodMetrics)[number], number> = {
