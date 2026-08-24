@@ -1,9 +1,10 @@
-import { processNextSyncJob, runDueDailyClientSync, runDueThumbnailBackfill } from "./lib/sync-queue";
+import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueDailyClientSync, runDueThumbnailBackfill } from "./lib/sync-queue";
 import { getSchedulerConfig, getThumbnailBackfillConfig } from "./lib/env";
 
 const pollMs = Number(process.env.SYNC_WORKER_POLL_MS ?? 5000);
 const { dailyClientSyncCheckIntervalMs } = getSchedulerConfig();
 const { checkIntervalMs: thumbnailBackfillCheckIntervalMs } = getThumbnailBackfillConfig();
+const stalledHistoricalBackfillRecoveryIntervalMs = 5 * 60 * 1000; // 5 minutes
 
 let isDraining = false;
 
@@ -53,5 +54,20 @@ void startPolling();
 void maybeRunDailyClientSync();
 setInterval(() => { void maybeRunDailyClientSync(); }, dailyClientSyncCheckIntervalMs);
 
+// Periodically detect Instagram connections whose historical or collaborative backfill is stuck
+// in PARTIAL/RUNNING without a corresponding active SyncJob, and enqueue exactly one resumption
+// job per gap. This is the worker/scheduler's responsibility — never the employee's "refresh status"
+// button.
+async function maybeRecoverStalledHistoricalBackfills() {
+  try {
+    await recoverStalledHistoricalBackfills();
+  } catch (error) {
+    console.error("Stalled historical backfill recovery error:", error instanceof Error ? error.message : error);
+  }
+}
+
 void maybeRunThumbnailBackfill();
 setInterval(() => { void maybeRunThumbnailBackfill(); }, thumbnailBackfillCheckIntervalMs);
+
+void maybeRecoverStalledHistoricalBackfills();
+setInterval(() => { void maybeRecoverStalledHistoricalBackfills(); }, stalledHistoricalBackfillRecoveryIntervalMs);

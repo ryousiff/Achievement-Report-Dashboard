@@ -367,6 +367,64 @@ async function recoverStaleJobs() {
   await db.syncJob.updateMany({ where: { status: SyncJobStatus.RUNNING, lockedAt: { lt: staleAt } }, data: { status: SyncJobStatus.QUEUED, lockedAt: null, runAfter: new Date() } });
 }
 
+/** Periodically scans Instagram connections whose historical backfill is marked PARTIAL or RUNNING
+ * but that have no corresponding queued/running SyncJob, and enqueues exactly one continuation job.
+ * Reuses the existing enqueue/deduplication logic so duplicates cannot be created; defers to the
+ * Meta cooldown/incremental hold via nextInstagramJobRunAfter; and relies on the existing
+ * runHistoricalBackfillForSource to resume from the stored cursor/pageIndex. Completed backfills and
+ * terminal FAILED backfills are left for explicit admin recovery. */
+export async function recoverStalledHistoricalBackfills() {
+  const connections = await db.socialConnection.findMany({
+    where: {
+      platform: Platform.INSTAGRAM,
+      OR: [
+        { historicalBackfillStatus: { in: [BackfillStatus.PARTIAL, BackfillStatus.RUNNING] } },
+        { collaborativeBackfillStatus: { in: [BackfillStatus.PARTIAL, BackfillStatus.RUNNING] } },
+      ],
+    },
+    select: {
+      id: true,
+      historicalBackfillStatus: true,
+      collaborativeBackfillStatus: true,
+    },
+  });
+
+  const runAfter = await nextInstagramJobRunAfter();
+  const enqueued: { connectionId: string; type: SyncJobType }[] = [];
+
+  for (const connection of connections) {
+    // Terminal FAILED backfills are left for explicit admin recovery; never auto-resurrect them.
+    const ownedIncomplete =
+      connection.historicalBackfillStatus !== BackfillStatus.COMPLETED &&
+      connection.historicalBackfillStatus !== BackfillStatus.FAILED;
+    const collabIncomplete =
+      connection.collaborativeBackfillStatus !== BackfillStatus.COMPLETED &&
+      connection.collaborativeBackfillStatus !== BackfillStatus.FAILED;
+
+    if (ownedIncomplete) {
+      const hasActive = await hasActiveJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+      if (!hasActive) {
+        await enqueueJob(connection.id, SyncJobType.HISTORICAL_MEDIA_BACKFILL, runAfter ?? undefined);
+        enqueued.push({ connectionId: connection.id, type: SyncJobType.HISTORICAL_MEDIA_BACKFILL });
+      }
+    }
+
+    if (collabIncomplete) {
+      const hasActive = await hasActiveJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+      if (!hasActive) {
+        await enqueueJob(connection.id, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, runAfter ?? undefined);
+        enqueued.push({ connectionId: connection.id, type: SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL });
+      }
+    }
+  }
+
+  if (enqueued.length > 0) {
+    logEvent("sync.historical.recovery.enqueued", { count: enqueued.length, jobs: enqueued });
+  }
+
+  return enqueued;
+}
+
 /** Dispatches a job to the right sync function. Instagram-specific job types bypass the generic
  * SocialConnector.syncConnection() interface entirely (so stub connectors for other platforms are
  * completely unaffected by any of this); everything else still goes through the generic connector. */

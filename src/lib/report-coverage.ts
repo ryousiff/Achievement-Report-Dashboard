@@ -1,8 +1,15 @@
-import { BackfillStatus, InsightPeriodType, SyncJobStatus, SyncJobType } from "@prisma/client";
+import { BackfillStatus, InsightPeriodType, SyncJobStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { periodAccountFollowersForRange, periodAccountReachForRange } from "@/lib/report-data";
+import { logEvent } from "@/lib/observability";
+
+export const SYNCING_EMPLOYEE_MESSAGE =
+  "جاري استكمال بيانات التقرير تلقائياً. يمكنك متابعة إعداد التقرير، وسيتم التحقق من اكتمال البيانات قبل الاعتماد.";
+export const INCOMPLETE_EMPLOYEE_MESSAGE =
+  "تعذّر استكمال التحقق من بعض بيانات التقرير حالياً. تم تسجيل الحالة للمراجعة.";
+export const NO_CONNECTION_EMPLOYEE_MESSAGE = "لا يوجد ربط بإنستغرام لهذا العميل.";
 
 export type CoverageStatus = "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" | "FAILED";
 
@@ -94,6 +101,8 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
       accountInsightsBackfillCompletedAt: true,
       accountInsightsLastError: true,
       lastSuccessfulSyncAt: true,
+      historicalBackfillRetryCount: true,
+      collaborativeBackfillRetryCount: true,
     },
   });
 
@@ -114,7 +123,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     historicalBackfillStatus: BackfillStatus.NOT_STARTED,
     collaborativeBackfillStatus: BackfillStatus.NOT_STARTED,
     missingRanges: [],
-    warnings: ["لا يوجد ربط بإنستغرام لهذا العميل."],
+    warnings: [NO_CONNECTION_EMPLOYEE_MESSAGE],
   };
 
   if (!connection) return empty;
@@ -124,19 +133,9 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     select: { type: true, status: true },
   });
 
-  const activeOwnedBackfill =
-    connection.historicalBackfillStatus === BackfillStatus.RUNNING ||
-    connection.historicalBackfillStatus === BackfillStatus.PARTIAL ||
-    activeJobs.some((job) => job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL);
-
-  const activeCollabBackfill =
-    connection.collaborativeBackfillStatus === BackfillStatus.RUNNING ||
-    connection.collaborativeBackfillStatus === BackfillStatus.PARTIAL ||
-    activeJobs.some((job) => job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
-
-  const activeBackfill = activeOwnedBackfill || activeCollabBackfill;
-
-  const activeInsights = activeJobs.some((job) => job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC);
+  // "Active" sync work must mean a real queued/running job exists. A stored PARTIAL status with no
+  // actual job is a stalled backfill, not active work, and must not be reported as "still syncing".
+  const hasAnyActiveSyncJob = activeJobs.length > 0;
 
   // Media (post) coverage
   const postsInPeriod = await db.socialPost.aggregate({
@@ -270,61 +269,56 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
 
   const insightsComplete = posts.length > 0 ? missingMetrics.length === 0 : true;
 
-  // Build missing ranges and warnings
+  // Build structured missing-range diagnostics for administrators/developers. Employee-facing
+  // warnings are simplified below so raw errors and internal statuses never appear in the UI.
   const missingRanges: Array<{ start: string; end: string; reason: string }> = [];
-  const warnings: string[] = [];
 
   if (!mediaComplete) {
     if (!hasAnyPost) {
-      warnings.push("لا توجد منشورات متزامنة لهذه الفترة.");
       missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد منشورات متزامنة لهذه الفترة."));
     } else if (mediaFrom && mediaFrom > periodStart) {
       const end = new Date(mediaFrom.valueOf() - 1);
       const cappedEnd = end > periodEnd ? periodEnd : end;
       missingRanges.push(buildMissingRange(periodStart, cappedEnd, "قد تكون منشورات بداية الفترة غير متزامنة بعد."));
-      warnings.push(`تغطية المنشورات تبدأ من ${toISODate(mediaFrom)}؛ قد تكون بداية الفترة غير مكتملة.`);
     } else if (postsInPeriod._count === 0) {
-      warnings.push("لم يُعثر على منشورات داخل هذه الفترة.");
+      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لم يُعثر على منشورات داخل هذه الفترة."));
     } else if (connection.lastSuccessfulSyncAt && connection.lastSuccessfulSyncAt < periodEnd) {
-      warnings.push("آخر مزامنة ناجحة قبل نهاية الفترة؛ قد تكون المنشورات الأحدث غير متزامنة.");
+      missingRanges.push(buildMissingRange(periodEnd, periodEnd, "آخر مزامنة ناجحة قبل نهاية الفترة."));
     } else {
-      warnings.push("بيانات المنشورات لا تزال قيد المزامنة لهذه الفترة.");
+      missingRanges.push(buildMissingRange(periodStart, periodEnd, "بيانات المنشورات لا تزال قيد المزامنة لهذه الفترة."));
     }
   }
 
   if (connection.collaborativeBackfillStatus !== BackfillStatus.COMPLETED) {
-    warnings.push("بيانات المنشورات التعاونية لا تزال قيد المزامنة لهذه الفترة.");
     missingRanges.push(buildMissingRange(periodStart, periodEnd, "بيانات المنشورات التعاونية لا تزال قيد المزامنة."));
   }
 
   if (reachStatus === "PERIOD_UNAVAILABLE") {
     if (reachDaily.days > 0) {
-      warnings.push("بيانات الوصول الفريدة لهذه الفترة غير مكتملة.");
-      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا يوجد Reach فريد للفترة بالكامل في Meta API؛ متاح فقط Reach يومي أو 28 يوم."));
+      missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا يوجد Reach فريد للفترة بالكامل؛ متاح Reach يومي أو 28 يوم."));
     } else {
-      warnings.push("لا تتوفر بيانات وصول للحساب في هذه الفترة.");
       missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات وصول متزامنة."));
     }
   } else if (reachStatus === "PERIOD_ESTIMATED") {
-    warnings.push(reach.tooltip ?? "Reach قيمة تقديرية؛ Meta API لا يوفر نافذة وصول فريدة مباشرة لمدة 31 يوماً.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, reach.tooltip ?? "Reach قيمة تقديرية؛ Meta API لا يوفر نافذة وصول فريدة مباشرة لمدة 31 يوماً."));
   } else if (reachStatus === "DAILY_PARTIAL") {
-    warnings.push("بيانات الوصول اليومية ناقصة لبعض أيام الفترة.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, "بيانات الوصول اليومية ناقصة لبعض أيام الفترة."));
   } else if (reachStatus === "DAYS_28_AVAILABLE" && !periodReachValue) {
-    warnings.push("بيانات الوصول الفريدة للفترة بالكامل غير متاحة؛ متاح Reach لآخر 28 يوم فقط.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, "بيانات الوصول الفريدة للفترة بالكامل غير متاحة؛ متاح Reach لآخر 28 يوم فقط."));
   }
 
   if (followerStatus === "UNAVAILABLE") {
-    warnings.push("لا تتوفر بيانات حركة المتابعين (follows_and_unfollows) للفترة المطلوبة.");
     missingRanges.push(buildMissingRange(periodStart, periodEnd, "لا توجد بيانات follows_and_unfollows للفترة."));
   } else if (followerStatus === "PERIOD_DERIVED") {
-    warnings.push(followers.tooltip ?? "حركة المتابعين قيمة مركّبة لأن Meta API لا يسمح بنطاق 31 يوم مباشر.");
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, followers.tooltip ?? "حركة المتابعين قيمة مركّبة لأن Meta API لا يسمح بنطاق 31 يوم مباشر."));
   }
 
   if (!insightsComplete) {
-    warnings.push(`بعض المنشورات تفتقر إلى مؤشرات: ${missingMetrics.map((metric) => ({ reach: "الوصول", views: "مشاهدات المنشورات العضوية", total_views: "إجمالي المشاهدات", total_interactions: "التفاعل", likes: "الإعجابات", comments: "التعليقات", saved: "الحفظ", shares: "المشاركات", follows: "المتابعون الجدد" })[metric as TrackedMetric] ?? metric).join("، ")}.`);
+    missingRanges.push(buildMissingRange(periodStart, periodEnd, `بعض المنشورات تفتقر إلى مؤشرات: ${missingMetrics.join(", ")}.`));
   }
 
-  // Final status
+  // Final status: SYNCING only when real queued/running work exists. A stale PARTIAL connection
+  // flag without an active job is treated as incomplete, not as actively syncing.
   let status: CoverageStatus;
   const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerStatus === "PERIOD_AVAILABLE" && insightsComplete;
 
@@ -332,23 +326,50 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
     connection.collaborativeBackfillStatus === BackfillStatus.FAILED;
 
-  if (anyBackfillFailed) {
-    status = allComplete ? "PARTIAL" : "FAILED";
-    if (status === "FAILED") warnings.unshift(connection.historicalBackfillLastError ?? connection.collaborativeBackfillLastError ?? "فشل التحميل التاريخي للبيانات.");
-    else warnings.unshift("فشل التحميل التاريخي لكن بعض البيانات المتزامنة متاحة.");
-  } else if (activeBackfill && !mediaComplete) {
-    status = "SYNCING";
-    warnings.unshift("جارٍ تحميل البيانات التاريخية. أعدي فتح التقرير أو تحديث البيانات لاحقاً.");
-  } else if (activeInsights && reachStatus !== "PERIOD_AVAILABLE" && followerStatus === "UNAVAILABLE") {
-    status = "SYNCING";
-    warnings.unshift("جارٍ تحميل بيانات الوصول/المتابعين اليومية.");
-  } else if (allComplete) {
+  let warnings: string[] = [];
+  if (allComplete) {
     status = "COMPLETE";
+  } else if (hasAnyActiveSyncJob) {
+    status = "SYNCING";
+    warnings = [SYNCING_EMPLOYEE_MESSAGE];
+  } else if (anyBackfillFailed) {
+    status = "FAILED";
+    warnings = [INCOMPLETE_EMPLOYEE_MESSAGE];
   } else if (hasAnyPost || reachDaily.days > 0 || followerCount.days > 0 || postsInPeriod._count > 0) {
     status = "PARTIAL";
+    warnings = [INCOMPLETE_EMPLOYEE_MESSAGE];
   } else {
     status = "UNAVAILABLE";
+    warnings = [INCOMPLETE_EMPLOYEE_MESSAGE];
   }
+
+  // Preserve full technical diagnostics for administrators/developers; never expose raw error
+  // text in the employee-facing response.
+  logEvent("report.coverage.diagnostics", {
+    connectionId: connection.id,
+    clientId: connection.clientId,
+    periodStart: toISODate(periodStart),
+    periodEnd: toISODate(periodEnd),
+    status,
+    historicalBackfillStatus: connection.historicalBackfillStatus,
+    collaborativeBackfillStatus: connection.collaborativeBackfillStatus,
+    activeJobs: activeJobs.map((job) => ({ type: job.type, status: job.status })),
+    lastErrors: {
+      historical: connection.historicalBackfillLastError,
+      collaborative: connection.collaborativeBackfillLastError,
+      accountInsights: connection.accountInsightsLastError,
+    },
+    lastSuccessfulSyncAt: connection.lastSuccessfulSyncAt,
+    retryAttempts: {
+      historical: connection.historicalBackfillRetryCount,
+      collaborative: connection.collaborativeBackfillRetryCount,
+    },
+    mediaComplete,
+    reachStatus,
+    followerStatus,
+    insightsComplete,
+    missingRangesCount: missingRanges.length,
+  });
 
   return {
     status,

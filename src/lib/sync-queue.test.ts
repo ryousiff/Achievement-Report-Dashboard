@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { Platform, SyncJobStatus, SyncJobType } from "@prisma/client";
+import { BackfillStatus, Platform, SyncJobStatus, SyncJobType } from "@prisma/client";
 import { ConnectorError } from "@/lib/connectors";
 
 const mockDb = vi.hoisted(() => ({
@@ -65,7 +65,7 @@ const mockMetaSyncInsights = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/meta-sync-insights", () => mockMetaSyncInsights);
 
-import { processNextSyncJob, runDueThumbnailBackfill } from "@/lib/sync-queue";
+import { processNextSyncJob, recoverStalledHistoricalBackfills, runDueThumbnailBackfill } from "@/lib/sync-queue";
 
 function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date }> = {}) {
   return {
@@ -261,6 +261,115 @@ describe("processNextSyncJob THUMBNAIL_BACKFILL handling", () => {
     expect(updateArgs.data.status).toBe(SyncJobStatus.QUEUED);
     expect(updateArgs.data.runAfter.valueOf()).toBeGreaterThan(Date.now());
     expect(mockMediaBackfill.countPendingThumbnails).not.toHaveBeenCalled();
+  });
+});
+
+describe("recoverStalledHistoricalBackfills", () => {
+  it("enqueues exactly one continuation job for a stalled PARTIAL owned backfill", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-a", historicalBackfillStatus: BackfillStatus.PARTIAL, collaborativeBackfillStatus: BackfillStatus.COMPLETED },
+    ]);
+    mockDb.syncJob.findFirst.mockResolvedValue(null); // no active historical job
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockDb.setting.findUnique.mockResolvedValue(null);
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(1);
+    expect(mockDb.syncJob.create).toHaveBeenCalledTimes(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.connectionId).toBe("conn-a");
+    expect(createArgs.data.type).toBe(SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+  });
+
+  it("enqueues exactly one continuation job for a stalled RUNNING owned backfill with no active job", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-b", historicalBackfillStatus: BackfillStatus.RUNNING, collaborativeBackfillStatus: BackfillStatus.COMPLETED },
+    ]);
+    mockDb.syncJob.findFirst.mockResolvedValue(null);
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockDb.setting.findUnique.mockResolvedValue(null);
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.connectionId).toBe("conn-b");
+    expect(createArgs.data.type).toBe(SyncJobType.HISTORICAL_MEDIA_BACKFILL);
+  });
+
+  it("enqueues a continuation job for a stalled PARTIAL collaborative backfill", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-c", historicalBackfillStatus: BackfillStatus.COMPLETED, collaborativeBackfillStatus: BackfillStatus.PARTIAL },
+    ]);
+    mockDb.syncJob.findFirst.mockResolvedValue(null);
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockDb.setting.findUnique.mockResolvedValue(null);
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.connectionId).toBe("conn-c");
+    expect(createArgs.data.type).toBe(SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL);
+  });
+
+  it("does not create duplicate jobs when an active job already exists", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-d", historicalBackfillStatus: BackfillStatus.PARTIAL, collaborativeBackfillStatus: BackfillStatus.PARTIAL },
+    ]);
+    // hasActiveJob returns truthy for every call, so both sources see an existing job.
+    mockDb.syncJob.findFirst.mockResolvedValue({ id: "existing-job" });
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(0);
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+  });
+
+  it("does not re-enqueue completed backfills", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-e", historicalBackfillStatus: BackfillStatus.COMPLETED, collaborativeBackfillStatus: BackfillStatus.COMPLETED },
+    ]);
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(0);
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+    expect(mockDb.syncJob.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("does not re-enqueue terminal FAILED backfills", async () => {
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-f", historicalBackfillStatus: BackfillStatus.FAILED, collaborativeBackfillStatus: BackfillStatus.FAILED },
+    ]);
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(0);
+    expect(mockDb.syncJob.create).not.toHaveBeenCalled();
+    expect(mockDb.syncJob.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("defers recovered jobs until the Meta app cooldown expires", async () => {
+    const cooldownUntil = new Date("2026-08-24T12:00:00.000Z");
+    mockDb.socialConnection.findMany.mockResolvedValue([
+      { id: "conn-g", historicalBackfillStatus: BackfillStatus.PARTIAL, collaborativeBackfillStatus: BackfillStatus.COMPLETED },
+    ]);
+    mockDb.syncJob.findFirst.mockResolvedValue(null);
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "new-job", ...data }));
+    mockDb.setting.findUnique.mockImplementation(async (args: { where: { moduleId_key: { moduleId: string; key: string } } }) => {
+      if (args.where.moduleId_key.moduleId === "meta_cooldown" && args.where.moduleId_key.key === "cooldown_until") {
+        return { value: cooldownUntil.toISOString() };
+      }
+      return null;
+    });
+
+    const jobs = await recoverStalledHistoricalBackfills();
+
+    expect(jobs).toHaveLength(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.runAfter).toEqual(cooldownUntil);
   });
 });
 
