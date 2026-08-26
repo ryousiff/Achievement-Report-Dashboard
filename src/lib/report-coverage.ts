@@ -1,8 +1,9 @@
-import { BackfillStatus, InsightPeriodType, SyncJobStatus } from "@prisma/client";
+import { BackfillStatus, InsightPeriodType, SyncJobStatus, SyncJobType } from "@prisma/client";
 import { db } from "@/lib/db";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { periodAccountFollowersForRange, periodAccountReachForRange } from "@/lib/report-data";
+import { storedAccountFollowersForRange, storedAccountReachForRange } from "@/lib/stored-period-metrics";
 import { isMonthFinalized } from "@/lib/post-metric-snapshots";
 import { logEvent } from "@/lib/observability";
 
@@ -16,7 +17,7 @@ export type CoverageStatus = "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" 
 
 export type MetricCoverage = { from: Date | null; to: Date | null; complete: boolean };
 
-export type PostInsightCoverage = { availableMetrics: string[]; missingMetrics: string[] };
+export type PostInsightCoverage = { availableMetrics: string[]; unsupportedMetrics: string[]; missingMetrics: string[] };
 
 export type ReachCoverageStatus = "DAILY_COMPLETE" | "DAILY_PARTIAL" | "PERIOD_AVAILABLE" | "PERIOD_ESTIMATED" | "DAYS_28_AVAILABLE" | "PERIOD_UNAVAILABLE";
 export type FollowerCoverageStatus = "DAILY_COMPLETE" | "DAILY_PARTIAL" | "PERIOD_AVAILABLE" | "PERIOD_DERIVED" | "UNAVAILABLE";
@@ -66,23 +67,39 @@ function daysBetweenInclusive(from: Date, to: Date) {
   return Math.max(1, Math.floor((end.valueOf() - start.valueOf()) / (24 * 60 * 60 * 1000)) + 1);
 }
 
-function isMetricAvailable(post: { metrics: Record<string, unknown>; metricAvailabilityState: Record<string, string> | null }, metric: TrackedMetric) {
+function metricCoverageState(
+  post: { metrics: Record<string, unknown>; metricAvailabilityState: Record<string, string> | null },
+  metric: TrackedMetric,
+): "AVAILABLE" | "NOT_SUPPORTED" | "MISSING" {
   const state = post.metricAvailabilityState?.[metric];
-  if (state === "AVAILABLE") return true;
-  if (state === "NOT_SUPPORTED" || state === "NOT_RETURNED" || state === "FAILED" || state === "PENDING") return false;
+  if (state === "AVAILABLE") return "AVAILABLE";
+  if (state === "NOT_SUPPORTED") return "NOT_SUPPORTED";
   if (state === undefined || state === null) {
-    return typeof post.metrics[metric] === "number";
+    return typeof post.metrics[metric] === "number" ? "AVAILABLE" : "MISSING";
   }
-  return false;
+  return "MISSING";
 }
 
 function buildMissingRange(start: Date, end: Date, reason: string): { start: string; end: string; reason: string } {
   return { start: toISODate(start), end: toISODate(end), reason };
 }
 
+function reportPeriodCloseoutOverlaps(payload: unknown, periodStart: Date, periodEnd: Date): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const value = payload as Record<string, unknown>;
+  if (typeof value.periodStart !== "string" || typeof value.periodEnd !== "string") return false;
+  const jobStart = new Date(value.periodStart);
+  const jobEnd = new Date(value.periodEnd);
+  if (Number.isNaN(jobStart.valueOf()) || Number.isNaN(jobEnd.valueOf())) return false;
+  return jobStart <= periodEnd && jobEnd >= periodStart;
+}
 
-
-export async function getCoverage(connectionId: string, periodStart: Date, periodEnd: Date): Promise<ReportCoverage> {
+export async function getCoverage(
+  connectionId: string,
+  periodStart: Date,
+  periodEnd: Date,
+  options: { storedOnly?: boolean } = {},
+): Promise<ReportCoverage> {
   const connection = await db.socialConnection.findUnique({
     where: { id: connectionId },
     select: {
@@ -110,7 +127,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   const empty: ReportCoverage = {
     status: "UNAVAILABLE",
     mediaCoverage: { from: null, to: null, complete: false },
-    postInsightCoverage: { availableMetrics: [], missingMetrics: [] },
+    postInsightCoverage: { availableMetrics: [], unsupportedMetrics: [], missingMetrics: [] },
     reachCoverage: { from: null, to: null, complete: false },
     reach28DayCoverage: { from: null, to: null, complete: false },
     followerCountCoverage: { from: null, to: null, complete: false },
@@ -131,12 +148,8 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
 
   const activeJobs = await db.syncJob.findMany({
     where: { connectionId, status: { in: [SyncJobStatus.QUEUED, SyncJobStatus.RUNNING] } },
-    select: { type: true, status: true },
+    select: { type: true, status: true, payload: true },
   });
-
-  // "Active" sync work must mean a real queued/running job exists. A stored PARTIAL status with no
-  // actual job is a stalled backfill, not active work, and must not be reported as "still syncing".
-  const hasAnyActiveSyncJob = activeJobs.length > 0;
 
   // Media (post) coverage
   const postsInPeriod = await db.socialPost.aggregate({
@@ -220,7 +233,9 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
 
   // Use the same Reach resolver the report builder uses: total_value for <=30 days,
   // overlapping-window estimate for 31 days. Never rely on summed daily snapshots.
-  const reach = await periodAccountReachForRange(connection.clientId, periodStart, periodEnd);
+  const reach = options.storedOnly
+    ? await storedAccountReachForRange(connection.clientId, periodStart, periodEnd)
+    : await periodAccountReachForRange(connection.clientId, periodStart, periodEnd);
   let reachStatus: ReachCoverageStatus = "PERIOD_UNAVAILABLE";
   let periodReachValue: number | null = reach.value;
   if (reach.value !== null) {
@@ -234,7 +249,9 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   }
 
   // Use the same Followers resolver the report builder uses.
-  const followers = await periodAccountFollowersForRange(connection.clientId, periodStart, periodEnd);
+  const followers = options.storedOnly
+    ? await storedAccountFollowersForRange(connection.clientId, periodStart, periodEnd)
+    : await periodAccountFollowersForRange(connection.clientId, periodStart, periodEnd);
   let followerStatus: FollowerCoverageStatus = "UNAVAILABLE";
   if (followers.gained !== null && followers.lost !== null) {
     followerStatus = followers.accuracy === "DERIVED" ? "PERIOD_DERIVED" : "PERIOD_AVAILABLE";
@@ -251,8 +268,8 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     select: { metrics: true, metricAvailabilityState: true },
   });
 
-  const metricCounts = new Map<TrackedMetric, { available: number; missing: number }>();
-  for (const metric of trackedMetrics) metricCounts.set(metric, { available: 0, missing: 0 });
+  const metricCounts = new Map<TrackedMetric, { available: number; unsupported: number; missing: number }>();
+  for (const metric of trackedMetrics) metricCounts.set(metric, { available: 0, unsupported: 0, missing: 0 });
 
   for (const post of posts) {
     const typedPost = {
@@ -261,15 +278,19 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     };
     for (const metric of trackedMetrics) {
       const counts = metricCounts.get(metric)!;
-      if (isMetricAvailable(typedPost, metric)) counts.available++;
+      const state = metricCoverageState(typedPost, metric);
+      if (state === "AVAILABLE") counts.available++;
+      else if (state === "NOT_SUPPORTED") counts.unsupported++;
       else counts.missing++;
     }
   }
 
   const availableMetrics: string[] = [];
+  const unsupportedMetrics: string[] = [];
   const missingMetrics: string[] = [];
   for (const [metric, counts] of metricCounts) {
     if (counts.available > 0) availableMetrics.push(metric);
+    if (counts.unsupported > 0) unsupportedMetrics.push(metric);
     if (counts.missing > 0) missingMetrics.push(metric);
   }
 
@@ -323,25 +344,37 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     missingRanges.push(buildMissingRange(periodStart, periodEnd, `بعض المنشورات تفتقر إلى مؤشرات: ${missingMetrics.join(", ")}.`));
   }
 
-  // Final status: SYNCING only when real queued/running work exists. A stale PARTIAL connection
-  // flag without an active job is treated as incomplete, not as actively syncing, and must not use
-  // a "جاري" (in progress) message because nothing is actually running right now.
+  // Final status is period-aware: only an overlapping explicit report closeout can put a finalized
+  // report into the closing state. Generic connection work may target a different calendar month.
   let status: CoverageStatus;
-  const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerStatus !== "UNAVAILABLE" && insightsComplete;
+  const reachReady = reachStatus === "PERIOD_AVAILABLE" || reachStatus === "PERIOD_ESTIMATED";
+  const allComplete = mediaComplete && reachReady && followerStatus !== "UNAVAILABLE" && insightsComplete;
 
   const anyBackfillFailed =
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
     connection.collaborativeBackfillStatus === BackfillStatus.FAILED;
 
   const finalized = isMonthFinalized(periodEnd, new Date());
+  const hasMatchingReportCloseout = activeJobs.some(
+    (job) => job.type === SyncJobType.REPORT_PERIOD_CLOSEOUT && reportPeriodCloseoutOverlaps(job.payload, periodStart, periodEnd),
+  );
+  const hasRelevantHistoricalBackfill = !mediaComplete && activeJobs.some(
+    (job) => job.type === SyncJobType.HISTORICAL_MEDIA_BACKFILL || job.type === SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL,
+  );
+  const hasOpenPeriodSync = !finalized && activeJobs.some(
+    (job) => job.type === SyncJobType.INCREMENTAL_MEDIA_SYNC || job.type === SyncJobType.DAILY_ACCOUNT_INSIGHT_SYNC || job.type === SyncJobType.RECENT_POST_INSIGHT_REFRESH,
+  );
 
   let warnings: string[] = [];
   if (allComplete) {
     status = "COMPLETE";
     warnings = [READY_FOR_APPROVAL_MESSAGE];
-  } else if (hasAnyActiveSyncJob) {
+  } else if (finalized && hasMatchingReportCloseout) {
     status = "SYNCING";
-    warnings = [finalized ? CLOSING_MONTH_MESSAGE : PREPARING_MONTH_MESSAGE];
+    warnings = [CLOSING_MONTH_MESSAGE];
+  } else if (hasRelevantHistoricalBackfill || hasOpenPeriodSync) {
+    status = "SYNCING";
+    warnings = [PREPARING_MONTH_MESSAGE];
   } else {
     // Incomplete and nothing is actively running. Tell the employee the data is incomplete and will
     // be auto-completed, but keep all technical diagnostics in the server logs only.
@@ -360,6 +393,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     historicalBackfillStatus: connection.historicalBackfillStatus,
     collaborativeBackfillStatus: connection.collaborativeBackfillStatus,
     activeJobs: activeJobs.map((job) => ({ type: job.type, status: job.status })),
+    relevantWork: { hasMatchingReportCloseout, hasRelevantHistoricalBackfill, hasOpenPeriodSync },
     lastErrors: {
       historical: connection.historicalBackfillLastError,
       collaborative: connection.collaborativeBackfillLastError,
@@ -374,13 +408,14 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     reachStatus,
     followerStatus,
     insightsComplete,
+    unsupportedPostMetrics: unsupportedMetrics,
     missingRangesCount: missingRanges.length,
   });
 
   return {
     status,
     mediaCoverage: { from: mediaFrom, to: mediaTo, complete: mediaComplete },
-    postInsightCoverage: { availableMetrics, missingMetrics },
+    postInsightCoverage: { availableMetrics, unsupportedMetrics, missingMetrics },
     reachCoverage: { from: reachDaily.from, to: reachDaily.to, complete: reachDaily.complete },
     reach28DayCoverage: { from: reach28Day.from, to: reach28Day.to, complete: reach28Day.complete },
     followerCountCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },

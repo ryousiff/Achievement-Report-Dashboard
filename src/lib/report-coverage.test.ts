@@ -54,6 +54,41 @@ function baseConnection(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const availablePostMetrics = {
+  reach: "AVAILABLE",
+  views: "AVAILABLE",
+  total_views: "AVAILABLE",
+  total_interactions: "AVAILABLE",
+  likes: "AVAILABLE",
+  comments: "AVAILABLE",
+  saved: "AVAILABLE",
+  shares: "AVAILABLE",
+  follows: "AVAILABLE",
+};
+
+function setIncompleteJulyMocks(options: { dailyReachAvailable?: boolean; days28Available?: boolean } = {}) {
+  mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
+  mockDb.socialPost.aggregate
+    .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") }, _count: 2 })
+    .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") } });
+  mockDb.socialPost.findMany.mockResolvedValue([
+    { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
+  ]);
+  mockDb.socialInsightSnapshot.findMany
+    .mockResolvedValueOnce(options.dailyReachAvailable === false ? [] : Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))
+    .mockResolvedValueOnce(options.days28Available ? [{ periodEnd: new Date("2026-07-31T07:00:00.000Z") }] : [])
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce(options.days28Available ? [{ value: 1234 }] : []);
+  mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+}
+
+function setReadyJulyWithPosts(posts: Array<{ metrics?: Record<string, unknown>; metricAvailabilityState: Record<string, string> }>) {
+  setIncompleteJulyMocks();
+  mockDb.syncJob.findMany.mockResolvedValue([]);
+  mockDb.socialPost.findMany.mockResolvedValue(posts.map((post) => ({ metrics: post.metrics ?? {}, metricAvailabilityState: post.metricAvailabilityState })));
+  mockPeriodAccountReachForRange.mockResolvedValue({ value: 312688, accuracy: "ESTIMATED", method: "OVERLAPPING_WINDOWS_ESTIMATE" });
+}
+
 describe("getCoverage", () => {
   it("returns UNAVAILABLE with a friendly message when no connection exists", async () => {
     resetMocks();
@@ -99,32 +134,177 @@ describe("getCoverage", () => {
     expect(coverage.postInsightCoverage.missingMetrics).toEqual([]);
   });
 
-  it("returns SYNCING with the closing message when a real MONTH_END_CLOSEOUT job is queued for a finalized month", async () => {
+  it("treats a persisted 31-day estimated Reach as complete without changing its status", async () => {
     resetMocks();
-    mockDb.socialConnection.findUnique.mockResolvedValue(
-      baseConnection({
-        historicalBackfillStatus: BackfillStatus.COMPLETED,
-        collaborativeBackfillStatus: BackfillStatus.COMPLETED,
-      }),
-    );
-    mockDb.syncJob.findMany.mockResolvedValue([{ type: SyncJobType.MONTH_END_CLOSEOUT, status: SyncJobStatus.QUEUED }]);
-    mockDb.socialPost.aggregate
-      .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") }, _count: 2 })
-      .mockResolvedValueOnce({ _min: { publishedAt: new Date("2026-07-01T00:00:00.000Z") }, _max: { publishedAt: new Date("2026-07-31T00:00:00.000Z") } });
-    mockDb.socialPost.findMany.mockResolvedValue([
-      { metrics: { reach: 100, views: 200, total_views: 250, total_interactions: 50, likes: 30, comments: 10, saved: 5, shares: 2, follows: 1 }, metricAvailabilityState: { reach: "AVAILABLE", views: "AVAILABLE", total_views: "AVAILABLE", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" } },
-    ]);
-    mockDb.socialInsightSnapshot.findMany
-      .mockResolvedValueOnce(Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(Array.from({ length: 31 }, (_, i) => ({ periodEnd: new Date(`2026-07-${String(i + 1).padStart(2, "0")}T07:00:00.000Z`) })))
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([]);
-    mockPeriodAccountReachForRange.mockResolvedValue({ value: null, accuracy: null, method: "UNAVAILABLE" });
+    setIncompleteJulyMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockPeriodAccountReachForRange.mockResolvedValue({
+      value: 312688,
+      accuracy: "ESTIMATED",
+      method: "OVERLAPPING_WINDOWS_ESTIMATE",
+      tooltip: "قيمة تقديرية محفوظة لفترة 31 يوماً.",
+    });
 
     const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.reachStatus).toBe("PERIOD_ESTIMATED");
+    expect(coverage.status).toBe("COMPLETE");
+    expect(coverage.warnings).toEqual([READY_FOR_APPROVAL_MESSAGE]);
+  });
+
+  it("keeps exact period Reach complete", async () => {
+    resetMocks();
+    setIncompleteJulyMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockPeriodAccountReachForRange.mockResolvedValue({ value: 312688, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.reachStatus).toBe("PERIOD_AVAILABLE");
+    expect(coverage.status).toBe("COMPLETE");
+  });
+
+  it("does not complete a report when period Reach is unavailable", async () => {
+    resetMocks();
+    setIncompleteJulyMocks({ dailyReachAvailable: false });
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.reachStatus).toBe("PERIOD_UNAVAILABLE");
+    expect(coverage.status).toBe("PARTIAL");
+  });
+
+  it("does not treat a 28-day Reach window as complete period Reach", async () => {
+    resetMocks();
+    setIncompleteJulyMocks({ days28Available: true });
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.reachStatus).toBe("DAYS_28_AVAILABLE");
+    expect(coverage.status).toBe("PARTIAL");
+  });
+
+  it("does not block collaborative posts whose core metrics are NOT_SUPPORTED", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([{
+      metricAvailabilityState: {
+        ...availablePostMetrics,
+        views: "NOT_SUPPORTED",
+        total_views: "NOT_SUPPORTED",
+        total_interactions: "NOT_SUPPORTED",
+        follows: "NOT_SUPPORTED",
+      },
+    }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("COMPLETE");
+    expect(coverage.postInsightCoverage.missingMetrics).toEqual([]);
+    expect(coverage.postInsightCoverage.unsupportedMetrics).toEqual(expect.arrayContaining(["views", "total_views", "total_interactions", "follows"]));
+  });
+
+  it("does not block an owned video whose follows metric is NOT_SUPPORTED", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([{ metricAvailabilityState: { ...availablePostMetrics, follows: "NOT_SUPPORTED" } }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("COMPLETE");
+    expect(coverage.postInsightCoverage.missingMetrics).not.toContain("follows");
+    expect(coverage.postInsightCoverage.unsupportedMetrics).toContain("follows");
+  });
+
+  it.each(["FAILED", "PENDING"])("keeps %s post metrics blocking readiness", async (state) => {
+    resetMocks();
+    setReadyJulyWithPosts([{ metricAvailabilityState: { ...availablePostMetrics, views: state } }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("PARTIAL");
+    expect(coverage.postInsightCoverage.missingMetrics).toContain("views");
+  });
+
+  it("completes mixed AVAILABLE and NOT_SUPPORTED post metrics", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([
+      { metricAvailabilityState: { ...availablePostMetrics } },
+      { metricAvailabilityState: { ...availablePostMetrics, views: "NOT_SUPPORTED", total_interactions: "NOT_SUPPORTED", follows: "NOT_SUPPORTED" } },
+    ]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("COMPLETE");
+    expect(coverage.postInsightCoverage.availableMetrics).toContain("views");
+    expect(coverage.postInsightCoverage.unsupportedMetrics).toContain("views");
+    expect(coverage.postInsightCoverage.missingMetrics).toEqual([]);
+  });
+
+  it("keeps mixed NOT_SUPPORTED metrics with one FAILED metric incomplete", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([
+      { metricAvailabilityState: { ...availablePostMetrics, views: "NOT_SUPPORTED", total_interactions: "NOT_SUPPORTED", follows: "NOT_SUPPORTED" } },
+      { metricAvailabilityState: { ...availablePostMetrics, views: "FAILED" } },
+    ]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("PARTIAL");
+    expect(coverage.postInsightCoverage.unsupportedMetrics).toContain("views");
+    expect(coverage.postInsightCoverage.missingMetrics).toContain("views");
+  });
+
+  it("does not mark July as closing for a generic MONTH_END_CLOSEOUT that may target an older month", async () => {
+    resetMocks();
+    setIncompleteJulyMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([{ type: SyncJobType.MONTH_END_CLOSEOUT, status: SyncJobStatus.QUEUED, payload: null }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("PARTIAL");
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
+  });
+
+  it("marks July as closing only for an overlapping REPORT_PERIOD_CLOSEOUT payload", async () => {
+    resetMocks();
+    setIncompleteJulyMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([{
+      type: SyncJobType.REPORT_PERIOD_CLOSEOUT,
+      status: SyncJobStatus.QUEUED,
+      payload: { periodStart: "2026-07-01T00:00:00.000Z", periodEnd: "2026-07-31T23:59:59.999Z" },
+    }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
     expect(coverage.status).toBe("SYNCING");
     expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+  });
+
+  it("ignores a REPORT_PERIOD_CLOSEOUT payload that does not overlap July", async () => {
+    resetMocks();
+    setIncompleteJulyMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([{
+      type: SyncJobType.REPORT_PERIOD_CLOSEOUT,
+      status: SyncJobStatus.RUNNING,
+      payload: { periodStart: "2026-06-01T00:00:00.000Z", periodEnd: "2026-06-30T23:59:59.999Z" },
+    }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("PARTIAL");
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
+  });
+
+  it("ignores an unrelated incremental job for an old finalized report", async () => {
+    resetMocks();
+    setIncompleteJulyMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([{ type: SyncJobType.INCREMENTAL_MEDIA_SYNC, status: SyncJobStatus.RUNNING, payload: null }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("PARTIAL");
+    expect(coverage.warnings).toEqual([STALLED_INCOMPLETE_MESSAGE]);
   });
 
   it("returns SYNCING and a friendly message when a real historical backfill job is queued/running", async () => {
@@ -147,7 +327,7 @@ describe("getCoverage", () => {
 
     const coverage = await getCoverage("conn-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-07T23:59:59.999Z"));
     expect(coverage.status).toBe("SYNCING");
-    expect(coverage.warnings).toEqual([CLOSING_MONTH_MESSAGE]);
+    expect(coverage.warnings).toEqual([PREPARING_MONTH_MESSAGE]);
   });
 
   it("does not treat PARTIAL without an active job as SYNCING", async () => {

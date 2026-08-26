@@ -1,4 +1,4 @@
-import { BlockType, Prisma, SyncJobStatus } from "@prisma/client";
+import { BlockType, Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logEvent } from "@/lib/observability";
 import {
@@ -6,12 +6,8 @@ import {
   type ReportBlock,
   type ReportRefreshKey,
 } from "@/lib/report-data";
-import {
-  buildStandardReportBlocksFromStoredPeriodSnapshots,
-  storedAccountFollowersForRange,
-  storedAccountReachForRange,
-  storedAccountViewsForRange,
-} from "@/lib/stored-period-metrics";
+import { buildStandardReportBlocksFromStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
+import { getCoverage } from "@/lib/report-coverage";
 
 type RefreshOptions = {
   /** When true (default), the refresh only reads data already in the database and does not
@@ -45,71 +41,6 @@ const AUTHORITATIVE_PERIOD_KPI_IDS = new Set([
 function isSafeAuthoritativeFreshKpi(id: string, kpi: Record<string, unknown>) {
   if (!AUTHORITATIVE_PERIOD_KPI_IDS.has(id)) return true;
   return kpi.available === true;
-}
-
-function daysBetweenInclusive(from: Date, to: Date) {
-  const start = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
-  const end = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
-  return Math.max(1, Math.floor((end - start) / (24 * 60 * 60 * 1000)) + 1);
-}
-
-/** Load the Instagram connection for a client. */
-async function fetchConnection(clientId: string) {
-  return db.socialConnection.findFirst({
-    where: { clientId, platform: "INSTAGRAM" },
-    select: { id: true, lastSuccessfulSyncAt: true },
-  });
-}
-
-/** Determine DB-only report coverage using the same authoritative period snapshots that refresh/export use. */
-async function computeCoverageSummary(clientId: string, periodStart: Date, periodEnd: Date) {
-  const connection = await fetchConnection(clientId);
-  const warnings: string[] = [];
-  let status: "COMPLETE" | "PARTIAL" | "SYNCING" | "UNAVAILABLE" = "COMPLETE";
-
-  if (connection) {
-    const activeJobs = await db.syncJob.findMany({
-      where: { connectionId: connection.id, status: { in: [SyncJobStatus.QUEUED, SyncJobStatus.RUNNING] } },
-      select: { id: true, type: true },
-    });
-    if (activeJobs.length > 0) {
-      status = "SYNCING";
-      warnings.push("جارٍ تحميل البيانات. أعدي فتح التقرير أو تحديث البيانات لاحقاً.");
-    }
-  }
-
-  const postsCount = await db.socialPost.count({
-    where: { connection: { clientId }, publishedAt: { gte: periodStart, lte: periodEnd } },
-  });
-  if (postsCount === 0 && status === "COMPLETE") {
-    status = "UNAVAILABLE";
-    warnings.push("لا توجد منشورات متزامنة لهذه الفترة.");
-  }
-
-  if (connection) {
-    const [reach, views, followers] = await Promise.all([
-      storedAccountReachForRange(clientId, periodStart, periodEnd),
-      storedAccountViewsForRange(clientId, periodStart, periodEnd),
-      storedAccountFollowersForRange(clientId, periodStart, periodEnd),
-    ]);
-    const days = daysBetweenInclusive(periodStart, periodEnd);
-
-    // Reach is intentionally non-additive beyond 31 days, so its absence does not make a quarter/year partial.
-    if (days <= 31 && reach.value === null) {
-      if (status === "COMPLETE") status = "PARTIAL";
-      warnings.push("لا تتوفر قيمة الوصول المعتمدة لهذه الفترة بعد.");
-    }
-    if (views.value === null) {
-      if (status === "COMPLETE") status = "PARTIAL";
-      warnings.push("لا تتوفر قيمة إجمالي المشاهدات المعتمدة لكل أشهر الفترة بعد.");
-    }
-    if (followers.gained === null || followers.lost === null) {
-      if (status === "COMPLETE") status = "PARTIAL";
-      warnings.push("لا تتوفر قيم حركة المتابعين المعتمدة لكل أشهر الفترة بعد.");
-    }
-  }
-
-  return { status, warnings };
 }
 
 function isDataDrivenRefreshKey(key: unknown): key is (typeof REPORT_DATA_DRIVEN_REFRESH_KEYS)[number] {
@@ -269,7 +200,11 @@ export async function refreshReportData(reportId: string, options: RefreshOption
     }
   }
 
-  const coverage = await computeCoverageSummary(report.clientId, report.periodStart, report.periodEnd);
+  const connection = await db.socialConnection.findFirst({
+    where: { clientId: report.clientId, platform: "INSTAGRAM" },
+    select: { id: true },
+  });
+  const coverage = await getCoverage(connection?.id ?? "", report.periodStart, report.periodEnd, { storedOnly: true });
 
   await db.report.update({
     where: { id: reportId },

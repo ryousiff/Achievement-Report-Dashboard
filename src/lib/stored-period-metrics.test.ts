@@ -52,6 +52,7 @@ describe("stored authoritative period metrics", () => {
     ]);
 
     expect(reach).toMatchObject({ value: 312688, accuracy: "ESTIMATED", method: "OVERLAPPING_WINDOWS_ESTIMATE" });
+    expect(reach.tooltip).toContain("قيمة تقديرية محفوظة");
     expect(views).toMatchObject({ value: 818485, accuracy: "DERIVED", method: "OVERLAPPING_WINDOWS_COMPOSITION" });
     expect(followers).toMatchObject({ gained: 512, lost: 374, net: 138, accuracy: "DERIVED", method: "OVERLAPPING_WINDOWS_COMPOSITION" });
   });

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BlockType, InsightPeriodType, MediaSource } from "@prisma/client";
 import { refreshReportData } from "@/lib/report-refresh";
 
+const mockGetCoverage = vi.hoisted(() => vi.fn());
+
 const mockDb = vi.hoisted(() => ({
   report: {
     findUnique: vi.fn(),
@@ -20,6 +22,7 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/db", () => ({ db: mockDb }));
+vi.mock("@/lib/report-coverage", () => ({ getCoverage: mockGetCoverage }));
 
 function createReport(blocks: Array<{ type: BlockType; position: number; content: Record<string, unknown> }>) {
   return {
@@ -54,6 +57,20 @@ function defaultPost() {
   };
 }
 
+function setMinimalRefreshMocks(report = createReport([
+  { type: BlockType.KPI, position: 0, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [] } },
+])) {
+  mockDb.report.findUnique.mockResolvedValue(report);
+  mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+  mockDb.socialPost.findMany.mockResolvedValue([defaultPost()]);
+  mockDb.socialPost.count.mockResolvedValue(1);
+  mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+  mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+  mockDb.socialInsightSnapshot.count.mockResolvedValue(1);
+  mockDb.report.update.mockResolvedValue({});
+  return report;
+}
+
 beforeEach(() => {
   mockDb.report.findUnique.mockReset();
   mockDb.report.update.mockReset();
@@ -67,6 +84,8 @@ beforeEach(() => {
   mockDb.socialInsightSnapshot.upsert.mockReset();
   mockDb.socialConnection.findFirst.mockReset();
   mockDb.syncJob.findMany.mockReset();
+  mockGetCoverage.mockReset();
+  mockGetCoverage.mockResolvedValue({ status: "COMPLETE", warnings: ["البيانات جاهزة للاعتماد"] });
 });
 
 describe("refreshReportData", () => {
@@ -118,6 +137,7 @@ describe("refreshReportData", () => {
     const result = await refreshReportData("report-1");
 
     expect(result.coverageStatus).toBe("COMPLETE");
+    expect(mockGetCoverage).toHaveBeenCalledWith("conn-1", report.periodStart, report.periodEnd, { storedOnly: true });
     expect(mockDb.report.update).toHaveBeenCalled();
     const updateData = mockDb.report.update.mock.calls[0][0].data as { blocks: { create: Array<{ position: number; type: BlockType; content: Record<string, unknown> }> } };
     const createdBlocks = updateData.blocks.create;
@@ -135,6 +155,29 @@ describe("refreshReportData", () => {
 
     const interactionsKpis = createdBlocks[2].content.kpis as Array<{ id: string; value: string }>;
     expect(interactionsKpis.find((k) => k.id === "total_interactions")?.value).toBe("50");
+  });
+
+  it("keeps complete authoritative coverage despite an unrelated generic month closeout", async () => {
+    setMinimalRefreshMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([{ id: "job-1", type: "MONTH_END_CLOSEOUT" }]);
+
+    const result = await refreshReportData("report-1");
+
+    expect(result.coverageStatus).toBe("COMPLETE");
+    expect(mockDb.syncJob.findMany).not.toHaveBeenCalled();
+    expect(mockDb.report.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ coverageStatus: "COMPLETE" }),
+    }));
+  });
+
+  it("keeps complete authoritative coverage despite an unrelated incremental job", async () => {
+    setMinimalRefreshMocks();
+    mockDb.syncJob.findMany.mockResolvedValue([{ id: "job-1", type: "INCREMENTAL_MEDIA_SYNC" }]);
+
+    const result = await refreshReportData("report-1");
+
+    expect(result.coverageStatus).toBe("COMPLETE");
+    expect(mockDb.syncJob.findMany).not.toHaveBeenCalled();
   });
 
   it("preserves existing authoritative KPIs when a stored period snapshot is unavailable", async () => {
@@ -172,14 +215,15 @@ describe("refreshReportData", () => {
     expect(overviewKpis.find((k) => k.id === "total-views")?.value).toBe("818,485");
   });
 
-  it("marks coverage as SYNCING when a sync job is active", async () => {
+  it("stores SYNCING when authoritative coverage reports a matching period closeout", async () => {
     const report = createReport([
       { type: BlockType.KPI, position: 0, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [] } },
     ]);
 
     mockDb.report.findUnique.mockResolvedValue(report);
     mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
-    mockDb.syncJob.findMany.mockResolvedValue([{ id: "job-1", type: "DAILY_ACCOUNT_INSIGHT_SYNC" }]);
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockGetCoverage.mockResolvedValue({ status: "SYNCING", warnings: ["جاري إغلاق بيانات الشهر"] });
     mockDb.socialPost.findMany.mockResolvedValue([]);
     mockDb.socialPost.count.mockResolvedValue(0);
     mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
@@ -189,7 +233,25 @@ describe("refreshReportData", () => {
     const result = await refreshReportData("report-1");
 
     expect(result.coverageStatus).toBe("SYNCING");
-    expect(result.coverageWarnings).toContain("جارٍ تحميل البيانات. أعدي فتح التقرير أو تحديث البيانات لاحقاً.");
+    expect(result.coverageWarnings).toEqual(["جاري إغلاق بيانات الشهر"]);
+    expect(mockDb.report.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ coverageStatus: "SYNCING", coverageWarnings: ["جاري إغلاق بيانات الشهر"] }),
+    }));
+  });
+
+  it("stores PARTIAL when authoritative coverage is incomplete with no relevant work", async () => {
+    setMinimalRefreshMocks();
+    mockGetCoverage.mockResolvedValue({ status: "PARTIAL", warnings: ["بيانات الشهر غير مكتملة، ويجري تجهيز استكمالها تلقائياً."] });
+
+    const result = await refreshReportData("report-1");
+
+    expect(result.coverageStatus).toBe("PARTIAL");
+    expect(mockDb.report.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        coverageStatus: "PARTIAL",
+        coverageWarnings: ["بيانات الشهر غير مكتملة، ويجري تجهيز استكمالها تلقائياً."],
+      }),
+    }));
   });
 
   it("does not call Meta Graph API and uses stored snapshots only", async () => {
