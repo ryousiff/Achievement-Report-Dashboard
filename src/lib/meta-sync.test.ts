@@ -83,7 +83,7 @@ vi.mock("@/lib/media-storage", () => ({
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch as unknown as typeof fetch;
 
-import { runIncrementalSync, runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, MetaSyncError } from "@/lib/meta-sync";
+import { runIncrementalSync, runHistoricalBackfillChunk, runHistoricalCollaborativeBackfillChunk, postInsights, MetaSyncError } from "@/lib/meta-sync";
 import { persistMediaThumbnail } from "@/lib/media-storage";
 
 const defaultConnection = {
@@ -166,7 +166,7 @@ function paginatedPage(items: unknown[], nextCursor?: string) {
   return { data: items, paging: nextCursor ? { cursors: { after: nextCursor } } : {} };
 }
 
-const metricValues: Record<string, number> = { views: 100, total_views: 100, reach: 50, saved: 5, shares: 2, total_interactions: 117, follows: 1, facebook_views: 0 };
+const metricValues: Record<string, number> = { views: 100, total_views: 100, reach: 50, saved: 5, shares: 2, total_interactions: 117, follows: 1 };
 
 function singleInsight(metric: string, value: number) {
   return { data: [{ name: metric, values: [{ value }] }] };
@@ -207,6 +207,35 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("postInsights", () => {
+  it("requests only standard Instagram metrics and never facebook_views", async () => {
+    setFetch(defaultMatches());
+
+    const result = await postInsights("post-1", "token");
+
+    const insightUrls = mockFetch.mock.calls.map(([input]) => input.toString()).filter((url) => url.includes("/insights"));
+    expect(insightUrls).toHaveLength(2);
+    expect(insightUrls.some((url) => new URL(url).searchParams.get("metric")?.includes("facebook_views"))).toBe(false);
+    expect(result.metrics).toMatchObject({ views: 100, total_views: 100, reach: 50, saved: 5, shares: 2, total_interactions: 117, follows: 1 });
+    expect(result.metrics).not.toHaveProperty("facebook_views");
+    expect(result.availability).not.toHaveProperty("facebook_views");
+  });
+
+  it("still propagates Meta rate limits from standard Instagram insight batches", async () => {
+    setFetch([
+      {
+        test: (url: string) => url.includes("/insights") && new URL(url).searchParams.get("metric") === "follows",
+        response: () => ({ error: { code: 4, message: "Application request limit reached" } }),
+        status: () => 429,
+      },
+      { test: (url: string) => url.includes("/insights"), response: (url: string) => insightFor(url) },
+    ]);
+
+    await expect(postInsights("post-1", "token")).rejects.toMatchObject({ code: "rate_limited" });
+    expect(mockFetch.mock.calls).toHaveLength(2);
+  });
+});
+
 describe("runIncrementalSync", () => {
   it("stores owned media and skips empty collaborative media", async () => {
     setupConnection();
@@ -226,6 +255,9 @@ describe("runIncrementalSync", () => {
     expect(post.metrics.total_views).toBe(100);
     expect(post.metrics.follows).toBe(1);
     expect(post.metricAvailabilityState.follows).toBe("AVAILABLE");
+    expect(post.metrics).not.toHaveProperty("facebook_views");
+    expect(post.metricAvailability).not.toHaveProperty("facebook_views");
+    expect(post.metricAvailabilityState).not.toHaveProperty("facebook_views");
   });
 
   it("stores collaborative media with owner and collaborator metadata", async () => {

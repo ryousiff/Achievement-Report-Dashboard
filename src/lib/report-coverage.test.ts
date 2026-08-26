@@ -205,6 +205,20 @@ describe("getCoverage", () => {
     expect(coverage.postInsightCoverage.unsupportedMetrics).toEqual(expect.arrayContaining(["views", "total_views", "total_interactions", "follows"]));
   });
 
+  it("ignores legacy facebook_views failures in report readiness", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([{
+      metrics: { facebook_views: 0 },
+      metricAvailabilityState: { ...availablePostMetrics, facebook_views: "FAILED" },
+    }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("COMPLETE");
+    expect(coverage.postInsightCoverage.missingMetrics).not.toContain("facebook_views");
+    expect(coverage.postInsightCoverage.unsupportedMetrics).not.toContain("facebook_views");
+  });
+
   it("does not block an owned video whose follows metric is NOT_SUPPORTED", async () => {
     resetMocks();
     setReadyJulyWithPosts([{ metricAvailabilityState: { ...availablePostMetrics, follows: "NOT_SUPPORTED" } }]);
