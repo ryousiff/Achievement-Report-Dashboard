@@ -13,6 +13,7 @@ import {
   type CompletedMonthPeriod,
 } from "@/lib/meta-sync-insights";
 import { logEvent, logError } from "@/lib/observability";
+import { fetchAndStoreDailyFollowerMovement } from "@/lib/report-data";
 
 const CLOSEOUT_POST_REFRESH_BATCH_SIZE = 15;
 const CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES = 31;
@@ -67,7 +68,7 @@ async function findFirstIncompleteCompletedMonthInRange(
   });
   for (const period of candidates) {
     if (!isMonthFinalized(period.end, now)) continue;
-    const readiness = await monthReadinessMetrics(connectionId, period, now);
+    const readiness = await monthReadinessMetrics(connectionId, period);
     if (!readiness.ready) return { period, readiness };
   }
   return null;
@@ -81,7 +82,7 @@ export async function isReportPeriodCloseoutDue(connectionId: string, periodStar
   return (await findFirstIncompleteCompletedMonthInRange(connectionId, now, { minStart: periodStart, maxEnd: periodEnd })) !== null;
 }
 
-async function monthReadinessMetrics(connectionId: string, period: CompletedMonthPeriod, now: Date) {
+async function monthReadinessMetrics(connectionId: string, period: CompletedMonthPeriod) {
   const periodStart = startOfDayUTC(period.start);
   const periodEnd = endOfDayUTC(period.end);
 
@@ -98,8 +99,7 @@ async function monthReadinessMetrics(connectionId: string, period: CompletedMont
   const totalMetricsReady = totals.length === 4;
 
   const expectedDays = daysBetweenInclusive(periodStart, periodEnd);
-  const staleBefore = new Date(now.valueOf() - 24 * 60 * 60 * 1000);
-  const [dailyReachDays, dailyFollowerDays, stalePosts] = await Promise.all([
+  const [dailyReachDays, dailyFollowerRows, postsMissingFinalizedSnapshots] = await Promise.all([
     db.socialInsightSnapshot.count({
       where: {
         connectionId,
@@ -108,29 +108,43 @@ async function monthReadinessMetrics(connectionId: string, period: CompletedMont
         periodEnd: { gte: periodStart, lte: periodEnd },
       },
     }),
-    db.socialInsightSnapshot.count({
+    db.socialInsightSnapshot.findMany({
       where: {
         connectionId,
-        metric: "follower_count",
+        metric: { in: ["followers_gained", "followers_lost"] },
         periodType: InsightPeriodType.DAY,
-        periodEnd: { gte: periodStart, lte: periodEnd },
+        periodStart: { gte: periodStart, lte: periodEnd },
       },
+      select: { metric: true, periodStart: true },
     }),
     db.socialPost.count({
       where: {
         connectionId,
         publishedAt: { gte: periodStart, lte: periodEnd },
-        OR: [{ lastInsightRefreshAt: null }, { lastInsightRefreshAt: { lt: staleBefore } }],
+        metricSnapshots: {
+          none: { periodStart, periodEnd, finalizedAt: { not: null } },
+        },
       },
     }),
   ]);
 
+  const followerMetricsByDay = new Map<string, Set<string>>();
+  for (const row of dailyFollowerRows) {
+    const key = startOfDayUTC(row.periodStart).toISOString().slice(0, 10);
+    const metrics = followerMetricsByDay.get(key) ?? new Set<string>();
+    metrics.add(row.metric);
+    followerMetricsByDay.set(key, metrics);
+  }
+  const dailyFollowerDays = [...followerMetricsByDay.values()].filter(
+    (metrics) => metrics.has("followers_gained") && metrics.has("followers_lost"),
+  ).length;
+
   return {
-    ready: totalMetricsReady && dailyReachDays >= expectedDays && dailyFollowerDays >= expectedDays && stalePosts === 0,
+    ready: totalMetricsReady && dailyReachDays >= expectedDays && dailyFollowerDays >= expectedDays && postsMissingFinalizedSnapshots === 0,
     totalMetricsReady,
     dailyReachReady: dailyReachDays >= expectedDays,
     dailyFollowersReady: dailyFollowerDays >= expectedDays,
-    postsReady: stalePosts === 0,
+    postsReady: postsMissingFinalizedSnapshots === 0,
   };
 }
 
@@ -169,17 +183,23 @@ async function fetchMissingDailySnapshots(
     db.socialInsightSnapshot.findMany({
       where: {
         connectionId,
-        metric: "follower_count",
+        metric: { in: ["followers_gained", "followers_lost"] },
         periodType: InsightPeriodType.DAY,
-        periodEnd: { gte: periodStart, lte: periodEnd },
+        periodStart: { gte: periodStart, lte: periodEnd },
       },
-      select: { periodEnd: true },
+      select: { metric: true, periodStart: true },
     }),
   ]);
 
   const toDayKey = (date: Date) => startOfDayUTC(date).toISOString().slice(0, 10);
   const reachDays = new Set(reachRows.map((row) => toDayKey(row.periodEnd)));
-  const followerDays = new Set(followerRows.map((row) => toDayKey(row.periodEnd)));
+  const followerMetricsByDay = new Map<string, Set<string>>();
+  for (const row of followerRows) {
+    const key = toDayKey(row.periodStart);
+    const metrics = followerMetricsByDay.get(key) ?? new Set<string>();
+    metrics.add(row.metric);
+    followerMetricsByDay.set(key, metrics);
+  }
 
   const rangeEnd = periodEnd < now ? periodEnd : now;
   const expectedDays = daysBetweenInclusive(periodStart, periodEnd);
@@ -190,7 +210,8 @@ async function fetchMissingDailySnapshots(
   while (current <= end) {
     const day = new Date(current);
     if (!reachDays.has(toDayKey(day))) missingReachDays.push(day);
-    if (!followerDays.has(toDayKey(day))) missingFollowerDays.push(day);
+    const followerMetrics = followerMetricsByDay.get(toDayKey(day));
+    if (!followerMetrics?.has("followers_gained") || !followerMetrics.has("followers_lost")) missingFollowerDays.push(day);
     current.setUTCDate(current.getUTCDate() + 1);
   }
 
@@ -211,10 +232,8 @@ async function fetchMissingDailySnapshots(
   }
 
   for (const day of missingFollowerDays.slice(0, Math.max(0, CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES - fetches))) {
-    const since = day;
-    const until = new Date(since.valueOf() + 24 * 60 * 60 * 1000);
-    await fetchAndStoreAccountInsight(connectionId, accountId, token, "follower_count", InsightPeriodType.DAY, since, until, lookbackStart);
-    fetchedAny = true;
+    const fetched = await fetchAndStoreDailyFollowerMovement(connectionId, accountId, token, day, false);
+    if (fetched) fetchedAny = true;
     fetches += 1;
   }
 
@@ -229,13 +248,14 @@ async function refreshPostsInMonth(
 ) {
   const periodStart = startOfDayUTC(period.start);
   const periodEnd = endOfDayUTC(period.end);
-  const staleBefore = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   const posts = await db.socialPost.findMany({
     where: {
       connectionId,
       publishedAt: { gte: periodStart, lte: periodEnd },
-      OR: [{ lastInsightRefreshAt: null }, { lastInsightRefreshAt: { lt: staleBefore } }],
+      metricSnapshots: {
+        none: { periodStart, periodEnd, finalizedAt: { not: null } },
+      },
     },
     orderBy: { publishedAt: "desc" },
     take: CLOSEOUT_POST_REFRESH_BATCH_SIZE,
@@ -293,7 +313,7 @@ async function runCloseoutForPeriod(
   const targetMonthKey = `${target.start.getUTCFullYear()}-${String(target.start.getUTCMonth() + 1).padStart(2, "0")}`;
   logEvent(`${context.logLabel}.started`, { connectionId: connection.id, targetMonth: targetMonthKey, periodTag: context.periodTag });
 
-  const readiness = initialReadiness ?? (await monthReadinessMetrics(connection.id, target, now));
+  const readiness = initialReadiness ?? (await monthReadinessMetrics(connection.id, target));
   let workDone = false;
 
   if (!readiness.totalMetricsReady) {
@@ -309,7 +329,7 @@ async function runCloseoutForPeriod(
   const postRefresh = await refreshPostsInMonth(connection.id, connection.externalAccountId, token, target);
   if (postRefresh.refreshed > 0) workDone = true;
 
-  const finalReadiness = await monthReadinessMetrics(connection.id, target, now);
+  const finalReadiness = await monthReadinessMetrics(connection.id, target);
   const completed = finalReadiness.ready && !postRefresh.hasMore;
 
   logEvent(`${context.logLabel}.finished`, {

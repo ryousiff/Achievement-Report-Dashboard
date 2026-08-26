@@ -611,11 +611,12 @@ export type DailyFollowerMovement = {
   complete: boolean;
 };
 
-async function fetchAndStoreDailyFollowerMovement(
+export async function fetchAndStoreDailyFollowerMovement(
   connectionId: string,
   externalAccountId: string,
   token: string,
   day: Date,
+  suppressErrors = true,
 ): Promise<{ gained: number; lost: number } | null> {
   const since = startOfDayUTC(day);
   const until = addDaysUTC(day, 1);
@@ -669,6 +670,7 @@ async function fetchAndStoreDailyFollowerMovement(
     });
     return { gained: parsed.gained, lost: parsed.lost };
   } catch (error) {
+    if (!suppressErrors) throw error;
     return null;
   }
 }

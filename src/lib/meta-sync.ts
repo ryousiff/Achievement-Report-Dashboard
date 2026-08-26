@@ -2,6 +2,7 @@ import { BackfillStatus, MediaSource, Platform, Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { decryptToken } from "@/lib/token-encryption";
 import { ConnectorError } from "@/lib/connectors/types";
+import { isUnsupportedFollowerCountPeriodError } from "@/lib/meta-error-classification";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { mediaThumbnailKey, persistMediaThumbnail } from "@/lib/media-storage";
@@ -75,7 +76,7 @@ function adjustInterval(usage: { call_count?: number } | null, rateLimited = fal
 export class MetaSyncError extends ConnectorError {
   constructor(
     message: string,
-    readonly metaCode: "rate_limited" | "request_failed",
+    readonly metaCode: "rate_limited" | "request_failed" | "not_supported_for_period",
     retryAfterMs?: number,
     readonly permanent = false,
     readonly metaErrorCode?: number,
@@ -102,6 +103,8 @@ export async function graph<T>(path: string, token: string, parameters: Record<s
 
       const body = await response.json().catch(() => ({})) as MetaErrorResponse;
       const code = body.error?.code;
+      const message = body.error?.message ?? "Meta sync request failed.";
+      const unsupportedFollowerPeriod = isUnsupportedFollowerCountPeriodError(message);
       const rateLimited = response.status === 429 || code === 4 || code === 17 || code === 32 || code === 613;
       // Permission errors (10, 200s) and "does not exist"/deleted-object errors (100) are not going to succeed on
       // retry — classify them so callers can stop retrying instead of burning through attempts pointlessly.
@@ -118,10 +121,10 @@ export async function graph<T>(path: string, token: string, parameters: Record<s
       }
       adjustInterval(usage, rateLimited);
       throw new MetaSyncError(
-        body.error?.message ?? "Meta sync request failed.",
-        rateLimited ? "rate_limited" : "request_failed",
+        message,
+        unsupportedFollowerPeriod ? "not_supported_for_period" : rateLimited ? "rate_limited" : "request_failed",
         retryAfterMs,
-        permanent,
+        unsupportedFollowerPeriod || permanent,
         code,
       );
     } catch (error) {

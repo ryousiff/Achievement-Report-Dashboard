@@ -1,6 +1,6 @@
 import type { Platform } from "@prisma/client";
 
-export type ConnectorErrorCode = "not_configured" | "not_implemented" | "rate_limited" | "request_failed" | "auth_failed" | "state_invalid" | "callback_failed";
+export type ConnectorErrorCode = "not_configured" | "not_implemented" | "rate_limited" | "request_failed" | "not_supported_for_period" | "auth_failed" | "state_invalid" | "callback_failed";
 
 export class ConnectorError extends Error {
   constructor(message: string, readonly code: ConnectorErrorCode, readonly retryAfterMs?: number) {

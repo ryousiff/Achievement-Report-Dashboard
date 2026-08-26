@@ -13,6 +13,10 @@ const mockMetaSync = vi.hoisted(() => ({
   upsertPost: vi.fn(),
 }));
 
+const mockReportData = vi.hoisted(() => ({
+  fetchAndStoreDailyFollowerMovement: vi.fn(),
+}));
+
 const mockMetaSyncInsights = vi.hoisted(() => ({
   fetchCompletedMonthTotals: vi.fn(),
   storeCompletedMonthTotals: vi.fn(),
@@ -27,6 +31,7 @@ const mockTokenEncryption = vi.hoisted(() => ({
 vi.mock("@/lib/db", () => ({ db: mockDb }));
 vi.mock("@/lib/meta-sync", () => mockMetaSync);
 vi.mock("@/lib/meta-sync-insights", () => mockMetaSyncInsights);
+vi.mock("@/lib/report-data", () => mockReportData);
 vi.mock("@/lib/token-encryption", () => mockTokenEncryption);
 vi.mock("@/lib/observability", () => ({ logEvent: vi.fn(), logError: vi.fn() }));
 vi.mock("@/lib/post-metric-snapshots", () => ({
@@ -82,8 +87,11 @@ function setSnapshotMocks(options: {
     if (args.where.periodType === InsightPeriodType.DAY && args.where.metric === "reach") {
       return dailySnapshotRows(reachDays);
     }
-    if (args.where.periodType === InsightPeriodType.DAY && args.where.metric === "follower_count") {
-      return dailySnapshotRows(followerDays);
+    if (args.where.periodType === InsightPeriodType.DAY && typeof args.where.metric === "object") {
+      return dailySnapshotRows(followerDays).flatMap(({ periodEnd }) => [
+        { metric: "followers_gained", periodStart: periodEnd },
+        { metric: "followers_lost", periodStart: periodEnd },
+      ]);
     }
     return [];
   });
@@ -108,6 +116,7 @@ beforeEach(() => {
     lost: 10,
   });
   mockMetaSyncInsights.fetchAndStoreAccountInsight.mockResolvedValue({ earliestPeriodEnd: new Date("2026-08-31T07:00:00.000Z") });
+  mockReportData.fetchAndStoreDailyFollowerMovement.mockResolvedValue({ gained: 1, lost: 0 });
   mockDb.socialPost.count.mockResolvedValue(0);
 });
 
@@ -129,14 +138,40 @@ describe("runMonthEndCloseout", () => {
     expect(mockMetaSyncInsights.fetchAndStoreAccountInsight).not.toHaveBeenCalled();
   });
 
+  it("keeps a finalized month ready permanently when all post snapshots are finalized", async () => {
+    mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
+    setSnapshotMocks();
+    mockDb.socialPost.count.mockResolvedValue(0);
+    mockDb.socialPost.findMany.mockResolvedValue([]);
+
+    const first = await runMonthEndCloseout("conn-1", new Date("2026-09-02T00:00:00.000Z"));
+    const later = await runMonthEndCloseout("conn-1", new Date("2026-09-10T00:00:00.000Z"));
+
+    expect(first.completed).toBe(true);
+    expect(later.completed).toBe(true);
+    expect(mockMetaSync.postInsights).not.toHaveBeenCalled();
+    expect(mockDb.socialPost.count).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        metricSnapshots: { none: expect.objectContaining({ finalizedAt: { not: null } }) },
+      }),
+    }));
+    expect(mockDb.socialPost.count.mock.calls.some(([args]) => "OR" in args.where)).toBe(false);
+  });
+
   it("fetches only missing account totals for a finalized month", async () => {
     mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
     // Missing reach initially, then present after the fetch.
     mockDb.socialInsightSnapshot.findMany
       .mockResolvedValueOnce(totalValueRows(["views", "followers_gained", "followers_lost"]))
-      .mockImplementation(async (args: { where: { periodType: InsightPeriodType } }) => {
+      .mockImplementation(async (args: { where: { periodType: InsightPeriodType; metric?: unknown } }) => {
         if (args.where.periodType === InsightPeriodType.TOTAL_VALUE) {
           return totalValueRows(["reach", "views", "followers_gained", "followers_lost"]);
+        }
+        if (typeof args.where.metric === "object") {
+          return dailySnapshotRows(31).flatMap(({ periodEnd }) => [
+            { metric: "followers_gained", periodStart: periodEnd },
+            { metric: "followers_lost", periodStart: periodEnd },
+          ]);
         }
         return [];
       });
@@ -159,15 +194,15 @@ describe("runMonthEndCloseout", () => {
 
     expect(mockMetaSyncInsights.fetchAndStoreAccountInsight).toHaveBeenCalled();
     const reachFetches = mockMetaSyncInsights.fetchAndStoreAccountInsight.mock.calls.filter(([_, __, ___, metric]) => metric === "reach");
-    const followerFetches = mockMetaSyncInsights.fetchAndStoreAccountInsight.mock.calls.filter(([_, __, ___, metric]) => metric === "follower_count");
     expect(reachFetches.length).toBeGreaterThan(0);
-    expect(followerFetches.length).toBeGreaterThan(0);
+    expect(mockReportData.fetchAndStoreDailyFollowerMovement).toHaveBeenCalled();
+    expect(mockMetaSyncInsights.fetchAndStoreAccountInsight.mock.calls.some(([_, __, ___, metric]) => metric === "follower_count")).toBe(false);
   });
 
-  it("refreshes insights for stale posts and finalizes their snapshots", async () => {
+  it("refreshes only a finalized-month post whose finalized snapshot is missing", async () => {
     mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
     setSnapshotMocks();
-    mockDb.socialPost.count.mockResolvedValue(1);
+    mockDb.socialPost.count.mockResolvedValueOnce(1).mockResolvedValue(0);
     mockDb.socialPost.findMany.mockResolvedValue([
       {
         id: "post-1",
@@ -190,10 +225,17 @@ describe("runMonthEndCloseout", () => {
       availability: { reach: "returned", views: "returned" },
     });
 
-    await runMonthEndCloseout("conn-1", new Date("2026-09-02T00:00:00.000Z"));
+    const result = await runMonthEndCloseout("conn-1", new Date("2026-09-02T00:00:00.000Z"));
 
+    expect(mockMetaSync.postInsights).toHaveBeenCalledTimes(1);
     expect(mockMetaSync.postInsights).toHaveBeenCalledWith("ig-1", "token");
-    expect(mockMetaSync.upsertPost).toHaveBeenCalled();
+    expect(mockMetaSync.upsertPost).toHaveBeenCalledTimes(1);
+    expect(mockDb.socialPost.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        metricSnapshots: { none: expect.objectContaining({ finalizedAt: { not: null } }) },
+      }),
+    }));
+    expect(result.completed).toBe(true);
   });
 
   it("re-enqueues itself while post work remains", async () => {

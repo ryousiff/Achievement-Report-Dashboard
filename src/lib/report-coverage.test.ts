@@ -63,7 +63,7 @@ describe("getCoverage", () => {
     expect(coverage.warnings).toEqual([NO_CONNECTION_EMPLOYEE_MESSAGE]);
   });
 
-  it("returns COMPLETE when media, exact period reach, follower count, and insights all cover the period", async () => {
+  it("returns COMPLETE for an old month with valid follower movement even when follower_count snapshots are missing", async () => {
     resetMocks();
     mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
     mockDb.syncJob.findMany.mockResolvedValue([]);
@@ -84,15 +84,7 @@ describe("getCoverage", () => {
         { periodEnd: new Date("2026-08-07T07:00:00.000Z") },
       ])
       .mockResolvedValueOnce([{ periodEnd: new Date("2026-08-07T07:00:00.000Z") }])
-      .mockResolvedValueOnce([
-        { periodEnd: new Date("2026-08-01T07:00:00.000Z") },
-        { periodEnd: new Date("2026-08-02T07:00:00.000Z") },
-        { periodEnd: new Date("2026-08-03T07:00:00.000Z") },
-        { periodEnd: new Date("2026-08-04T07:00:00.000Z") },
-        { periodEnd: new Date("2026-08-05T07:00:00.000Z") },
-        { periodEnd: new Date("2026-08-06T07:00:00.000Z") },
-        { periodEnd: new Date("2026-08-07T07:00:00.000Z") },
-      ])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ value: 1234 }]);
     mockPeriodAccountReachForRange.mockResolvedValue({ value: 1234, accuracy: "EXACT", method: "META_TOTAL_VALUE" });
@@ -102,7 +94,7 @@ describe("getCoverage", () => {
     expect(coverage.warnings).toEqual([READY_FOR_APPROVAL_MESSAGE]);
     expect(coverage.mediaCoverage.complete).toBe(true);
     expect(coverage.reachStatus).toBe("PERIOD_AVAILABLE");
-    expect(coverage.followerCountCoverage.complete).toBe(true);
+    expect(coverage.followerCountCoverage.complete).toBe(false);
     expect(coverage.followsCoverage.complete).toBe(true);
     expect(coverage.postInsightCoverage.missingMetrics).toEqual([]);
   });

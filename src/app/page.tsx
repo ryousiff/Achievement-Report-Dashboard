@@ -4,6 +4,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import { DEFAULT_AD_BUDGET_CURRENCY } from "@/lib/ad-budget";
+import { isEmployeeVisibleSyncError } from "@/lib/meta-error-classification";
 import {
   COVERAGE_READY_MESSAGE,
   isCoverageReady,
@@ -5883,7 +5884,10 @@ function DataHealth({
 }) {
   if (!connection) return null;
   const job = connection.syncJobs?.[0];
-  const runs = connection.syncRuns ?? [];
+  const runs = (connection.syncRuns ?? []).filter((run) => run.status === "SUCCEEDED" || !run.errorMessage || isEmployeeVisibleSyncError(run.errorMessage));
+  const historicalBackfillError = isEmployeeVisibleSyncError(connection.historicalBackfillLastError)
+    ? connection.historicalBackfillLastError
+    : null;
   return (
     <section className="data-health">
       <b>صحة البيانات</b>
@@ -5901,9 +5905,7 @@ function DataHealth({
           {connection.historicalBackfillProcessedPosts
             ? ` · ${connection.historicalBackfillProcessedPosts} منشور`
             : ""}
-          {connection.historicalBackfillLastError
-            ? ` · ${connection.historicalBackfillLastError}`
-            : ""}
+          {historicalBackfillError ? ` · ${historicalBackfillError}` : ""}
         </span>
       )}
       {job && (
@@ -5997,7 +5999,7 @@ function ConnectedAccounts({
     );
     if (!connection)
       return { label: "لا يوجد حساب Instagram معيّن", state: "warn" };
-    if (connection.lastFailureReason)
+    if (isEmployeeVisibleSyncError(connection.lastFailureReason))
       return {
         label: `فشلت آخر مزامنة: ${connection.lastFailureReason}`,
         state: "warn",

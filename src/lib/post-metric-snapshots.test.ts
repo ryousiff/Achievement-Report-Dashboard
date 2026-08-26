@@ -114,6 +114,9 @@ describe("resolveReportPostMetrics", () => {
 
     const resolved = await resolveReportPostMetrics(posts, now);
 
+    expect(mockDb.socialPostMetricSnapshot.findMany).toHaveBeenCalledWith({
+      where: { postId: { in: ["p1"] }, finalizedAt: { not: null } },
+    });
     expect(resolved.get("p1")).toEqual({
       source: "SNAPSHOT",
       metrics: { views: 714848, totalViews: null, totalInteractions: 1000, likes: 500, comments: 50, saved: 20, shares: 10, follows: 5 },

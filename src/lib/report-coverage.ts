@@ -239,6 +239,11 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   if (followers.gained !== null && followers.lost !== null) {
     followerStatus = followers.accuracy === "DERIVED" ? "PERIOD_DERIVED" : "PERIOD_AVAILABLE";
   }
+  const followsCoverage = {
+    from: followerStatus !== "UNAVAILABLE" ? periodStart : null,
+    to: followerStatus !== "UNAVAILABLE" ? periodEnd : null,
+    complete: followerStatus !== "UNAVAILABLE",
+  };
 
   // Post-level insight coverage for the requested period
   const posts = await db.socialPost.findMany({
@@ -322,7 +327,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
   // flag without an active job is treated as incomplete, not as actively syncing, and must not use
   // a "جاري" (in progress) message because nothing is actually running right now.
   let status: CoverageStatus;
-  const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerStatus === "PERIOD_AVAILABLE" && insightsComplete;
+  const allComplete = mediaComplete && reachStatus === "PERIOD_AVAILABLE" && followerStatus !== "UNAVAILABLE" && insightsComplete;
 
   const anyBackfillFailed =
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
@@ -379,7 +384,7 @@ export async function getCoverage(connectionId: string, periodStart: Date, perio
     reachCoverage: { from: reachDaily.from, to: reachDaily.to, complete: reachDaily.complete },
     reach28DayCoverage: { from: reach28Day.from, to: reach28Day.to, complete: reach28Day.complete },
     followerCountCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },
-    followsCoverage: { from: followerCount.from, to: followerCount.to, complete: followerCount.complete },
+    followsCoverage,
     reachStatus,
     followerStatus,
     followersGained: followers.gained,

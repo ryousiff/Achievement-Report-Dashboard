@@ -4,6 +4,7 @@ import { decryptToken } from "@/lib/token-encryption";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { graph, MetaSyncError } from "@/lib/meta-sync";
+import { isUnsupportedFollowerCountPeriodError } from "@/lib/meta-error-classification";
 
 type MetaInsight = { name?: string; period?: string; values?: Array<{ value?: number; end_time?: string }> };
 type MetaTotalValueInsight = {
@@ -311,11 +312,14 @@ export async function runDailyAccountInsightChunk(connectionId: string) {
   for (const workload of workloads) {
     // Meta restricts follower_count to the last 30 days (excluding today). Respect that to avoid a hard error.
     const metricMaxLookbackDays = workload.metric === "follower_count" ? 30 : config.accountInsightMaxLookbackDays;
-    const metricFloor = new Date(Date.now() - metricMaxLookbackDays * 24 * 60 * 60 * 1000);
+    const followerRangeEnd = startOfDayUTC(now);
+    const metricFloor = workload.metric === "follower_count"
+      ? addDaysUTC(followerRangeEnd, -metricMaxLookbackDays)
+      : new Date(Date.now() - metricMaxLookbackDays * 24 * 60 * 60 * 1000);
     const from = baseFrom > metricFloor ? baseFrom : metricFloor;
     // Always refresh the most recent window; we rely on upsert and the 30-day limit for follower_count
     // to keep the API call count bounded. For reach/days_28 this re-fetches the configured historical window.
-    const rangeEnd = now;
+    const rangeEnd = workload.metric === "follower_count" ? followerRangeEnd : now;
     if (rangeEnd < from) continue;
     const chunks = buildDailyInsightChunks(from, rangeEnd, config.accountInsightChunkDays).reverse(); // newest-first: stop at first failure
     let reachedFloor = true;
@@ -346,6 +350,7 @@ export async function runDailyAccountInsightChunk(connectionId: string) {
       } catch (error) {
         // A rate limit should bubble up so the job-level retry/backoff in sync-queue.ts handles it; anything
         // else (e.g. Meta no longer has data this far back) just stops walking further back for this metric.
+        if (workload.metric === "follower_count" && isUnsupportedFollowerCountPeriodError(error)) break;
         if (error instanceof MetaSyncError && error.code === "rate_limited") throw error;
         lastError = error instanceof Error ? error.message : "Daily insight request failed.";
         reachedFloor = false;

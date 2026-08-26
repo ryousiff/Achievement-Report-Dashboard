@@ -105,7 +105,9 @@ export async function resolveReportPostMetrics(
   const result = new Map<string, ResolvedPostMetrics>();
   const finalizedPosts = posts.filter((post) => isMonthFinalized(monthPeriodUTC(post.publishedAt).periodEnd, now));
   const snapshots = finalizedPosts.length > 0
-    ? await db.socialPostMetricSnapshot.findMany({ where: { postId: { in: finalizedPosts.map((post) => post.id) } } })
+    ? await db.socialPostMetricSnapshot.findMany({
+      where: { postId: { in: finalizedPosts.map((post) => post.id) }, finalizedAt: { not: null } },
+    })
     : [];
   const snapshotByPost = new Map(snapshots.map((snapshot) => [snapshot.postId, snapshot]));
 
