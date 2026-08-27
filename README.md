@@ -134,3 +134,26 @@ SELECT
   COUNT(*) AS total
 FROM "SocialPost";
 '
+
+
+to raise the priority of a job:
+docker compose exec -T postgres psql -U kaan -d kaan_reports -c "
+UPDATE \"SyncJob\"
+SET priority = 100,
+    \"runAfter\" = NOW()
+WHERE \"connectionId\" = 'cmt9sczk30003sjub01ahsw4s'
+  AND type = 'HISTORICAL_COLLABORATIVE_BACKFILL'
+  AND status = 'QUEUED';
+"
+
+### for the cooldown
+
+docker compose exec -T postgres psql -U kaan -d kaan_reports -c "
+SELECT
+  \"moduleId\",
+  key,
+  value
+FROM \"Setting\"
+WHERE \"moduleId\" = 'meta_cooldown';
+"
+
