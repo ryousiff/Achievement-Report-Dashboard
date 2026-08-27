@@ -105,7 +105,12 @@ export async function reportPosts(clientId: string, periodStart: Date, periodEnd
       mediaSource: true,
     },
   });
-  const resolved = await resolveReportPostMetrics(posts.map((post) => ({ id: post.id, publishedAt: post.publishedAt, metrics: post.metrics as PostMetrics })), now);
+  const resolved = await resolveReportPostMetrics(posts.map((post) => ({
+    id: post.id,
+    publishedAt: post.publishedAt,
+    metrics: post.metrics as PostMetrics,
+    metricAvailabilityState: (post.metricAvailabilityState as Record<string, unknown> | null) ?? null,
+  })), now);
   return posts.map((post): ReportPost => {
     const liveMetrics = post.metrics as PostMetrics;
     const resolvedEntry = resolved.get(post.id)!;
@@ -120,6 +125,18 @@ export async function reportPosts(clientId: string, periodStart: Date, periodEnd
       follows: resolvedEntry.metrics.follows,
       ...(resolvedEntry.metrics.totalViews !== null ? { total_views: resolvedEntry.metrics.totalViews } : {}),
     };
+    const snapshotAvailabilityState = resolvedEntry.source === "SNAPSHOT"
+      ? Object.fromEntries(Object.entries(resolvedEntry.availability).map(([metric, state]) => [
+        metric,
+        state === "AVAILABLE" ? "AVAILABLE" : state === "NOT_SUPPORTED" ? "NOT_SUPPORTED" : "FAILED",
+      ]))
+      : {};
+    const snapshotAvailability = resolvedEntry.source === "SNAPSHOT"
+      ? Object.fromEntries(Object.entries(resolvedEntry.availability).map(([metric, state]) => [
+        metric,
+        state === "AVAILABLE" ? "returned" : state === "NOT_SUPPORTED" ? "unsupported" : "failed",
+      ]))
+      : {};
     const item = {
       id: post.id,
       externalPostId: post.externalPostId,
@@ -131,8 +148,14 @@ export async function reportPosts(clientId: string, periodStart: Date, periodEnd
       permalink: post.permalink,
       publishedAt: post.publishedAt.toISOString(),
       metrics,
-      metricAvailability: (post.metricAvailability as Record<string, string> | null) ?? {},
-      metricAvailabilityState: (post.metricAvailabilityState as Record<string, string> | null) ?? null,
+      metricAvailability: {
+        ...((post.metricAvailability as Record<string, string> | null) ?? {}),
+        ...snapshotAvailability,
+      },
+      metricAvailabilityState: {
+        ...((post.metricAvailabilityState as Record<string, string> | null) ?? {}),
+        ...snapshotAvailabilityState,
+      },
       mediaSource: post.mediaSource,
       isCollaborative: post.mediaSource === MediaSource.COLLABORATIVE,
       score: 0,

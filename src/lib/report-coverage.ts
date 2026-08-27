@@ -4,7 +4,7 @@ import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { periodAccountFollowersForRange, periodAccountReachForRange } from "@/lib/report-data";
 import { storedAccountFollowersForRange, storedAccountReachForRange } from "@/lib/stored-period-metrics";
-import { isMonthFinalized } from "@/lib/post-metric-snapshots";
+import { isMonthFinalized, resolveReportPostMetrics } from "@/lib/post-metric-snapshots";
 import { logEvent } from "@/lib/observability";
 
 export const PREPARING_MONTH_MESSAGE = "جاري تجهيز بيانات الشهر";
@@ -265,16 +265,43 @@ export async function getCoverage(
   // Post-level insight coverage for the requested period
   const posts = await db.socialPost.findMany({
     where: { connectionId, publishedAt: { gte: periodStart, lte: periodEnd } },
-    select: { metrics: true, metricAvailabilityState: true },
+    select: { id: true, publishedAt: true, metrics: true, metricAvailabilityState: true },
   });
+
+  const reportFinalized = isMonthFinalized(periodEnd, new Date());
+  const postsForResolution = posts.map((post, index) => ({
+    id: post.id ?? `coverage-post-${index}`,
+    publishedAt: post.publishedAt ?? periodStart,
+    metrics: (post.metrics ?? {}) as Record<string, unknown>,
+    metricAvailabilityState: (post.metricAvailabilityState ?? null) as Record<string, unknown> | null,
+  }));
+  const resolvedPostMetrics = reportFinalized ? await resolveReportPostMetrics(postsForResolution) : null;
 
   const metricCounts = new Map<TrackedMetric, { available: number; unsupported: number; missing: number }>();
   for (const metric of trackedMetrics) metricCounts.set(metric, { available: 0, unsupported: 0, missing: 0 });
 
-  for (const post of posts) {
+  for (const [index, post] of posts.entries()) {
+    const resolved = resolvedPostMetrics?.get(postsForResolution[index].id);
+    const snapshotMetrics = resolved?.source === "SNAPSHOT" ? {
+      views: resolved.metrics.views,
+      ...(resolved.metrics.totalViews !== null ? { total_views: resolved.metrics.totalViews } : {}),
+      total_interactions: resolved.metrics.totalInteractions,
+      likes: resolved.metrics.likes,
+      comments: resolved.metrics.comments,
+      saved: resolved.metrics.saved,
+      shares: resolved.metrics.shares,
+      follows: resolved.metrics.follows,
+    } : {};
+    const snapshotAvailability = resolved?.source === "SNAPSHOT"
+      ? Object.fromEntries(Object.entries(resolved.availability).map(([metric, state]) => [metric, state]))
+      : {};
     const typedPost = {
-      metrics: (post.metrics ?? {}) as Record<string, unknown>,
-      metricAvailabilityState: (post.metricAvailabilityState ?? null) as Record<string, string> | null,
+      metrics: { ...((post.metrics ?? {}) as Record<string, unknown>), ...snapshotMetrics },
+      metricAvailabilityState: {
+        ...(((post.metricAvailabilityState ?? null) as Record<string, string> | null) ?? {}),
+        ...snapshotAvailability,
+        ...(reportFinalized ? { reach: "NOT_SUPPORTED" } : {}),
+      },
     };
     for (const metric of trackedMetrics) {
       const counts = metricCounts.get(metric)!;
@@ -354,7 +381,7 @@ export async function getCoverage(
     connection.historicalBackfillStatus === BackfillStatus.FAILED ||
     connection.collaborativeBackfillStatus === BackfillStatus.FAILED;
 
-  const finalized = isMonthFinalized(periodEnd, new Date());
+  const finalized = reportFinalized;
   const hasMatchingReportCloseout = activeJobs.some(
     (job) => job.type === SyncJobType.REPORT_PERIOD_CLOSEOUT && reportPeriodCloseoutOverlaps(job.payload, periodStart, periodEnd),
   );

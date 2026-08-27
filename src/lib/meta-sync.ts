@@ -292,7 +292,7 @@ export async function upsertPost(
   // Best-effort: capture/advance the immutable per-month historical snapshot for this post. Never
   // lets a snapshot-persistence failure break the primary sync (see post-metric-snapshots.ts).
   try {
-    await persistPostMetricSnapshot(record.id, publishedAt, metrics);
+    await persistPostMetricSnapshot(record.id, publishedAt, metrics, metricAvailabilityState);
   } catch (error) {
     logError("post_metric_snapshot.persist_failed", error, { connectionId, externalPostId: item.id });
   }

@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 
 /** Historical, per-post-per-month metric snapshots. See prisma/schema.prisma's
@@ -27,7 +28,31 @@ export type PostMetricSnapshotFields = {
  *   see report-data.ts/report-refresh.ts for how this gates KPI/media-block refresh replacement. */
 export type PostMetricsSource = "LIVE" | "SNAPSHOT" | "LIFETIME_FALLBACK";
 
-export type ResolvedPostMetrics = { metrics: PostMetricSnapshotFields; source: PostMetricsSource };
+export type SnapshotMetricAvailability = "AVAILABLE" | "NOT_SUPPORTED" | "UNRESOLVED";
+export type ResolvedPostMetrics = {
+  metrics: PostMetricSnapshotFields;
+  availability: Record<string, SnapshotMetricAvailability>;
+  source: PostMetricsSource;
+};
+
+const snapshotMetricKeys = ["views", "total_views", "total_interactions", "likes", "comments", "saved", "shares", "follows"] as const;
+
+export function snapshotAvailabilityFromMetrics(
+  metrics: Record<string, unknown>,
+  metricAvailabilityState: Record<string, unknown> | null = null,
+): Record<string, SnapshotMetricAvailability> {
+  return Object.fromEntries(snapshotMetricKeys.map((metric) => {
+    const state = metricAvailabilityState?.[metric];
+    if (state === "NOT_SUPPORTED") return [metric, "NOT_SUPPORTED"];
+    if (state === "AVAILABLE" && typeof metrics[metric] === "number" && Number.isFinite(metrics[metric])) return [metric, "AVAILABLE"];
+    if ((state === undefined || state === null) && typeof metrics[metric] === "number" && Number.isFinite(metrics[metric])) return [metric, "AVAILABLE"];
+    return [metric, "UNRESOLVED"];
+  }));
+}
+
+export function isSnapshotAvailabilityResolved(availability: Record<string, SnapshotMetricAvailability>): boolean {
+  return snapshotMetricKeys.every((metric) => availability[metric] === "AVAILABLE" || availability[metric] === "NOT_SUPPORTED");
+}
 
 function num(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
@@ -76,6 +101,7 @@ export async function persistPostMetricSnapshot(
   postId: string,
   publishedAt: Date,
   metrics: Record<string, unknown>,
+  metricAvailabilityState: Record<string, unknown> | null = null,
   now: Date = new Date(),
 ): Promise<void> {
   if (!postId) return;
@@ -87,11 +113,31 @@ export async function persistPostMetricSnapshot(
   if (existing?.finalizedAt) return; // already finalized: immutable, never overwritten again.
 
   const fields = snapshotFieldsFromMetrics(metrics);
-  const finalizedAt = isMonthFinalized(periodEnd, now) ? now : null;
+  const metricAvailability = snapshotAvailabilityFromMetrics(metrics, metricAvailabilityState);
+  const monthFinalized = isMonthFinalized(periodEnd, now);
+  const valid = isSnapshotAvailabilityResolved(metricAvailability);
+  const finalizedAt = monthFinalized && valid ? now : null;
+  const validityState = finalizedAt ? "VALID" : monthFinalized ? "REPAIR_NEEDED" : "PENDING";
+  const repairReason = monthFinalized && !valid ? "Required post metrics were unresolved at snapshot finalization." : null;
   await db.socialPostMetricSnapshot.upsert({
     where: { postId_periodStart_periodEnd: { postId, periodStart, periodEnd } },
-    create: { postId, periodStart, periodEnd, ...fields, finalizedAt },
-    update: { ...fields, finalizedAt },
+    create: {
+      postId,
+      periodStart,
+      periodEnd,
+      ...fields,
+      metricAvailability: metricAvailability as Prisma.InputJsonValue,
+      validityState,
+      repairReason,
+      finalizedAt,
+    },
+    update: {
+      ...fields,
+      metricAvailability: metricAvailability as Prisma.InputJsonValue,
+      validityState,
+      repairReason,
+      finalizedAt,
+    },
   });
 }
 
@@ -99,14 +145,23 @@ export async function persistPostMetricSnapshot(
  * `PostMetricsSource` above for the rules. Used by `reportPosts()` in report-data.ts; live
  * media-library screens intentionally keep reading `SocialPost.metrics` directly instead. */
 export async function resolveReportPostMetrics(
-  posts: Array<{ id: string; publishedAt: Date; metrics: Record<string, unknown> }>,
+  posts: Array<{
+    id: string;
+    publishedAt: Date;
+    metrics: Record<string, unknown>;
+    metricAvailabilityState?: Record<string, unknown> | null;
+  }>,
   now: Date = new Date(),
 ): Promise<Map<string, ResolvedPostMetrics>> {
   const result = new Map<string, ResolvedPostMetrics>();
   const finalizedPosts = posts.filter((post) => isMonthFinalized(monthPeriodUTC(post.publishedAt).periodEnd, now));
   const snapshots = finalizedPosts.length > 0
     ? await db.socialPostMetricSnapshot.findMany({
-      where: { postId: { in: finalizedPosts.map((post) => post.id) }, finalizedAt: { not: null } },
+      where: {
+        postId: { in: finalizedPosts.map((post) => post.id) },
+        finalizedAt: { not: null },
+        validityState: { not: "REPAIR_NEEDED" },
+      },
     })
     : [];
   const snapshotByPost = new Map(snapshots.map((snapshot) => [snapshot.postId, snapshot]));
@@ -114,16 +169,30 @@ export async function resolveReportPostMetrics(
   for (const post of posts) {
     const finalized = isMonthFinalized(monthPeriodUTC(post.publishedAt).periodEnd, now);
     if (!finalized) {
-      result.set(post.id, { metrics: snapshotFieldsFromMetrics(post.metrics), source: "LIVE" });
+      result.set(post.id, {
+        metrics: snapshotFieldsFromMetrics(post.metrics),
+        availability: snapshotAvailabilityFromMetrics(post.metrics, post.metricAvailabilityState ?? null),
+        source: "LIVE",
+      });
       continue;
     }
     const snapshot = snapshotByPost.get(post.id);
     if (!snapshot) {
-      result.set(post.id, { metrics: snapshotFieldsFromMetrics(post.metrics), source: "LIFETIME_FALLBACK" });
+      result.set(post.id, {
+        metrics: snapshotFieldsFromMetrics(post.metrics),
+        availability: snapshotAvailabilityFromMetrics(post.metrics, post.metricAvailabilityState ?? null),
+        source: "LIFETIME_FALLBACK",
+      });
       continue;
     }
+    const storedAvailability = snapshot.metricAvailability as Record<string, SnapshotMetricAvailability> | null;
+    const availability = storedAvailability ?? Object.fromEntries(snapshotMetricKeys.map((metric) => [
+      metric,
+      metric === "total_views" && snapshot.totalViews === null ? "NOT_SUPPORTED" : "AVAILABLE",
+    ]));
     result.set(post.id, {
       source: "SNAPSHOT",
+      availability,
       metrics: {
         views: snapshot.views,
         totalViews: snapshot.totalViews,

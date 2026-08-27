@@ -122,7 +122,7 @@ async function monthReadinessMetrics(connectionId: string, period: CompletedMont
         connectionId,
         publishedAt: { gte: periodStart, lte: periodEnd },
         metricSnapshots: {
-          none: { periodStart, periodEnd, finalizedAt: { not: null } },
+          none: { periodStart, periodEnd, finalizedAt: { not: null }, validityState: { not: "REPAIR_NEEDED" } },
         },
       },
     }),
@@ -254,7 +254,7 @@ async function refreshPostsInMonth(
       connectionId,
       publishedAt: { gte: periodStart, lte: periodEnd },
       metricSnapshots: {
-        none: { periodStart, periodEnd, finalizedAt: { not: null } },
+        none: { periodStart, periodEnd, finalizedAt: { not: null }, validityState: { not: "REPAIR_NEEDED" } },
       },
     },
     orderBy: { publishedAt: "desc" },

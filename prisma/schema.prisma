@@ -278,6 +278,9 @@ model SocialPostMetricSnapshot {
   saved             Int        @default(0)
   shares            Int        @default(0)
   follows           Int        @default(0)
+  metricAvailability Json?
+  validityState     String     @default("LEGACY_UNVERIFIED")
+  repairReason      String?
   finalizedAt       DateTime?
   capturedAt        DateTime   @default(now())
   updatedAt         DateTime   @updatedAt

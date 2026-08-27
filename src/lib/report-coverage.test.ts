@@ -6,6 +6,7 @@ const mockDb = vi.hoisted(() => ({
   socialConnection: { findUnique: vi.fn() },
   syncJob: { findMany: vi.fn(), create: vi.fn() },
   socialPost: { aggregate: vi.fn(), findMany: vi.fn() },
+  socialPostMetricSnapshot: { findMany: vi.fn() },
   socialInsightSnapshot: { findMany: vi.fn() },
 }));
 
@@ -24,6 +25,8 @@ function resetMocks() {
   mockDb.syncJob.create.mockReset();
   mockDb.socialPost.aggregate.mockReset();
   mockDb.socialPost.findMany.mockReset();
+  mockDb.socialPostMetricSnapshot.findMany.mockReset();
+  mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([]);
   mockDb.socialInsightSnapshot.findMany.mockReset();
   mockPeriodAccountReachForRange.mockReset();
   mockPeriodAccountFollowersForRange.mockReset();
@@ -228,6 +231,55 @@ describe("getCoverage", () => {
     expect(coverage.status).toBe("COMPLETE");
     expect(coverage.postInsightCoverage.missingMetrics).not.toContain("follows");
     expect(coverage.postInsightCoverage.unsupportedMetrics).toContain("follows");
+  });
+
+  it("trusts a valid finalized snapshot when a later live follows refresh fails", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([]);
+    mockDb.socialPost.findMany.mockResolvedValue([{
+      id: "post-1",
+      publishedAt: new Date("2026-07-02T00:00:00.000Z"),
+      metrics: {},
+      metricAvailabilityState: { ...availablePostMetrics, follows: "FAILED" },
+    }]);
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([{
+      postId: "post-1",
+      views: 100,
+      totalViews: 100,
+      totalInteractions: 20,
+      likes: 10,
+      comments: 1,
+      saved: 2,
+      shares: 3,
+      follows: 8,
+      validityState: "VALID",
+      metricAvailability: Object.fromEntries(Object.keys(availablePostMetrics).filter((metric) => metric !== "reach").map((metric) => [metric, "AVAILABLE"])),
+    }]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("COMPLETE");
+    expect(coverage.postInsightCoverage.missingMetrics).not.toContain("follows");
+  });
+
+  it("keeps a repair-needed legacy snapshot incomplete until deliberately repaired", async () => {
+    resetMocks();
+    setReadyJulyWithPosts([]);
+    mockDb.socialPost.findMany.mockResolvedValue([{
+      id: "post-1",
+      publishedAt: new Date("2026-07-14T00:00:00.000Z"),
+      metrics: {},
+      metricAvailabilityState: { ...availablePostMetrics, views: "FAILED" },
+    }]);
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([]);
+
+    const coverage = await getCoverage("conn-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"));
+
+    expect(coverage.status).toBe("PARTIAL");
+    expect(coverage.postInsightCoverage.missingMetrics).toContain("views");
+    expect(mockDb.socialPostMetricSnapshot.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ validityState: { not: "REPAIR_NEEDED" } }),
+    }));
   });
 
   it.each(["FAILED", "PENDING"])("keeps %s post metrics blocking readiness", async (state) => {

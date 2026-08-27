@@ -129,27 +129,46 @@ describe("reportPosts — historical metric snapshot drift regression", () => {
 
   it("does not let a July post's August view growth change an already-finalized July report", async () => {
     // A finalized snapshot was captured for July at 714,848 views before the post kept gaining views in August.
-    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([
-      { postId: "p1", views: 714848, totalViews: null, totalInteractions: 10, likes: 5, comments: 1, saved: 1, shares: 1, follows: 1 },
-    ]);
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([{
+      postId: "p1",
+      views: 714848,
+      totalViews: null,
+      totalInteractions: 10,
+      likes: 5,
+      comments: 1,
+      saved: 1,
+      shares: 1,
+      follows: 8,
+      metricAvailability: { views: "AVAILABLE", total_views: "NOT_SUPPORTED", total_interactions: "AVAILABLE", likes: "AVAILABLE", comments: "AVAILABLE", saved: "AVAILABLE", shares: "AVAILABLE", follows: "AVAILABLE" },
+    }]);
     // SocialPost.metrics has since drifted upward because the post is still within the recent-refresh window.
-    mockDb.socialPost.findMany.mockResolvedValue([julyPost(724692)]);
+    mockDb.socialPost.findMany.mockResolvedValue([{
+      ...julyPost(724692),
+      metricAvailabilityState: { views: "AVAILABLE", follows: "FAILED" },
+    }]);
 
     const now = new Date("2026-08-23T00:00:00.000Z");
     const posts = await reportPosts("client-1", new Date("2026-07-01T00:00:00.000Z"), new Date("2026-07-31T23:59:59.999Z"), now);
 
     expect(posts[0].metrics.views).toBe(714848);
+    expect(posts[0].metrics.follows).toBe(8);
+    expect(posts[0].metricAvailabilityState?.follows).toBe("AVAILABLE");
     expect(posts[0].metricsSource).toBe("SNAPSHOT");
   });
 
   it("current SocialPost.metrics keeps updating, and a report for the still-open month sees the newer value", async () => {
-    mockDb.socialPost.findMany.mockResolvedValue([{ ...julyPost(500), publishedAt: new Date("2026-08-05T00:00:00.000Z") }]);
+    mockDb.socialPost.findMany.mockResolvedValue([{
+      ...julyPost(500),
+      publishedAt: new Date("2026-08-05T00:00:00.000Z"),
+      metricAvailabilityState: { views: "AVAILABLE", follows: "FAILED" },
+    }]);
 
     const now = new Date("2026-08-23T00:00:00.000Z"); // August has not ended yet
     const posts = await reportPosts("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-31T23:59:59.999Z"), now);
 
     expect(mockDb.socialPostMetricSnapshot.findMany).not.toHaveBeenCalled();
     expect(posts[0].metrics.views).toBe(500); // live value used as-is for the open month
+    expect(posts[0].metricAvailabilityState?.follows).toBe("FAILED");
     expect(posts[0].metricsSource).toBe("LIVE");
   });
 

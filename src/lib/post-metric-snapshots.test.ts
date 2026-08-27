@@ -60,12 +60,14 @@ describe("snapshotFieldsFromMetrics", () => {
 
 describe("persistPostMetricSnapshot", () => {
   const publishedAt = new Date("2026-07-10T00:00:00.000Z");
+  const completeMetrics = { views: 100, total_views: 100, total_interactions: 0, likes: 0, comments: 0, saved: 0, shares: 0, follows: 0 };
+  const completeAvailability = Object.fromEntries(Object.keys(completeMetrics).map((metric) => [metric, "AVAILABLE"]));
 
   it("keeps updating the snapshot while the post's publish month is still open", async () => {
     mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
     mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
 
-    await persistPostMetricSnapshot("post-1", publishedAt, { views: 100 }, new Date("2026-07-15T00:00:00.000Z"));
+    await persistPostMetricSnapshot("post-1", publishedAt, completeMetrics, completeAvailability, new Date("2026-07-15T00:00:00.000Z"));
 
     expect(mockDb.socialPostMetricSnapshot.upsert).toHaveBeenCalledTimes(1);
     const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
@@ -78,17 +80,59 @@ describe("persistPostMetricSnapshot", () => {
     mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
 
     const now = new Date("2026-08-01T03:00:00.000Z"); // just after July ended
-    await persistPostMetricSnapshot("post-1", publishedAt, { views: 714848 }, now);
+    await persistPostMetricSnapshot("post-1", publishedAt, { ...completeMetrics, views: 714848 }, completeAvailability, now);
 
     const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
     expect(call.create.finalizedAt).toEqual(now);
     expect(call.create.views).toBe(714848);
   });
 
+  it("does not finalize an unresolved failed metric as zero", async () => {
+    mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
+    mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
+    const metrics = { ...completeMetrics };
+    delete (metrics as Partial<typeof completeMetrics>).views;
+
+    await persistPostMetricSnapshot("post-1", publishedAt, metrics, { ...completeAvailability, views: "FAILED" }, new Date("2026-08-01T03:00:00.000Z"));
+
+    const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
+    expect(call.create.views).toBe(0);
+    expect(call.create.finalizedAt).toBeNull();
+    expect(call.create.validityState).toBe("REPAIR_NEEDED");
+    expect((call.create.metricAvailability as Record<string, string>).views).toBe("UNRESOLVED");
+  });
+
+  it("finalizes a genuine numeric zero", async () => {
+    mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
+    mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
+    const now = new Date("2026-08-01T03:00:00.000Z");
+
+    await persistPostMetricSnapshot("post-1", publishedAt, { ...completeMetrics, views: 0 }, completeAvailability, now);
+
+    const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
+    expect(call.create.views).toBe(0);
+    expect(call.create.finalizedAt).toEqual(now);
+    expect(call.create.validityState).toBe("VALID");
+  });
+
+  it("accepts explicitly NOT_SUPPORTED metrics without treating them as zeros", async () => {
+    mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
+    mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
+    const now = new Date("2026-08-01T03:00:00.000Z");
+    const metrics = { ...completeMetrics };
+    delete (metrics as Partial<typeof completeMetrics>).follows;
+
+    await persistPostMetricSnapshot("post-1", publishedAt, metrics, { ...completeAvailability, follows: "NOT_SUPPORTED" }, now);
+
+    const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
+    expect(call.create.finalizedAt).toEqual(now);
+    expect((call.create.metricAvailability as Record<string, string>).follows).toBe("NOT_SUPPORTED");
+  });
+
   it("never overwrites an already-finalized snapshot, even with different metrics", async () => {
     mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue({ finalizedAt: new Date("2026-08-01T03:00:00.000Z") });
 
-    await persistPostMetricSnapshot("post-1", publishedAt, { views: 999999 }, new Date("2026-08-20T00:00:00.000Z"));
+    await persistPostMetricSnapshot("post-1", publishedAt, { ...completeMetrics, views: 999999 }, completeAvailability, new Date("2026-08-20T00:00:00.000Z"));
 
     expect(mockDb.socialPostMetricSnapshot.upsert).not.toHaveBeenCalled();
   });
@@ -102,24 +146,70 @@ describe("resolveReportPostMetrics", () => {
     const resolved = await resolveReportPostMetrics(posts, now);
 
     expect(mockDb.socialPostMetricSnapshot.findMany).not.toHaveBeenCalled();
-    expect(resolved.get("p1")).toEqual({ metrics: snapshotFieldsFromMetrics({ views: 500 }), source: "LIVE" });
+    expect(resolved.get("p1")).toEqual({
+      metrics: snapshotFieldsFromMetrics({ views: 500 }),
+      availability: {
+        views: "AVAILABLE",
+        total_views: "UNRESOLVED",
+        total_interactions: "UNRESOLVED",
+        likes: "UNRESOLVED",
+        comments: "UNRESOLVED",
+        saved: "UNRESOLVED",
+        shares: "UNRESOLVED",
+        follows: "UNRESOLVED",
+      },
+      source: "LIVE",
+    });
   });
 
   it("uses the immutable snapshot for a finalized month when one exists, ignoring the (drifted) live metrics", async () => {
     const now = new Date("2026-08-15T00:00:00.000Z");
-    const posts = [{ id: "p1", publishedAt: new Date("2026-07-10T00:00:00.000Z"), metrics: { views: 999999 } }]; // drifted live value
-    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([
-      { postId: "p1", views: 714848, totalViews: null, totalInteractions: 1000, likes: 500, comments: 50, saved: 20, shares: 10, follows: 5 },
-    ]);
+    const posts = [{
+      id: "p1",
+      publishedAt: new Date("2026-07-10T00:00:00.000Z"),
+      metrics: { views: 999999 },
+      metricAvailabilityState: { follows: "FAILED" },
+    }];
+    mockDb.socialPostMetricSnapshot.findMany.mockResolvedValue([{
+      postId: "p1",
+      views: 714848,
+      totalViews: null,
+      totalInteractions: 1000,
+      likes: 500,
+      comments: 50,
+      saved: 20,
+      shares: 10,
+      follows: 8,
+      metricAvailability: {
+        views: "AVAILABLE",
+        total_views: "NOT_SUPPORTED",
+        total_interactions: "AVAILABLE",
+        likes: "AVAILABLE",
+        comments: "AVAILABLE",
+        saved: "AVAILABLE",
+        shares: "AVAILABLE",
+        follows: "AVAILABLE",
+      },
+    }]);
 
     const resolved = await resolveReportPostMetrics(posts, now);
 
     expect(mockDb.socialPostMetricSnapshot.findMany).toHaveBeenCalledWith({
-      where: { postId: { in: ["p1"] }, finalizedAt: { not: null } },
+      where: { postId: { in: ["p1"] }, finalizedAt: { not: null }, validityState: { not: "REPAIR_NEEDED" } },
     });
     expect(resolved.get("p1")).toEqual({
       source: "SNAPSHOT",
-      metrics: { views: 714848, totalViews: null, totalInteractions: 1000, likes: 500, comments: 50, saved: 20, shares: 10, follows: 5 },
+      availability: {
+        views: "AVAILABLE",
+        total_views: "NOT_SUPPORTED",
+        total_interactions: "AVAILABLE",
+        likes: "AVAILABLE",
+        comments: "AVAILABLE",
+        saved: "AVAILABLE",
+        shares: "AVAILABLE",
+        follows: "AVAILABLE",
+      },
+      metrics: { views: 714848, totalViews: null, totalInteractions: 1000, likes: 500, comments: 50, saved: 20, shares: 10, follows: 8 },
     });
   });
 
