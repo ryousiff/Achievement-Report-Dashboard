@@ -2234,20 +2234,6 @@ function ReportBuilder({
           items: [{ kind: "text", label: "Cover or closing text" }],
         },
       ];
-  const refresh = async () => {
-    setRefreshing(true);
-    try {
-      const syncedAt = await onRefreshData();
-      setToast(
-        syncedAt === "queued"
-          ? "تم وضع مزامنة Meta في قائمة الانتظار. حدّثي التقرير بعد اكتمالها."
-          : `تم تحديث البيانات · ${new Date(syncedAt).toLocaleString()}`,
-      );
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "فشل تحديث البيانات.");
-    }
-    setRefreshing(false);
-  };
   const syncLabel = lastSyncedAt
     ? `آخر تحديث: ${new Date(lastSyncedAt).toLocaleString()}`
     : null;
@@ -2259,8 +2245,7 @@ function ReportBuilder({
   const [checkingCoverage, setCheckingCoverage] = useState(false);
   // Re-checks the current data-coverage/readiness state only — it never triggers a sync, backfill,
   // or any Meta API call itself; it just reads whatever the background worker has already produced
-  // (GET /api/clients/:id/coverage). Used both on mount/period change and by the employee-facing
-  // "تحديث حالة البيانات" button below.
+  // (GET /api/clients/:id/coverage). Used both on mount/period change and after a data refresh.
   const checkCoverageStatus = async () => {
     if (!clientId) {
       setCoverage(null);
@@ -2283,6 +2268,21 @@ function ReportBuilder({
       setCoverageCheckError(mapCoverageCheckFailure(error));
     }
     setCheckingCoverage(false);
+  };
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const syncedAt = await onRefreshData();
+      setToast(
+        syncedAt === "queued"
+          ? "تم وضع مزامنة Meta في قائمة الانتظار. حدّثي التقرير بعد اكتمالها."
+          : `تم تحديث البيانات · ${new Date(syncedAt).toLocaleString()}`,
+      );
+      await checkCoverageStatus();
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "فشل تحديث البيانات.");
+    }
+    setRefreshing(false);
   };
   useEffect(() => {
     void checkCoverageStatus();
@@ -2394,52 +2394,51 @@ function ReportBuilder({
           </button>
         </div>
       </section>
-      {reportStatus !== "APPROVED" && (
-        <div className="report-readiness">
-          <div className="report-readiness-head">
-            <b>قبل الاعتماد</b>
-            <button
-              type="button"
-              className="btn quiet compact"
-              disabled={checkingCoverage}
-              onClick={() => void checkCoverageStatus()}
-            >
-              <RefreshCw size={13} />
-              {checkingCoverage ? "جارٍ التحقق..." : "تحديث حالة البيانات"}
-            </button>
-          </div>
-          {readinessIssues.length > 0 ? (
-            <>
-              <ul>
-                {readinessIssues.map((issue) => (
-                  <li key={issue}>⚠️ {issue}</li>
-                ))}
-              </ul>
-              {coverage?.status === "SYNCING" && (
-                <p>سيصبح التقرير جاهزاً للاعتماد تلقائياً عند اكتمال البيانات.</p>
-              )}
-            </>
-          ) : (
-            <p className="report-readiness-ok">
-              {coverageReady ? COVERAGE_READY_MESSAGE : "لا توجد ملاحظات حالياً."}
+      {reportStatus !== "APPROVED" ? (
+        <div className="report-readiness report-readiness-merged">
+          <div className="report-readiness-content">
+            <div className="report-readiness-head">
+              <b>قبل الاعتماد</b>
+            </div>
+            <p className="report-assistant-text">
+              <strong>{t.assistant}</strong> {t.assistantText}
+              {syncLabel && <small> · {syncLabel}</small>}
             </p>
-          )}
+            {readinessIssues.length > 0 ? (
+              <>
+                <ul>
+                  {readinessIssues.map((issue) => (
+                    <li key={issue}>⚠️ {issue}</li>
+                  ))}
+                </ul>
+                {coverage?.status === "SYNCING" && (
+                  <p>سيصبح التقرير جاهزاً للاعتماد تلقائياً عند اكتمال البيانات.</p>
+                )}
+              </>
+            ) : (
+              <p className="report-readiness-ok">
+                {coverageReady ? COVERAGE_READY_MESSAGE : "لا توجد ملاحظات حالياً."}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn quiet"
+            disabled={refreshing || checkingCoverage}
+            onClick={() => void refresh()}
+          >
+            <RefreshCw size={16} />
+            {refreshing || checkingCoverage ? "جارٍ التحديث..." : t.refresh}
+          </button>
+        </div>
+      ) : (
+        <div className="notice">
+          <span>
+            <strong>{t.assistant}</strong> {t.assistantText}
+            {syncLabel && <small> · {syncLabel}</small>}
+          </span>
         </div>
       )}
-      <div className="notice">
-        <span>
-          <strong>{t.assistant}</strong> {t.assistantText}
-          {syncLabel && <small> · {syncLabel}</small>}
-        </span>
-        <button
-          className="btn quiet"
-          disabled={refreshing}
-          onClick={() => void refresh()}
-        >
-          <RefreshCw size={16} />
-          {refreshing ? "جارٍ التحديث..." : t.refresh}
-        </button>
-      </div>
       <section
         className={`builder ${reportStatus === "APPROVED" ? "report-frozen" : ""}`}
       >
