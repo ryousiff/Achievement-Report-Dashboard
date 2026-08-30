@@ -5,6 +5,7 @@ import { getHistoricalBackfillConfig } from "@/lib/env";
 import { calculateBackfillStart } from "@/lib/backfill-window";
 import { monthPeriodUTC, isMonthFinalized } from "@/lib/post-metric-snapshots";
 import { postInsights, upsertPost, type MetaMedia } from "@/lib/meta-sync";
+import { ConnectorError } from "@/lib/connectors/types";
 import {
   fetchAndStoreAccountInsight,
   fetchCompletedMonthTotals,
@@ -13,10 +14,11 @@ import {
   type CompletedMonthPeriod,
 } from "@/lib/meta-sync-insights";
 import { logEvent, logError } from "@/lib/observability";
-import { fetchAndStoreDailyFollowerMovement } from "@/lib/report-data";
+import { fetchAndStoreDailyFollowerMovementSafe } from "@/lib/follower-movement";
 
 const CLOSEOUT_POST_REFRESH_BATCH_SIZE = 15;
 const CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES = 31;
+const CLOSEOUT_MISSING_DATA_RETRY_MS = 15 * 60 * 1000;
 
 function startOfDayUTC(date: Date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
@@ -202,7 +204,6 @@ async function fetchMissingDailySnapshots(
   }
 
   const rangeEnd = periodEnd < now ? periodEnd : now;
-  const expectedDays = daysBetweenInclusive(periodStart, periodEnd);
   const missingReachDays: Date[] = [];
   const missingFollowerDays: Date[] = [];
   const current = startOfDayUTC(periodStart);
@@ -215,7 +216,6 @@ async function fetchMissingDailySnapshots(
     current.setUTCDate(current.getUTCDate() + 1);
   }
 
-  // If we already have enough daily snapshots for the whole period, nothing to do.
   if (missingReachDays.length === 0 && missingFollowerDays.length === 0) return { fetchedAny: false };
 
   const config = getHistoricalBackfillConfig();
@@ -226,14 +226,37 @@ async function fetchMissingDailySnapshots(
   for (const day of missingReachDays.slice(0, CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES)) {
     const since = day;
     const until = new Date(since.valueOf() + 24 * 60 * 60 * 1000);
-    await fetchAndStoreAccountInsight(connectionId, accountId, token, "reach", InsightPeriodType.DAY, since, until, lookbackStart);
+    const { earliestPeriodEnd } = await fetchAndStoreAccountInsight(
+      connectionId,
+      accountId,
+      token,
+      "reach",
+      InsightPeriodType.DAY,
+      since,
+      until,
+      lookbackStart,
+    );
+    if (!earliestPeriodEnd) {
+      throw new ConnectorError(
+        "Reach data was not returned for the requested closeout day.",
+        "request_failed",
+        CLOSEOUT_MISSING_DATA_RETRY_MS,
+      );
+    }
     fetchedAny = true;
     fetches += 1;
   }
 
   for (const day of missingFollowerDays.slice(0, Math.max(0, CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES - fetches))) {
-    const fetched = await fetchAndStoreDailyFollowerMovement(connectionId, accountId, token, day, false);
-    if (fetched) fetchedAny = true;
+    const fetched = await fetchAndStoreDailyFollowerMovementSafe(connectionId, accountId, token, day);
+    if (!fetched) {
+      throw new ConnectorError(
+        "Follower movement data was not returned for the requested closeout day.",
+        "request_failed",
+        CLOSEOUT_MISSING_DATA_RETRY_MS,
+      );
+    }
+    fetchedAny = true;
     fetches += 1;
   }
 
@@ -294,7 +317,12 @@ async function refreshPostsInMonth(
       };
       await upsertPost(connectionId, item, insights, post.mediaSource as MediaSource, (post.mediaMetadata as Record<string, unknown> | null) ?? null);
     } catch (error) {
-      // Do not abort the whole closeout because one post failed; the job will be re-enqueued and retried.
+      // A Meta app-level rate limit must stop the closeout immediately so the queue can
+      // activate the shared cooldown. Swallowing it here would keep hammering Meta on
+      // the remaining posts and make the rate-limit incident worse.
+      if (error instanceof ConnectorError && error.code === "rate_limited") throw error;
+      // Other per-post failures remain isolated; the missing snapshot keeps the month
+      // incomplete and the scheduler can retry it later.
       logError("month_end_closeout.post_refresh_failed", error, { connectionId, accountId, externalPostId: post.externalPostId });
     }
   }
