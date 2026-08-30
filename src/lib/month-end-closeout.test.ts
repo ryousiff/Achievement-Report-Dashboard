@@ -290,6 +290,52 @@ describe("runMonthEndCloseout", () => {
     expect(mockMetaSyncInsights.fetchAndStoreAccountInsight).not.toHaveBeenCalled();
   });
 
+  it("does not crash when a daily follower response is malformed; preserves completed work and marks the job incomplete", async () => {
+    mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
+    // Start with one missing total metric and one missing reach day so we can prove the closeout
+    // preserved the work it *could* do (totals + reach) while only the unavailable follower day
+    // remains incomplete.
+    mockDb.socialInsightSnapshot.findMany
+      .mockResolvedValueOnce(totalValueRows(["views", "followers_gained", "followers_lost"]))
+      .mockImplementation(async (args: { where: { periodType: InsightPeriodType; metric?: unknown } }) => {
+        if (args.where.periodType === InsightPeriodType.TOTAL_VALUE) {
+          return totalValueRows(["reach", "views", "followers_gained", "followers_lost"]);
+        }
+        if (args.where.periodType === InsightPeriodType.DAY && args.where.metric === "reach") {
+          return dailySnapshotRows(30);
+        }
+        if (args.where.periodType === InsightPeriodType.DAY && typeof args.where.metric === "object") {
+          return dailySnapshotRows(30).flatMap(({ periodEnd }) => [
+            { metric: "followers_gained", periodStart: periodEnd },
+            { metric: "followers_lost", periodStart: periodEnd },
+          ]);
+        }
+        return [];
+      });
+    mockDb.socialInsightSnapshot.count.mockImplementation(async (args: { where: { metric: string } }) => {
+      if (args.where.metric === "reach") return 30;
+      return 30;
+    });
+    mockDb.socialPost.findMany.mockResolvedValue([]);
+    mockMetaSyncInsights.fetchCompletedMonthTotals.mockResolvedValue({
+      reach: 1000,
+      views: 2000,
+      gained: 50,
+      lost: 10,
+    });
+    mockMetaSyncInsights.fetchAndStoreAccountInsight.mockResolvedValue({ earliestPeriodEnd: new Date("2026-08-31T07:00:00.000Z") });
+    // A malformed/unavailable follower response now safely returns null instead of throwing.
+    mockReportData.fetchAndStoreDailyFollowerMovement.mockResolvedValue(null);
+
+    const result = await runMonthEndCloseout("conn-1", new Date("2026-09-02T00:00:00.000Z"));
+
+    expect(result.completed).toBe(false);
+    expect(mockMetaSyncInsights.fetchCompletedMonthTotals).toHaveBeenCalledTimes(1);
+    expect(mockMetaSyncInsights.storeCompletedMonthTotals).toHaveBeenCalledTimes(1);
+    expect(mockMetaSyncInsights.fetchAndStoreAccountInsight).toHaveBeenCalled();
+    expect(mockReportData.fetchAndStoreDailyFollowerMovement).toHaveBeenCalled();
+  });
+
   it("respects Meta API cooldown by letting fetch errors bubble to the job retry logic", async () => {
     mockDb.socialConnection.findUnique.mockResolvedValue(baseConnection());
     setSnapshotMocks({ reachDays: 29 });

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BackfillStatus, MediaSource } from "@prisma/client";
-import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, periodAccountViews, dailyFollowerMovement, dailyFollowerMovementFromDatabase, currentFollowersCount, clearReachCache, clearFollowersCache, clearViewsCache, type ReachResult } from "@/lib/report-data";
+import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, periodAccountViews, dailyFollowerMovement, dailyFollowerMovementFromDatabase, currentFollowersCount, clearReachCache, clearFollowersCache, clearViewsCache, parseFollowerBreakdown, type ReachResult } from "@/lib/report-data";
 
 const mockDb = vi.hoisted(() => ({
   socialPost: { findMany: vi.fn() },
@@ -89,6 +89,52 @@ function defaultConnection() {
 describe("completeDailySeries", () => {
   it("includes both report-period boundaries and fills missing dates with zero", () => {
     expect(completeDailySeries(new Date("2026-01-30T00:00:00.000Z"), new Date("2026-02-01T00:00:00.000Z"), [["2026-01-31", 4]])).toEqual([["2026-01-30", 0], ["2026-01-31", 4], ["2026-02-01", 0]]);
+  });
+});
+
+describe("parseFollowerBreakdown", () => {
+  it("returns null when total_value is missing", () => {
+    expect(parseFollowerBreakdown({})).toBeNull();
+    expect(parseFollowerBreakdown({ total_value: null })).toBeNull();
+  });
+
+  it("returns null when breakdowns is missing or empty", () => {
+    expect(parseFollowerBreakdown({ total_value: {} })).toBeNull();
+    expect(parseFollowerBreakdown({ total_value: { breakdowns: [] } })).toBeNull();
+  });
+
+  it("returns null when breakdown exists but results is missing or not an array", () => {
+    expect(parseFollowerBreakdown({ total_value: { breakdowns: [{}] } })).toBeNull();
+    expect(parseFollowerBreakdown({ total_value: { breakdowns: [{ results: undefined }] } })).toBeNull();
+    expect(parseFollowerBreakdown({ total_value: { breakdowns: [{ results: "bad" }] } })).toBeNull();
+  });
+
+  it("treats an empty results array as a valid zero-movement day", () => {
+    const result = parseFollowerBreakdown({ total_value: { breakdowns: [{ results: [] }] } });
+    expect(result).toEqual({ gained: 0, lost: 0, raw: [] });
+  });
+
+  it("safely parses rows with missing or malformed dimension_values", () => {
+    const result = parseFollowerBreakdown({
+      total_value: {
+        breakdowns: [{
+          results: [
+            { value: 10 },
+            { dimension_values: "bad", value: 20 },
+            { dimension_values: ["FOLLOWER"], value: 30 },
+            { dimension_values: ["NON_FOLLOWER"], value: 7 },
+          ],
+        }],
+      },
+    });
+    expect(result?.gained).toBe(30);
+    expect(result?.lost).toBe(7);
+    expect(result?.raw).toEqual([
+      { dimension: "UNKNOWN", value: 10 },
+      { dimension: "UNKNOWN", value: 20 },
+      { dimension: "FOLLOWER", value: 30 },
+      { dimension: "NON_FOLLOWER", value: 7 },
+    ]);
   });
 });
 

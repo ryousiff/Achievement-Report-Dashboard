@@ -34,6 +34,7 @@ const metaIncrementalHoldModuleId = "meta_incremental_hold";
 const metaIncrementalHoldUntilKey = "hold_until";
 
 const lockMs = 15 * 60 * 1000;
+const CLOSEOUT_CONTINUATION_DELAY_MS = 5 * 60 * 1000;
 
 /** Per-(connection, job type) lock key, so a HISTORICAL_MEDIA_BACKFILL job and an INCREMENTAL_MEDIA_SYNC
  * job for the *same* connection can run independently, while two jobs of the *same* type for the same
@@ -192,6 +193,14 @@ async function nextInstagramJobRunAfter(): Promise<Date | null> {
   if (!cooldownUntil && !holdUntil) return null;
   const candidates = [cooldownUntil, holdUntil].filter((d): d is Date => d !== null);
   return new Date(Math.max(...candidates.map((d) => d.getTime())));
+}
+
+/** Returns the earliest allowed runAfter for an incomplete closeout continuation: always at least
+ * `CLOSEOUT_CONTINUATION_DELAY_MS` in the future, and later if the shared Meta cooldown/hold is active. */
+async function nextCloseoutRunAfter(): Promise<Date> {
+  const cooldownOrHold = await nextInstagramJobRunAfter();
+  const earliest = new Date(Date.now() + CLOSEOUT_CONTINUATION_DELAY_MS);
+  return cooldownOrHold && cooldownOrHold > earliest ? cooldownOrHold : earliest;
 }
 
 /** Enqueues sync for every connection of a client. Existing connections keep their current incremental
@@ -735,16 +744,20 @@ export async function processNextSyncJob() {
       const updated = await db.socialConnection.findUnique({ where: { id: job.connectionId }, select: { collaborativeBackfillStatus: true } });
       if (updated?.collaborativeBackfillStatus === BackfillStatus.PARTIAL) await enqueueJob(job.connectionId, SyncJobType.HISTORICAL_COLLABORATIVE_BACKFILL, JobPriority.HISTORICAL_BACKFILL);
     }
-    // Month-end closeout keeps re-enqueuing until the targeted month is fully ready.
+    // Month-end closeout keeps re-enqueuing until the targeted month is fully ready. Space
+    // continuations out so a missing follower day / incomplete post batch does not hammer Meta
+    // in a tight P0 loop, while still respecting the shared Meta cooldown.
     if (job.type === SyncJobType.MONTH_END_CLOSEOUT) {
       if (result && typeof result === "object" && "completed" in result && !result.completed) {
-        await enqueueJob(job.connectionId, SyncJobType.MONTH_END_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT);
+        const runAfter = await nextCloseoutRunAfter();
+        await enqueueJob(job.connectionId, SyncJobType.MONTH_END_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT, runAfter);
       }
     }
     // Explicit report-period closeout behaves the same way: re-enqueue with the same target period until complete.
     if (job.type === SyncJobType.REPORT_PERIOD_CLOSEOUT) {
       if (result && typeof result === "object" && "completed" in result && !result.completed) {
-        await enqueueJob(job.connectionId, SyncJobType.REPORT_PERIOD_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT, undefined, job.payload);
+        const runAfter = await nextCloseoutRunAfter();
+        await enqueueJob(job.connectionId, SyncJobType.REPORT_PERIOD_CLOSEOUT, JobPriority.MONTH_END_CLOSEOUT, runAfter, job.payload);
       }
     }
     // Thumbnail backfill is deliberately low priority: unlike historical backfill's immediate

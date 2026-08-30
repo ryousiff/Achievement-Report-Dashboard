@@ -510,16 +510,35 @@ function setCachedFollowers(clientId: string, periodStart: Date, periodEnd: Date
   followersCache.set(key, { result, expiresAt: Date.now() + FOLLOWERS_CACHE_TTL_MS });
 }
 
-function parseFollowerBreakdown(insight: unknown): { gained: number; lost: number; raw: { dimension: string; value: number }[] } | null {
-  const breakdowns = (insight as any)?.total_value?.breakdowns as Array<{
-    dimension_keys: string[];
-    results: Array<{ dimension_values: string[]; value: number }>;
-  }> | undefined;
-  if (!breakdowns || breakdowns.length === 0) return null;
-  const results = breakdowns[0].results;
-  const raw = results.map((r) => ({ dimension: r.dimension_values[0] ?? "UNKNOWN", value: r.value }));
-  const gained = results.find((r) => r.dimension_values[0] === "FOLLOWER")?.value ?? 0;
-  const lost = results.find((r) => r.dimension_values[0] === "NON_FOLLOWER")?.value ?? 0;
+export function parseFollowerBreakdown(insight: unknown): { gained: number; lost: number; raw: { dimension: string; value: number }[] } | null {
+  const totalValue = (insight as any)?.total_value;
+  if (!totalValue || typeof totalValue !== "object") return null;
+  const breakdowns = totalValue.breakdowns;
+  if (!Array.isArray(breakdowns) || breakdowns.length === 0) return null;
+  const firstBreakdown = breakdowns[0];
+  if (!firstBreakdown || typeof firstBreakdown !== "object") return null;
+  const results = firstBreakdown.results;
+  if (!Array.isArray(results)) return null;
+
+  const normalizeRow = (r: unknown): { dimension: string; value: number } => {
+    if (!r || typeof r !== "object") return { dimension: "UNKNOWN", value: 0 };
+    const row = r as { dimension_values?: unknown; value?: unknown };
+    const dimension = Array.isArray(row.dimension_values) ? String(row.dimension_values[0] ?? "UNKNOWN") : "UNKNOWN";
+    const value = typeof row.value === "number" ? row.value : 0;
+    return { dimension, value };
+  };
+
+  const raw = results.map(normalizeRow);
+  const gained = results
+    .filter((r): r is { dimension_values: string[]; value: number } => {
+      if (!r || typeof r !== "object") return false;
+      const dimensionValues = (r as { dimension_values?: unknown }).dimension_values;
+      return Array.isArray(dimensionValues);
+    })
+    .find((r) => r.dimension_values[0] === "FOLLOWER")?.value ?? 0;
+  const lost = results
+    .filter((r): r is { dimension_values: string[]; value: number } => Array.isArray((r as { dimension_values?: unknown }).dimension_values))
+    .find((r) => r.dimension_values[0] === "NON_FOLLOWER")?.value ?? 0;
   return { gained, lost, raw };
 }
 

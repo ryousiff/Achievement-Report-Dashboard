@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BackfillStatus, Platform, SyncJobStatus, SyncJobType } from "@prisma/client";
+import { BackfillStatus, Platform, Prisma, SyncJobStatus, SyncJobType } from "@prisma/client";
 import { ConnectorError } from "@/lib/connectors";
 
 const mockDb = vi.hoisted(() => ({
@@ -76,7 +76,7 @@ vi.mock("@/lib/month-end-closeout", () => mockMonthEndCloseout);
 
 import { prioritizeReportPeriod, processNextSyncJob, recoverStalledHistoricalBackfills, runDueMonthlyReportPreparation, runDueThumbnailBackfill } from "@/lib/sync-queue";
 
-function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date; priority: number }> = {}) {
+function baseJob(overrides: Partial<{ id: string; connectionId: string; type: SyncJobType; attempts: number; maxAttempts: number; runAfter: Date; priority: number; payload: Prisma.JsonValue }> = {}) {
   return {
     id: "job-1",
     connectionId: "conn-1",
@@ -573,5 +573,66 @@ describe("processNextSyncJob priority ordering", () => {
 
     expect(mockMonthEndCloseout.runMonthEndCloseout).toHaveBeenCalledWith("conn-1");
     expect(result).toEqual({ id: "job-closeout", status: "succeeded", posts: 0 });
+  });
+
+  it("re-enqueues an incomplete MONTH_END_CLOSEOUT with a delay instead of looping immediately", async () => {
+    const closeoutJob = baseJob({ id: "job-closeout", type: SyncJobType.MONTH_END_CLOSEOUT, priority: 100 });
+    setupHappyPathMocks(closeoutJob);
+    // The "has active job" dedupe check must see no active job before creating the continuation.
+    mockDb.syncJob.findFirst.mockImplementation(async ({ where }: { where: { status?: unknown } }) =>
+      where.status === SyncJobStatus.QUEUED ? closeoutJob : null,
+    );
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "job-closeout-2", ...data }));
+    mockMonthEndCloseout.runMonthEndCloseout.mockResolvedValue({ posts: 15, completed: false });
+
+    const result = await processNextSyncJob();
+
+    expect(result).toEqual({ id: "job-closeout", status: "succeeded", posts: 15 });
+    expect(mockDb.syncJob.create).toHaveBeenCalledTimes(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.type).toBe(SyncJobType.MONTH_END_CLOSEOUT);
+    expect(createArgs.data.priority).toBeGreaterThanOrEqual(100);
+    expect(createArgs.data.runAfter.valueOf()).toBeGreaterThan(Date.now());
+  });
+
+  it("preserves P0 priority and respects Meta cooldown when re-enqueueing an incomplete REPORT_PERIOD_CLOSEOUT", async () => {
+    const cooldownUntil = new Date(Date.now() + 10 * 60 * 1000);
+    const closeoutJob = baseJob({
+      id: "job-closeout",
+      type: SyncJobType.REPORT_PERIOD_CLOSEOUT,
+      priority: 100,
+      runAfter: cooldownUntil, // already past the active cooldown so the job can run
+      payload: { periodStart: "2026-06-01T00:00:00.000Z", periodEnd: "2026-06-30T23:59:59.999Z" },
+    });
+    setupHappyPathMocks(closeoutJob);
+    // The "has active job" dedupe check must see no active job before creating the continuation.
+    mockDb.syncJob.findFirst.mockImplementation(async ({ where }: { where: { status?: unknown } }) =>
+      where.status === SyncJobStatus.QUEUED ? closeoutJob : null,
+    );
+    mockDb.syncJob.updateMany.mockImplementation(async (args: { data?: Record<string, unknown> }) => {
+      if (args?.data?.status === SyncJobStatus.RUNNING) return { count: 1 };
+      return { count: 0 };
+    });
+    mockDb.syncJob.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: "job-closeout-2", ...data }));
+    mockDb.setting.findUnique.mockImplementation(async (args: { where: { moduleId_key: { moduleId: string; key: string } } }) => {
+      if (args.where.moduleId_key.moduleId === "meta_cooldown" && args.where.moduleId_key.key === "cooldown_until") {
+        return { value: cooldownUntil.toISOString() };
+      }
+      return null;
+    });
+    mockMonthEndCloseout.runReportPeriodCloseout.mockResolvedValue({ posts: 0, completed: false });
+
+    const result = await processNextSyncJob();
+
+    expect(result).toEqual({ id: "job-closeout", status: "succeeded", posts: 0 });
+    expect(mockDb.syncJob.create).toHaveBeenCalledTimes(1);
+    const createArgs = mockDb.syncJob.create.mock.calls[0][0];
+    expect(createArgs.data.type).toBe(SyncJobType.REPORT_PERIOD_CLOSEOUT);
+    expect(createArgs.data.priority).toBeGreaterThanOrEqual(100);
+    expect(createArgs.data.runAfter.valueOf()).toBeGreaterThanOrEqual(cooldownUntil.valueOf());
   });
 });
