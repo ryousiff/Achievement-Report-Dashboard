@@ -14,7 +14,7 @@ import {
   type CompletedMonthPeriod,
 } from "@/lib/meta-sync-insights";
 import { logEvent, logError } from "@/lib/observability";
-import { fetchAndStoreDailyFollowerMovementSafe } from "@/lib/follower-movement";
+import { fetchAndStoreDailyFollowerMovement } from "@/lib/report-data";
 
 const CLOSEOUT_POST_REFRESH_BATCH_SIZE = 15;
 const CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES = 31;
@@ -248,7 +248,20 @@ async function fetchMissingDailySnapshots(
   }
 
   for (const day of missingFollowerDays.slice(0, Math.max(0, CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES - fetches))) {
-    const fetched = await fetchAndStoreDailyFollowerMovementSafe(connectionId, accountId, token, day);
+    let fetched: { gained: number; lost: number } | null;
+    try {
+      fetched = await fetchAndStoreDailyFollowerMovement(connectionId, accountId, token, day, false);
+    } catch (error) {
+      // Preserve MetaSyncError/ConnectorError so rate-limit and network failures keep
+      // using the queue's existing cooldown/retry behavior. Only implementation-level
+      // parser errors (e.g. `undefined.map`) are normalized below.
+      if (error instanceof ConnectorError) throw error;
+      throw new ConnectorError(
+        "Follower movement response could not be parsed for the requested closeout day.",
+        "request_failed",
+        CLOSEOUT_MISSING_DATA_RETRY_MS,
+      );
+    }
     if (!fetched) {
       throw new ConnectorError(
         "Follower movement data was not returned for the requested closeout day.",
@@ -317,12 +330,7 @@ async function refreshPostsInMonth(
       };
       await upsertPost(connectionId, item, insights, post.mediaSource as MediaSource, (post.mediaMetadata as Record<string, unknown> | null) ?? null);
     } catch (error) {
-      // A Meta app-level rate limit must stop the closeout immediately so the queue can
-      // activate the shared cooldown. Swallowing it here would keep hammering Meta on
-      // the remaining posts and make the rate-limit incident worse.
       if (error instanceof ConnectorError && error.code === "rate_limited") throw error;
-      // Other per-post failures remain isolated; the missing snapshot keeps the month
-      // incomplete and the scheduler can retry it later.
       logError("month_end_closeout.post_refresh_failed", error, { connectionId, accountId, externalPostId: post.externalPostId });
     }
   }
@@ -372,10 +380,6 @@ async function runCloseoutForPeriod(
   return { posts: postRefresh.refreshed, completed };
 }
 
-/** One bounded, targeted closeout run for the most recent finalized calendar month that still lacks
- * required report data. Fetches only missing account totals, missing daily reach/follower snapshots,
- * and refreshes a small batch of stale posts. Returns `completed: true` only when no more work is
- * detected for that month; otherwise the scheduler will re-enqueue another chunk. */
 export async function runMonthEndCloseout(connectionId: string, now: Date = new Date()) {
   const connection = await requireInstagramConnection(connectionId);
   const targetInfo = await findFirstIncompleteCompletedMonthInRange(connectionId, now);
@@ -386,9 +390,6 @@ export async function runMonthEndCloseout(connectionId: string, now: Date = new 
   return runCloseoutForPeriod(connection, targetInfo.period, now, { logLabel: "month_end_closeout" }, targetInfo.readiness);
 }
 
-/** Targeted closeout for an explicitly requested report period (e.g., an older month opened by an
- * employee). Processes one incomplete finalized calendar month within the period per run and returns
- * `completed: true` only once every month in the range is ready. */
 export async function runReportPeriodCloseout(connectionId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
   const connection = await requireInstagramConnection(connectionId);
   const targetInfo = await findFirstIncompleteCompletedMonthInRange(connectionId, now, { minStart: periodStart, maxEnd: periodEnd });
