@@ -202,7 +202,6 @@ async function fetchMissingDailySnapshots(
   }
 
   const rangeEnd = periodEnd < now ? periodEnd : now;
-  const expectedDays = daysBetweenInclusive(periodStart, periodEnd);
   const missingReachDays: Date[] = [];
   const missingFollowerDays: Date[] = [];
   const current = startOfDayUTC(periodStart);
@@ -215,7 +214,6 @@ async function fetchMissingDailySnapshots(
     current.setUTCDate(current.getUTCDate() + 1);
   }
 
-  // If we already have enough daily snapshots for the whole period, nothing to do.
   if (missingReachDays.length === 0 && missingFollowerDays.length === 0) return { fetchedAny: false };
 
   const config = getHistoricalBackfillConfig();
@@ -232,8 +230,19 @@ async function fetchMissingDailySnapshots(
   }
 
   for (const day of missingFollowerDays.slice(0, Math.max(0, CLOSEOUT_MAX_DAILY_SNAPSHOT_FETCHES - fetches))) {
-    const fetched = await fetchAndStoreDailyFollowerMovement(connectionId, accountId, token, day, false);
-    if (fetched) fetchedAny = true;
+    try {
+      const fetched = await fetchAndStoreDailyFollowerMovement(connectionId, accountId, token, day, false);
+      if (fetched) fetchedAny = true;
+    } catch (error) {
+      // Meta occasionally returns a breakdown object without a usable `results` array. The shared
+      // follower parser may reject that malformed response; a single missing day must remain incomplete
+      // for a later retry rather than crashing the entire P0 month-closeout job for every client.
+      logError("month_end_closeout.daily_follower_fetch_failed", error, {
+        connectionId,
+        accountId,
+        day: day.toISOString().slice(0, 10),
+      });
+    }
     fetches += 1;
   }
 
@@ -294,7 +303,6 @@ async function refreshPostsInMonth(
       };
       await upsertPost(connectionId, item, insights, post.mediaSource as MediaSource, (post.mediaMetadata as Record<string, unknown> | null) ?? null);
     } catch (error) {
-      // Do not abort the whole closeout because one post failed; the job will be re-enqueued and retried.
       logError("month_end_closeout.post_refresh_failed", error, { connectionId, accountId, externalPostId: post.externalPostId });
     }
   }
@@ -344,10 +352,6 @@ async function runCloseoutForPeriod(
   return { posts: postRefresh.refreshed, completed };
 }
 
-/** One bounded, targeted closeout run for the most recent finalized calendar month that still lacks
- * required report data. Fetches only missing account totals, missing daily reach/follower snapshots,
- * and refreshes a small batch of stale posts. Returns `completed: true` only when no more work is
- * detected for that month; otherwise the scheduler will re-enqueue another chunk. */
 export async function runMonthEndCloseout(connectionId: string, now: Date = new Date()) {
   const connection = await requireInstagramConnection(connectionId);
   const targetInfo = await findFirstIncompleteCompletedMonthInRange(connectionId, now);
@@ -358,9 +362,6 @@ export async function runMonthEndCloseout(connectionId: string, now: Date = new 
   return runCloseoutForPeriod(connection, targetInfo.period, now, { logLabel: "month_end_closeout" }, targetInfo.readiness);
 }
 
-/** Targeted closeout for an explicitly requested report period (e.g., an older month opened by an
- * employee). Processes one incomplete finalized calendar month within the period per run and returns
- * `completed: true` only once every month in the range is ready. */
 export async function runReportPeriodCloseout(connectionId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
   const connection = await requireInstagramConnection(connectionId);
   const targetInfo = await findFirstIncompleteCompletedMonthInRange(connectionId, now, { minStart: periodStart, maxEnd: periodEnd });
