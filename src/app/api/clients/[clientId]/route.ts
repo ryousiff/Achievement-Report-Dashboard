@@ -11,7 +11,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const { action } = await request.json() as { action?: unknown };
   if (action !== "meta-logo") return NextResponse.json({ error: "Unsupported client action." }, { status: 400 });
   const connection = await db.socialConnection.findFirst({ where: { clientId, platform: Platform.INSTAGRAM, sourceAccount: { profile: { createdById: user.id } } }, select: { externalAccountId: true, encryptedToken: true } });
-  if (!connection) return NextResponse.json({ error: "Assign an Instagram account to this client first." }, { status: 404 });
+  if (!connection) return NextResponse.json({ error: "عيّني حساب Instagram للعميل أولاً من صفحة الحسابات المتصلة." }, { status: 404 });
   try {
     const url = new URL(`https://graph.facebook.com/v23.0/${connection.externalAccountId}`);
     url.searchParams.set("fields", "profile_picture_url");

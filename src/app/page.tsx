@@ -4843,6 +4843,7 @@ function ClientWorkspace({
   useEffect(() => {
     setLogoUrl(selectedClient?.logoUrl ?? "");
     setLogoStatus("");
+    setError("");
   }, [selectedClient?.id, selectedClient?.logoUrl]);
   const addClient = async () => {
     if (!name.trim()) return;
