@@ -4,7 +4,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import { DEFAULT_AD_BUDGET_CURRENCY } from "@/lib/ad-budget";
-import { isEmployeeVisibleSyncError, mapEmployeeSyncErrorLabel } from "@/lib/meta-error-classification";
+import { isEmployeeVisibleSyncError, mapEmployeeSyncErrorPresentation } from "@/lib/meta-error-classification";
 import {
   COVERAGE_READY_MESSAGE,
   isCoverageReady,
@@ -5883,8 +5883,11 @@ function DataHealth({
 }) {
   if (!connection) return null;
   const job = connection.syncJobs?.[0];
+  const isTerminal = job?.status === "FAILED";
   const runs = (connection.syncRuns ?? []).filter((run) => run.status === "SUCCEEDED" || !run.errorMessage || isEmployeeVisibleSyncError(run.errorMessage));
-  const historicalBackfillError = mapEmployeeSyncErrorLabel(connection.historicalBackfillLastError);
+  const historicalBackfillError = mapEmployeeSyncErrorPresentation(connection.historicalBackfillLastError, {
+    terminal: connection.historicalBackfillStatus === "FAILED",
+  });
   return (
     <section className="data-health">
       <b>صحة البيانات</b>
@@ -5902,7 +5905,7 @@ function DataHealth({
           {connection.historicalBackfillProcessedPosts
             ? ` · ${connection.historicalBackfillProcessedPosts} منشور`
             : ""}
-          {historicalBackfillError ? ` · ${historicalBackfillError}` : ""}
+          {historicalBackfillError ? ` · ${historicalBackfillError.label}` : ""}
         </span>
       )}
       {job && (
@@ -5918,16 +5921,21 @@ function DataHealth({
           {job.status === "QUEUED" && ` · محاولة ${job.attempts + 1}`}
         </span>
       )}
-      {runs.map((run, index) => (
-        <span
-          key={`${run.startedAt}-${index}`}
-          className={run.status === "SUCCEEDED" ? "success" : "failed"}
-        >
-          {run.status === "SUCCEEDED"
-            ? `نجحت: ${run.postsSynced} منشور${run.durationMs ? ` · ${(run.durationMs / 1000).toFixed(1)} ث` : ""}`
-            : `فشلت: ${mapEmployeeSyncErrorLabel(run.errorMessage) ?? "تعذر التحديث"}`}
-        </span>
-      ))}
+      {runs.map((run, index) => {
+        const presentation = run.status === "SUCCEEDED"
+          ? null
+          : mapEmployeeSyncErrorPresentation(run.errorMessage, { terminal: isTerminal });
+        return (
+          <span
+            key={`${run.startedAt}-${index}`}
+            className={run.status === "SUCCEEDED" ? "success" : presentation?.state ?? "failed"}
+          >
+            {run.status === "SUCCEEDED"
+              ? `نجحت: ${run.postsSynced} منشور${run.durationMs ? ` · ${(run.durationMs / 1000).toFixed(1)} ث` : ""}`
+              : presentation?.label ?? "تعذر التحديث"}
+          </span>
+        );
+      })}
     </section>
   );
 }
@@ -5996,10 +6004,14 @@ function ConnectedAccounts({
     );
     if (!connection)
       return { label: "لا يوجد حساب Instagram معيّن", state: "warn" };
-    if (isEmployeeVisibleSyncError(connection.lastFailureReason))
+    const job = connection.syncJobs?.[0];
+    const presentation = mapEmployeeSyncErrorPresentation(connection.lastFailureReason, {
+      terminal: job?.status === "FAILED",
+    });
+    if (presentation)
       return {
-        label: `فشلت آخر مزامنة: ${mapEmployeeSyncErrorLabel(connection.lastFailureReason)}`,
-        state: "warn",
+        label: presentation.label,
+        state: presentation.state,
       };
     if (!connection.lastSuccessfulSyncAt)
       return { label: "لم تتم مزامنة ناجحة بعد", state: "warn" };
