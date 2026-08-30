@@ -368,4 +368,65 @@ describe("refreshReportData", () => {
     mockDb.report.findUnique.mockResolvedValue({ ...createReport([]), status: "APPROVED" });
     await expect(refreshReportData("report-1")).rejects.toThrow("Approved reports are frozen");
   });
+
+  it("drops duplicate saved data-driven blocks that share the same refreshKey", async () => {
+    const report = createReport([
+      { type: BlockType.KPI, position: 0, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [{ id: "reach", label: "وصول", value: "100", available: true }] } },
+      { type: BlockType.KPI, position: 1, content: { body: "نظرة عامة مكررة", refreshKey: "kpi-overview", kpis: [{ id: "reach", label: "وصول", value: "200", available: true }] } },
+      { type: BlockType.KPI, position: 2, content: { body: "تفاعلات", refreshKey: "kpi-interactions", kpis: [{ id: "total_interactions", label: "تفاعل", value: "50", available: true }] } },
+    ]);
+    mockDb.report.findUnique.mockResolvedValue(report);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockDb.socialPost.findMany.mockResolvedValue([defaultPost()]);
+    mockDb.socialPost.count.mockResolvedValue(1);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.count.mockResolvedValue(1);
+    mockDb.report.update.mockResolvedValue({});
+
+    await refreshReportData("report-1");
+
+    const updateData = mockDb.report.update.mock.calls[0][0].data as { blocks: { create: Array<{ content: Record<string, unknown> }> } };
+    const refreshKeys = updateData.blocks.create.map((block) => block.content.refreshKey);
+    expect(refreshKeys.filter((key) => key === "kpi-overview")).toHaveLength(1);
+    expect(refreshKeys.filter((key) => key === "kpi-interactions")).toHaveLength(1);
+  });
+
+  it("is idempotent: refreshing a standard report twice produces the same block count", async () => {
+    const report = createReport([
+      { type: BlockType.TEXT, position: 0, content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" } },
+      { type: BlockType.KPI, position: 1, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [{ id: "reach", label: "وصول", value: "312,688", available: true }] } },
+      { type: BlockType.KPI, position: 2, content: { body: "تفاعلات", refreshKey: "kpi-interactions", kpis: [{ id: "total_interactions", label: "تفاعل", value: "4,450", available: true }] } },
+      { type: BlockType.CHART, position: 3, content: { body: "متابعون", refreshKey: "chart-followers" } },
+      { type: BlockType.MEDIA, position: 4, content: { body: "أعلى المتابعين", refreshKey: "media-top-follows", mediaItems: [{ id: "p1", metrics: { follows: 1 } }] } },
+      { type: BlockType.MEDIA, position: 5, content: { body: "أعلى التفاعل", refreshKey: "media-top-interactions", mediaItems: [{ id: "p1", metrics: { total_interactions: 50 } }] } },
+      { type: BlockType.MEDIA, position: 6, content: { body: "أعلى المشاهدات", refreshKey: "media-top-views", mediaItems: [{ id: "p1", metrics: { views: 100 } }] } },
+      { type: BlockType.MEDIA, position: 7, content: { body: "محتوى الشهر", refreshKey: "media-month-content", mediaItems: [{ id: "p1", metrics: { total_interactions: 50, views: 100 } }] } },
+      { type: BlockType.NOTES, position: 8, content: { body: "توصيات", refreshKey: "notes-recommendations" } },
+      { type: BlockType.TEXT, position: 9, content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" } },
+    ]);
+    mockDb.report.findUnique.mockResolvedValue(report);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDb.syncJob.findMany.mockResolvedValue([]);
+    mockDb.socialPost.findMany.mockResolvedValue([defaultPost()]);
+    mockDb.socialPost.count.mockResolvedValue(1);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findFirst.mockResolvedValue(null);
+    mockDb.socialInsightSnapshot.count.mockResolvedValue(1);
+    mockDb.report.update.mockResolvedValue({});
+
+    await refreshReportData("report-1");
+    const firstUpdateData = mockDb.report.update.mock.calls[0][0].data as { blocks: { create: Array<{ content: Record<string, unknown> }> } };
+    const firstKeys = firstUpdateData.blocks.create.map((block) => block.content.refreshKey);
+
+    mockDb.report.findUnique.mockResolvedValue({ ...report, blocks: firstUpdateData.blocks.create.map((block, position) => ({ ...block, position })) });
+    await refreshReportData("report-1");
+    const secondUpdateData = mockDb.report.update.mock.calls[1][0].data as { blocks: { create: Array<{ content: Record<string, unknown> }> } };
+    const secondKeys = secondUpdateData.blocks.create.map((block) => block.content.refreshKey);
+
+    expect(firstKeys).toHaveLength(10);
+    expect(secondKeys).toHaveLength(10);
+    expect(secondKeys).toEqual(firstKeys);
+  });
 });

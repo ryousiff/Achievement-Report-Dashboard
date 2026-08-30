@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import { DEFAULT_AD_BUDGET_CURRENCY } from "@/lib/ad-budget";
@@ -4210,7 +4211,7 @@ function ReportPreview({
     );
     window.print();
   };
-  return (
+  const preview = (
     <div className="report-preview-backdrop">
       <style media="print">{`@page { size: A4 ${orientation}; margin: 0; }`}</style>
       <section className={`report-preview ${orientation}`} dir="rtl">
@@ -4320,6 +4321,9 @@ function ReportPreview({
       </section>
     </div>
   );
+  return typeof document !== "undefined"
+    ? createPortal(preview, document.body)
+    : null;
 }
 
 function PrintMetricTrend({ kpi }: { kpi: Kpi }) {

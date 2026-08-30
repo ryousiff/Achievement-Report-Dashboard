@@ -172,6 +172,7 @@ export async function refreshReportData(reportId: string, options: RefreshOption
 
   const mergedBlocks: ReportBlock[] = [];
   const usedKeys = new Set<ReportRefreshKey>();
+  const seenKeys = new Set<ReportRefreshKey>();
 
   for (const dbBlock of report.blocks) {
     const existing: ReportBlock = {
@@ -181,6 +182,12 @@ export async function refreshReportData(reportId: string, options: RefreshOption
     };
     const key = getRefreshKey(existing.content);
     if (key && isDataDrivenRefreshKey(key)) {
+      // Defensive: if a report somehow contains multiple data-driven blocks with the same refreshKey,
+      // keep only the first occurrence. This prevents duplicate standard sections from persisting
+      // across refresh/export.
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
       // A data-driven block whose refreshKey the builder no longer produces has been retired from the
       // standard template (e.g. a section removed from buildStandardReportBlocks); drop it on refresh
       // instead of leaving a stale, un-refreshable block behind.

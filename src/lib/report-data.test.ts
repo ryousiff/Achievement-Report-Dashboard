@@ -443,6 +443,28 @@ describe("buildStandardReportBlocks", () => {
     // The chart's own (diverging) daily sum must never be presented as the period total on its own.
     expect(chart?.insight).not.toBe("إجمالي المتابعين الجدد خلال الأيام المتاحة: 0.");
   });
+
+  it("emits exactly 10 standard blocks with unique refreshKeys and no default fallback titles", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { id: "p1", externalPostId: "ig-1", caption: "Post", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-08-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 1 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE" }, mediaSource: MediaSource.OWNED },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockGraph.mockResolvedValue({ data: [{ total_value: { value: 0 } }] });
+
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-01T23:59:59.999Z"));
+
+    expect(blocks).toHaveLength(10);
+    const refreshKeys = blocks.map((block) => (block.content as Record<string, unknown>).refreshKey);
+    expect(new Set(refreshKeys).size).toBe(10);
+
+    const titles = blocks.map((block) => block.title);
+    expect(titles).not.toContain("قسم نصي");
+    expect(titles).not.toContain("Text section");
+    expect(titles[titles.length - 2]).toBe("التوصيات");
+    expect(titles[titles.length - 1]).toBe("شكراً على ثقتكم");
+  });
 });
 
 describe("periodAccountFollowers", () => {
