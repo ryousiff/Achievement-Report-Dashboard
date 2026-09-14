@@ -364,7 +364,7 @@ describe("buildStandardReportBlocks", () => {
 
   it("keeps SUM(daily reach) as a separate, labelled metric and never uses it as unique reach", async () => {
     mockDb.socialPost.findMany.mockResolvedValue([
-      { id: "p1", externalPostId: "ig-1", caption: "Owned", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-08-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 7 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE" }, mediaSource: MediaSource.OWNED },
+      { id: "p1", externalPostId: "ig-1", caption: "Owned", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-08-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 7, reach: 100 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned", reach: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE", reach: "AVAILABLE" }, mediaSource: MediaSource.OWNED },
     ]);
     mockDb.socialInsightSnapshot.findMany.mockImplementation(async ({ where }: { where: { metric: string } }) => {
       if (where.metric === "follower_count") return [{ periodEnd: new Date("2026-08-01T07:00:00.000Z"), value: 42 }];
@@ -378,11 +378,15 @@ describe("buildStandardReportBlocks", () => {
     const blocks = await buildStandardReportBlocks("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-01T23:59:59.999Z"));
     const kpiBlock = blocks.find((block) => block.type === "KPI" && block.title === "أهم الإحصائيات");
     expect(kpiBlock).toBeDefined();
-    const kpis = (kpiBlock!.content as Record<string, unknown>).kpis as Array<{ id: string; value: string }>;
+    const kpis = (kpiBlock!.content as Record<string, unknown>).kpis as Array<{ id: string; value: string; tooltip?: string }>;
     const reachKpi = kpis.find((kpi) => kpi.id === "reach");
     const dailySumKpi = kpis.find((kpi) => kpi.id === "daily-reach-sum");
     expect(reachKpi?.value).toBe("150");
     expect(dailySumKpi?.value).toBe("300");
+
+    const postReachSumKpi = kpis.find((kpi) => kpi.id === "post-reach-sum");
+    expect(postReachSumKpi?.value).toBe("100");
+    expect(postReachSumKpi?.tooltip).toContain("قد يتضاعف");
   });
 
   it("exposes gained, lost, and net follower movement from follows_and_unfollows", async () => {

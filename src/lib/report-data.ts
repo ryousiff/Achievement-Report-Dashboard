@@ -1034,13 +1034,22 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   }
   const followerInsight = followerInsightLines.join(" ");
 
-  const reachExtra = { reachAccuracy: reach.accuracy, reachMethod: reach.method, tooltip: reach.tooltip };
+  const reachExtra = { reachAccuracy: reach.accuracy, reachMethod: reach.method, tooltip: reach.tooltip ?? "عدد الحسابات الفريدة التي وصلها محتوى الحساب خلال الفترة ( reach ) كما تحتسبه Meta. هذه القيمة قد تختلف عن مجموع وصول المنشورات لأن Meta لا تعدّل الشخص أكثر من مرة حتى لو شاهد عدة منشورات." };
   const reachKpis = [
     kpi("reach", metricLabel.reach, hasReach ? totals.reach.toLocaleString() : "غير متاح", hasReach, reach.accuracy === "ESTIMATED" ? { ...reachExtra, badge: "تقديري" } : reachExtra),
   ];
 
   if (reachDailySnapshots.length > 0) {
     reachKpis.push(kpi("daily-reach-sum", "مجموع الوصول اليومي", reachDailySnapshots.reduce((sum, s) => sum + s.value, 0).toLocaleString(), true, { tooltip: SUM_DAILY_TOOLTIP }));
+  }
+
+  const postReachSum = posts.reduce((sum, post) => sum + value(post.metrics, "reach"), 0);
+  if (postReachSum > 0) {
+    reachKpis.push(
+      kpi("post-reach-sum", "مجموع وصول المنشورات", postReachSum.toLocaleString(), true, {
+        tooltip: "مجموع قيم الوصول لكل منشور على حدة. قد يتضاعف الأشخاص الذين وصلهم أكثر من منشور، لذا لا يُستخدم كوصول فريد للفترة.",
+      }),
+    );
   }
 
   const followsTooltip = followers.tooltip;

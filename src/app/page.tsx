@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
@@ -533,27 +533,27 @@ const blockIcons = {
   notes: StickyNote,
 };
 const metricValues = {
-  followers: ["12,540", "+8.2%"],
-  metricReach: ["245,000", "+16.4%"],
-  metricTotalViews: ["412,800", "+11.8%"],
-  metricViews: ["168,400", "+22.1%"],
-  metricFollows: ["1,240", "+8.2%"],
-  metricFollowersLost: ["320", "-2.1%"],
-  metricNetFollowerGrowth: ["+920", "+6.1%"],
-  metricPosts: ["28", "+12.0%"],
-  metricOwnedPosts: ["25", "+10.0%"],
-  metricCollabPosts: ["3", "+50%"],
-  metricInteractions: ["14,210", "+18.3%"],
-  metricLikes: ["8,500", "+15.0%"],
-  metricComments: ["1,200", "+10.0%"],
-  metricShares: ["940", "+19.8%"],
-  metricSaves: ["2,760", "+14.2%"],
-  metricMediaFollows: ["350", "+5.0%"],
-  metricImpressions: ["412,800", "+11.8%"],
-  metricEngagementRate: ["5.8%", "+0.7%"],
-  metricProfileVisits: ["9,640", "+12.5%"],
-  metricLinkClicks: ["1,284", "+9.6%"],
-  metricReelsPlays: ["168,400", "+22.1%"],
+  followers: ["", ""],
+  metricReach: ["", ""],
+  metricTotalViews: ["", ""],
+  metricViews: ["", ""],
+  metricFollows: ["", ""],
+  metricFollowersLost: ["", ""],
+  metricNetFollowerGrowth: ["", ""],
+  metricPosts: ["", ""],
+  metricOwnedPosts: ["", ""],
+  metricCollabPosts: ["", ""],
+  metricInteractions: ["", ""],
+  metricLikes: ["", ""],
+  metricComments: ["", ""],
+  metricShares: ["", ""],
+  metricSaves: ["", ""],
+  metricMediaFollows: ["", ""],
+  metricImpressions: ["", ""],
+  metricEngagementRate: ["", ""],
+  metricProfileVisits: ["", ""],
+  metricLinkClicks: ["", ""],
+  metricReelsPlays: ["", ""],
 } as const;
 type MetricKey = keyof typeof metricValues;
 
@@ -1635,6 +1635,7 @@ export default function Home() {
               ? blocks.find((block) => block.id === kpiTargetBlockId)?.kpis
               : undefined
           }
+          reportBlocks={blocks}
           onClose={() => setKpiPickerOpen(false)}
           onAdd={addKpiBlock}
         />
@@ -4518,17 +4519,28 @@ function KpiPicker({
   t,
   periodType,
   existingKpis,
+  reportBlocks,
   onClose,
   onAdd,
 }: {
   t: Dictionary;
   periodType: ReportPeriod;
   existingKpis?: Kpi[];
+  reportBlocks?: Block[];
   onClose: () => void;
   onAdd: (kpis: Kpi[], presentation: MetricPresentation) => void;
 }) {
   const metricKeys = Object.keys(metricValues) as MetricKey[];
   const existingById = new Map((existingKpis ?? []).map((kpi) => [kpi.id, kpi]));
+  const reportKpiById = useMemo(() => {
+    const map = new Map<string, Kpi>();
+    for (const block of reportBlocks ?? []) {
+      for (const kpi of block.kpis ?? []) {
+        if (!map.has(kpi.id)) map.set(kpi.id, kpi);
+      }
+    }
+    return map;
+  }, [reportBlocks]);
   const [selected, setSelected] = useState<MetricKey[]>(() =>
     existingKpis
       ? (existingKpis
@@ -4572,12 +4584,12 @@ function KpiPicker({
   const submit = () => {
     const metrics = selected.map((key) => {
       const id = idMap[key];
-      const existingKpi = existingById.get(id);
+      const existingKpi = existingById.get(id) ?? reportKpiById.get(id);
       return (
         existingKpi ?? {
           id,
           label: t[key],
-          value: metricValues[key][0],
+          value: metricValues[key][0] || "—",
           change: metricValues[key][1],
           display: presentation,
         }
