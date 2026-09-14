@@ -105,4 +105,12 @@ describe("comparisonPeriod", () => {
     expect(result?.start.toISOString()).toBe("2025-07-01T00:00:00.000Z");
     expect(result?.end.toISOString()).toBe("2025-07-31T23:59:59.999Z");
   });
+
+  it("handles leap-year February when shifting back one year", () => {
+    const start = new Date(Date.UTC(2024, 1, 29));
+    const end = new Date(Date.UTC(2024, 1, 29, 23, 59, 59, 999));
+    const result = comparisonPeriod(start, end, "sameMonthLastYear");
+    expect(result?.start.toISOString()).toBe("2023-02-28T00:00:00.000Z");
+    expect(result?.end.toISOString()).toBe("2023-02-28T23:59:59.999Z");
+  });
 });

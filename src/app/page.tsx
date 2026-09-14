@@ -1018,6 +1018,7 @@ export default function Home() {
           title: metadata.title,
           periodStart: `${metadata.periodStart}T00:00:00.000Z`,
           periodEnd: `${metadata.periodEnd}T23:59:59.999Z`,
+          periodType: metadata.periodType,
           comparisonMode: metadata.comparisonMode,
         }),
       });
@@ -1341,6 +1342,7 @@ export default function Home() {
         periodEnd: string;
         isBlank: boolean;
         comparisonMode: string;
+        periodType: string;
         status: "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED";
         dataRefreshedAt?: string | null;
         blocks: Array<{ type: string; position: number; content: unknown }>;
@@ -1413,12 +1415,15 @@ export default function Home() {
       }),
     );
     setBlank(report.isBlank);
+    const loadedPeriodType: ReportPeriod = ["monthly", "quarterly", "halfYearly", "yearly", "custom"].includes(report.periodType)
+      ? (report.periodType as ReportPeriod)
+      : "monthly";
     setReportMetadata({
       title: report.title,
       clientId: report.clientId,
       periodStart: report.periodStart.slice(0, 10),
       periodEnd: report.periodEnd.slice(0, 10),
-      periodType: "monthly",
+      periodType: loadedPeriodType,
       comparisonMode: report.comparisonMode === "previousMonth" || report.comparisonMode === "sameMonthLastYear" ? report.comparisonMode : "none",
     });
     setSelectedClientId(report.clientId);
@@ -3984,14 +3989,26 @@ function ReportSetup({
         { value: "quarterly", label: "ربع سنوي" },
         { value: "halfYearly", label: "نصف سنوي" },
         { value: "yearly", label: "سنوي" },
+        { value: "custom", label: "مخصص" },
       ]
     : [
         { value: "monthly", label: "Monthly" },
         { value: "quarterly", label: "Quarterly" },
         { value: "halfYearly", label: "Half-yearly" },
         { value: "yearly", label: "Yearly" },
+        { value: "custom", label: "Custom" },
       ];
   const setPeriod = (periodType: ReportPeriod) => {
+    if (periodType === "custom") {
+      setForm((current) => {
+        const client = clients.find((item) => item.id === current.clientId);
+        const title = arabic
+          ? `تقرير مخصص${client ? ` — ${client.name}` : ""}`
+          : `Custom report${client ? ` — ${client.name}` : ""}`;
+        return { ...current, periodType, title };
+      });
+      return;
+    }
     const period = completedPeriod(periodType);
     setForm((current) => {
       const client = clients.find((item) => item.id === current.clientId);
@@ -4071,14 +4088,22 @@ function ReportSetup({
               value={form.clientId ?? ""}
               onChange={(event) => {
                 const clientId = event.target.value;
-                const period = completedPeriod(form.periodType);
                 const client = clients.find((item) => item.id === clientId);
+                const title =
+                  form.periodType === "custom"
+                    ? arabic
+                      ? `تقرير مخصص${client ? ` — ${client.name}` : ""}`
+                      : `Custom report${client ? ` — ${client.name}` : ""}`
+                    : (() => {
+                        const period = completedPeriod(form.periodType);
+                        return arabic
+                          ? `تقرير ${period.label}${client ? ` — ${client.name}` : ""}`
+                          : `${periodOptions.find((item) => item.value === form.periodType)?.label} report${client ? ` — ${client.name}` : ""}`;
+                      })();
                 setForm((current) => ({
                   ...current,
                   clientId,
-                  title: arabic
-                    ? `تقرير ${period.label}${client ? ` — ${client.name}` : ""}`
-                    : `${form.periodType} report${client ? ` — ${client.name}` : ""}`,
+                  title,
                 }));
               }}
               required
@@ -4093,12 +4118,45 @@ function ReportSetup({
               ))}
             </select>
           </label>
-          <div className="fixed-period">
-            <span>{arabic ? "الفترة المعتمدة" : "Selected period"}</span>
-            <b>
-              {form.periodStart} — {form.periodEnd}
-            </b>
-          </div>
+          {form.periodType === "custom" ? (
+            <div className="custom-period-fields">
+              <label>
+                {arabic ? "تاريخ البداية" : "Start date"}
+                <input
+                  type="date"
+                  value={form.periodStart}
+                  max={form.periodEnd}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      periodStart: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                {arabic ? "تاريخ النهاية" : "End date"}
+                <input
+                  type="date"
+                  value={form.periodEnd}
+                  min={form.periodStart}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      periodEnd: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="fixed-period">
+              <span>{arabic ? "الفترة المعتمدة" : "Selected period"}</span>
+              <b>
+                {form.periodStart} — {form.periodEnd}
+              </b>
+            </div>
+          )}
         </div>
         <div className="modal-actions">
           <span>

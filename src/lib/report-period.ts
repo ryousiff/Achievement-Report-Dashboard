@@ -1,4 +1,4 @@
-export type ReportPeriod = "monthly" | "quarterly" | "halfYearly" | "yearly";
+export type ReportPeriod = "monthly" | "quarterly" | "halfYearly" | "yearly" | "custom";
 export type ComparisonMode = "none" | "previousMonth" | "sameMonthLastYear";
 
 export type CompletedPeriod = {
@@ -54,6 +54,7 @@ export function completedPeriod(periodType: ReportPeriod, today = new Date()): C
     quarterly: `الربع ${Math.floor(end.getUTCMonth() / 3) + 1} لعام ${end.getUTCFullYear()}`,
     halfYearly: `النصف ${end.getUTCMonth() < 6 ? "الأول" : "الثاني"} لعام ${end.getUTCFullYear()}`,
     yearly: `عام ${end.getUTCFullYear()}`,
+    custom: "فترة مخصصة",
   };
 
   return {

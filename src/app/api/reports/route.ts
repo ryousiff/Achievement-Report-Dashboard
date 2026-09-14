@@ -10,7 +10,7 @@ import { getCoverage } from "@/lib/report-coverage";
 import { buildStandardReportBlocksPreferStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
 
 import { dateValue, requiredText } from "@/lib/validators";
-import { ComparisonMode } from "@/lib/report-period";
+import { ComparisonMode, ReportPeriod } from "@/lib/report-period";
 
 const reportBlockTypes = ["text", "kpi", "chart", "platformAnalytics", "media", "notes", "recommendations"] as const;
 type EditableBlockType = (typeof reportBlockTypes)[number];
@@ -77,6 +77,13 @@ export async function POST(request: NextRequest) {
     const draft = createReportDraft(template);
     const periodStart = dateValue(body.periodStart, "periodStart");
     const periodEnd = dateValue(body.periodEnd, "periodEnd");
+    const rawPeriodType = typeof body.periodType === "string" ? body.periodType : "monthly";
+    const periodType: ReportPeriod = ["monthly", "quarterly", "halfYearly", "yearly", "custom"].includes(rawPeriodType)
+      ? (rawPeriodType as ReportPeriod)
+      : "monthly";
+    if (periodType === "custom" && periodEnd.valueOf() < periodStart.valueOf()) {
+      return NextResponse.json({ error: "Custom period end must be on or after start." }, { status: 400 });
+    }
     const rawComparisonMode = typeof body.comparisonMode === "string" ? body.comparisonMode : "none";
     const comparisonMode: ComparisonMode = ["none", "previousMonth", "sameMonthLastYear"].includes(rawComparisonMode)
       ? (rawComparisonMode as ComparisonMode)
@@ -105,6 +112,7 @@ export async function POST(request: NextRequest) {
         status: draft.status,
         isBlank: draft.isBlank,
         comparisonMode,
+        periodType,
         blocks: { create: template === "standard" ? populatedBlocks.map((block, position) => ({ position, type: block.type, content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) : draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) },
       },
       include: { blocks: { orderBy: { position: "asc" } } },

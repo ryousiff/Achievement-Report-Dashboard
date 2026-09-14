@@ -182,6 +182,44 @@ describe("POST /api/reports", () => {
     const refreshKeys = createdBlocks.map((block) => block.content.refreshKey);
     expect(new Set(refreshKeys).size).toBe(9);
   });
+
+  it("rejects a custom period whose end is before its start", async () => {
+    const response = await POST(makePostRequest({
+      clientId: "client-1",
+      template: "standard",
+      title: "تقرير مخصص — مستشفى الدكتورة هيفاء",
+      periodType: "custom",
+      periodStart: "2026-08-15T00:00:00.000Z",
+      periodEnd: "2026-08-01T23:59:59.999Z",
+    }));
+
+    expect(response.status).toBe(400);
+    const data = (await response.json()) as { error?: string };
+    expect(data.error).toContain("end must be on or after start");
+  });
+
+  it("stores custom period boundaries and comparison mode on report creation", async () => {
+    const initial = createdReport(standardBlocks());
+    mockDb.report.create.mockResolvedValue(initial);
+    mockDb.report.findUnique.mockResolvedValue(initial);
+
+    const response = await POST(makePostRequest({
+      clientId: "client-1",
+      template: "standard",
+      title: "تقرير مخصص — مستشفى الدكتورة هيفاء",
+      periodType: "custom",
+      periodStart: "2026-08-01T00:00:00.000Z",
+      periodEnd: "2026-08-15T23:59:59.999Z",
+      comparisonMode: "previousMonth",
+    }));
+
+    expect(response.status).toBe(201);
+    const createData = mockDb.report.create.mock.calls[0][0].data as { periodType: string; comparisonMode: string; periodStart: Date; periodEnd: Date };
+    expect(createData.periodType).toBe("custom");
+    expect(createData.comparisonMode).toBe("previousMonth");
+    expect(createData.periodStart.toISOString()).toBe("2026-08-01T00:00:00.000Z");
+    expect(createData.periodEnd.toISOString()).toBe("2026-08-15T23:59:59.999Z");
+  });
 });
 
 describe("PATCH /api/reports", () => {
