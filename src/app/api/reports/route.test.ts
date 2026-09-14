@@ -84,7 +84,6 @@ function standardBlocks(): Array<{ type: BlockType; title: string; content: Reco
     { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", refreshKey: "kpi-overview", kpis: [] } },
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", refreshKey: "kpi-interactions", kpis: [] } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: { body: "بيانات المتابعين الجدد (follows_and_unfollows) اليومية من Meta.", refreshKey: "chart-followers" } },
-    { type: BlockType.MEDIA, title: "أعلى المنشورات من حيث اكتساب المتابعين", content: { body: "تم اختيار المنشورات الأعلى من بيانات الفترة.", refreshKey: "media-top-follows", mediaItems: [dummyMediaItem] } },
     { type: BlockType.MEDIA, title: "أعلى المنشورات من حيث التفاعل", content: { body: "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", refreshKey: "media-top-interactions", mediaItems: [dummyMediaItem] } },
     { type: BlockType.MEDIA, title: "أعلى المنشورات من حيث المشاهدات العضوية", content: { body: "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", refreshKey: "media-top-views", mediaItems: [dummyMediaItem] } },
     { type: BlockType.MEDIA, title: "محتوى الشهر", content: { body: "أضيفي نماذج إضافية من المحتوى أو احتفظي بالمنشورات المختارة تلقائياً.", refreshKey: "media-month-content", mediaItems: [dummyMediaItem] } },
@@ -139,7 +138,7 @@ describe("POST /api/reports", () => {
     const data = (await response.json()) as { report?: { blocks?: Array<{ position: number; type: string; title: string; content: { title?: string; refreshKey?: string } }> }; error?: string };
 
     expect(response.status).toBe(201);
-    expect(data.report?.blocks).toHaveLength(10);
+    expect(data.report?.blocks).toHaveLength(9);
 
     const titles = data.report!.blocks!.map((block) => block.title);
     const expectedTitles = [
@@ -147,7 +146,6 @@ describe("POST /api/reports", () => {
       "أهم الإحصائيات",
       "التفاعل مع المحتوى",
       "معدل اكتساب المتابعين اليومي",
-      "أعلى المنشورات من حيث اكتساب المتابعين",
       "أعلى المنشورات من حيث التفاعل",
       "أعلى المنشورات من حيث المشاهدات العضوية",
       "محتوى الشهر",
@@ -157,11 +155,11 @@ describe("POST /api/reports", () => {
     expect(titles).toEqual(expectedTitles);
 
     const uniqueRefreshKeys = new Set(data.report!.blocks!.map((block) => block.content.refreshKey));
-    expect(uniqueRefreshKeys.size).toBe(10);
+    expect(uniqueRefreshKeys.size).toBe(9);
 
     // Recommendations should come right before the closing page.
-    expect(data.report!.blocks![8].title).toBe("التوصيات");
-    expect(data.report!.blocks![9].title).toBe("شكراً على ثقتكم");
+    expect(data.report!.blocks![7].title).toBe("التوصيات");
+    expect(data.report!.blocks![8].title).toBe("شكراً على ثقتكم");
   });
 
   it("does not add duplicate blocks when the builder is invoked during creation and refresh", async () => {
@@ -179,10 +177,10 @@ describe("POST /api/reports", () => {
 
     const createData = mockDb.report.create.mock.calls[0][0].data as { blocks: { create: Array<{ position: number; type: BlockType; content: Record<string, unknown> }> } };
     const createdBlocks = createData.blocks.create;
-    expect(createdBlocks).toHaveLength(10);
+    expect(createdBlocks).toHaveLength(9);
 
     const refreshKeys = createdBlocks.map((block) => block.content.refreshKey);
-    expect(new Set(refreshKeys).size).toBe(10);
+    expect(new Set(refreshKeys).size).toBe(9);
   });
 });
 
@@ -207,21 +205,21 @@ describe("PATCH /api/reports", () => {
     expect(data.error).toBeFalsy();
 
     const versionData = mockDb.reportVersion.create.mock.calls[0][0].data as { snapshot: { blocks: Array<{ title: string; refreshKey?: string }> } };
-    expect(versionData.snapshot.blocks).toHaveLength(10);
+    expect(versionData.snapshot.blocks).toHaveLength(9);
 
     const titles = versionData.snapshot.blocks.map((block) => block.title);
-    expect(new Set(titles).size).toBe(10);
+    expect(new Set(titles).size).toBe(9);
 
-    expect(versionData.snapshot.blocks[8].title).toBe("التوصيات");
-    expect(versionData.snapshot.blocks[9].title).toBe("شكراً على ثقتكم");
+    expect(versionData.snapshot.blocks[7].title).toBe("التوصيات");
+    expect(versionData.snapshot.blocks[8].title).toBe("شكراً على ثقتكم");
   });
 
   it("keeps a manually-added TEXT section exactly once when approving", async () => {
     const customText = { type: BlockType.TEXT, title: "ملاحظات خاصة", content: { body: "نص مخصص", refreshKey: "notes-recommendations" } };
     const blocksWithCustomText = [
-      ...standardBlocks().slice(0, 9),
+      ...standardBlocks().slice(0, 8),
       customText,
-      standardBlocks()[9],
+      standardBlocks()[8],
     ];
     mockDb.report.findUnique
       .mockResolvedValueOnce({ id: "report-1", status: "DRAFT" })

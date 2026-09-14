@@ -21,7 +21,6 @@ export const REPORT_DATA_DRIVEN_REFRESH_KEYS = [
   "kpi-overview",
   "kpi-interactions",
   "chart-followers",
-  "media-top-follows",
   "kpi-content-type",
   "media-top-interactions",
   "media-top-views",
@@ -999,10 +998,11 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   totals.reach = reach.value ?? 0;
   totals.follows = followers.gained ?? 0;
   const engagementRate = hasReach && totals.reach > 0 && hasMetric("total_interactions") ? `${((totals.total_interactions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
+  const avgInteractionsPerPost = totals.posts > 0 && hasMetric("total_interactions") ? (totals.total_interactions / totals.posts).toFixed(1) : "غير متاح";
+  const hasAvgInteractionsPerPost = totals.posts > 0 && hasMetric("total_interactions");
   const topBy = (metric: ReportMetric) => [...posts].sort((left, right) => value(right.metrics, metric) - value(left.metrics, metric)).filter((post) => value(post.metrics, metric) > 0).slice(0, 4);
   const topInteractions = topBy("total_interactions");
   const topViews = topBy("views");
-  const topFollows = topBy("follows");
 
   const expectedFollowerDays = daysBetweenInclusive(periodStart, periodEnd);
   const followerDataComplete = dailyMovement.complete && dailyMovement.gainedSeries.length >= expectedFollowerDays;
@@ -1085,10 +1085,9 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
 
   return [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
-    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("avg-interactions-per-post", "متوسط التفاعل بالنسبة للمنشور", avgInteractionsPerPost, hasAvgInteractionsPerPost, { tooltip: "إجمالي التفاعل على المنشورات مقسوماً على عدد المنشورات المنشورة خلال الفترة." }), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [postMetricKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), postMetricKpi("likes", metricLabel.likes, "likes"), postMetricKpi("comments", metricLabel.comments, "comments"), postMetricKpi("saved", "حفظ", "saved"), postMetricKpi("shares", "مشاركة", "shares")], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
-    mediaBlock("أعلى المنشورات من حيث اكتساب المتابعين", "تم اختيار المنشورات الأعلى من بيانات الفترة.", topFollows, ["follows"], "media-top-follows"),
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),
     mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"], "media-top-views"),
     mediaBlock("محتوى الشهر", "أضيفي نماذج إضافية من المحتوى أو احتفظي بالمنشورات المختارة تلقائياً.", [...posts].sort((left, right) => right.score - left.score).slice(0, 4), ["total_interactions", "views"], "media-month-content"),

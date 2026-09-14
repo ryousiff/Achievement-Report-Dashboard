@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { completedReportsLastMonthCount, deduplicateByExternalPostId, mostRecentInstagramSyncAt, newClientsThisMonthCount, reachSeries } from "@/lib/dashboard";
+import { completedReportsLastMonthCount, deduplicateByExternalPostId, mostRecentInstagramSyncAt, newClientsThisMonthCount, reachSeries, totalShares } from "@/lib/dashboard";
 
 const mockDb = vi.hoisted(() => ({
   socialInsightSnapshot: { findMany: vi.fn() },
@@ -65,6 +65,22 @@ describe("reachSeries", () => {
     const result = await reachSeries(2);
     expect(result.values).toEqual([100, 50]);
     expect(result.labels).toEqual(["2026-08-01", "2026-08-02"]);
+  });
+});
+
+describe("totalShares", () => {
+  it("sums shares from unique posts over the requested window", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { publishedAt: new Date("2026-08-01T00:00:00.000Z"), externalPostId: "ig-1", metrics: { shares: 12 }, metricAvailability: { shares: "returned" } },
+      { publishedAt: new Date("2026-08-01T00:00:00.000Z"), externalPostId: "ig-1", metrics: { shares: 5 }, metricAvailability: { shares: "returned" } },
+      { publishedAt: new Date("2026-08-02T00:00:00.000Z"), externalPostId: "ig-2", metrics: { shares: 7 }, metricAvailability: { shares: "returned" } },
+      { publishedAt: new Date("2026-08-02T00:00:00.000Z"), externalPostId: "ig-3", metrics: { likes: 1 }, metricAvailability: {} },
+    ]);
+
+    const result = await totalShares(2);
+
+    expect(result.total).toBe(19);
+    expect(result.periodStart.toISOString()).toBe("2026-08-01T00:00:00.000Z");
   });
 });
 

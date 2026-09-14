@@ -1,13 +1,13 @@
 import { ReportStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { requireFeature } from "@/lib/access";
-import { activeClientsCount, completedReportsLastMonthCount, completedReportsThisMonthCount, connectedAccounts, connectedInstagramAccountsCount, mostRecentInstagramSyncAt, newClientsThisMonthCount, recentReports, reportsNeedingReviewCount } from "@/lib/dashboard";
+import { activeClientsCount, completedReportsLastMonthCount, completedReportsThisMonthCount, connectedAccounts, connectedInstagramAccountsCount, mostRecentInstagramSyncAt, newClientsThisMonthCount, recentReports, reportsNeedingReviewCount, totalShares } from "@/lib/dashboard";
 
 export async function GET(request: NextRequest) {
   const user = await requireFeature(request, "view_dashboard");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const [activeClients, newClientsThisMonth, needsReview, completedThisMonth, completedLastMonth, instagramAccounts, lastInstagramSyncAt, recent, accounts] = await Promise.all([
+  const [activeClients, newClientsThisMonth, needsReview, completedThisMonth, completedLastMonth, instagramAccounts, lastInstagramSyncAt, shares, recent, accounts] = await Promise.all([
     activeClientsCount(),
     newClientsThisMonthCount(),
     reportsNeedingReviewCount(),
@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
     completedReportsLastMonthCount(),
     connectedInstagramAccountsCount(),
     mostRecentInstagramSyncAt(),
+    totalShares(30),
     recentReports(5),
     connectedAccounts(),
   ]);
@@ -28,6 +29,7 @@ export async function GET(request: NextRequest) {
       completedLastMonth,
       instagramAccounts,
       lastInstagramSyncAt,
+      shares: shares.total,
     },
     recent: recent.map((report) => ({
       id: report.id,

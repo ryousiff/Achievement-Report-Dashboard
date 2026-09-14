@@ -129,3 +129,18 @@ export async function reachSeries(days = 30) {
   const series = completeDailySeries(periodStart, periodEnd, [...dayTotals.entries()]);
   return { labels: series.map(([day]) => day), values: series.map(([, value]) => value) };
 }
+
+/** Total shares (Stories + DMs + reshares) over the last N days. Instagram Insights does not expose a
+ *  dedicated "reposts" metric, so shares is the closest available proxy and is surfaced as "مشاركات / reposts". */
+export async function totalShares(days = 30) {
+  const periodEnd = new Date();
+  const periodStart = startOfToday(days - 1);
+  const posts = await db.socialPost.findMany({
+    where: { publishedAt: { gte: periodStart, lte: periodEnd } },
+    select: { publishedAt: true, externalPostId: true, metrics: true, metricAvailability: true },
+  });
+  const entries = deduplicateByExternalPostId(posts)
+    .filter((post) => (post.metricAvailability as Record<string, string> | null)?.shares === "returned" || typeof (post.metrics as Record<string, number>).shares === "number")
+    .map((post) => (post.metrics as Record<string, number>).shares ?? 0);
+  return { total: entries.reduce((sum, value) => sum + value, 0), periodStart, periodEnd };
+}

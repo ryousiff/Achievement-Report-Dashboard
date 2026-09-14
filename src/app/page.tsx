@@ -31,6 +31,7 @@ import {
   Megaphone,
   Plus,
   RefreshCw,
+  Repeat2,
   Save,
   Settings,
   ShieldCheck,
@@ -300,6 +301,8 @@ const copy = {
     reviewReports: "تقارير بانتظار المراجعة",
     instagramAccounts: "حسابات إنستغرام متصلة",
     completedReports: "تقارير مكتملة هذا الشهر",
+    shares: "مشاركات / إعادة نشر",
+    sharesDesc: "عدد المشاركات على المنشورات (Stories + DMs + إعادة نشر) خلال آخر 30 يوماً. Meta لا تفصل الإعادة النشر منفردة.",
     reviewNeeded: "تحتاج إلى مراجعتك",
     allReviewed: "لا تقارير بانتظار المراجعة",
     noNewClients: "لا عملاء جدد هذا الشهر",
@@ -420,6 +423,8 @@ const copy = {
     reviewReports: "Reports to review",
     instagramAccounts: "Connected Instagram accounts",
     completedReports: "Completed this month",
+    shares: "Shares / Reposts",
+    sharesDesc: "Number of post shares (Stories + DMs + reshares) in the last 30 days. Meta does not expose reposts separately.",
     reviewNeeded: "Needs your review",
     allReviewed: "Nothing needs review",
     noNewClients: "No new clients this month",
@@ -1724,6 +1729,7 @@ function Dashboard({
       completedLastMonth: number;
       instagramAccounts: number;
       lastInstagramSyncAt: string | null;
+      shares: number;
     };
     accounts: Array<{
       id: string;
@@ -1771,6 +1777,7 @@ function Dashboard({
     completedLastMonth: 0,
     instagramAccounts: 0,
     lastInstagramSyncAt: null,
+    shares: 0,
   };
 
   const rtl = t.dashboard === "الرئيسية";
@@ -1858,6 +1865,12 @@ function Dashboard({
           change={loading ? "" : completedChange}
           Icon={CheckCircle2}
           warn={completedDiff < 0}
+        />
+        <Metric
+          label={t.shares}
+          value={loading ? "..." : formatValue(stats.shares)}
+          change={loading ? "" : t.sharesDesc}
+          Icon={Repeat2}
         />
       </section>
       <section className="card">
@@ -4212,7 +4225,12 @@ function ReportPreview({
     window.print();
   };
   const preview = (
-    <div className="report-preview-backdrop">
+    <div
+      className="report-preview-backdrop"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <style media="print">{`@page { size: A4 ${orientation}; margin: 0; }`}</style>
       <section className={`report-preview ${orientation}`} dir="rtl">
         <div className="report-preview-actions">

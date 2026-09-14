@@ -90,6 +90,9 @@ beforeEach(() => {
 
 describe("refreshReportData", () => {
   it("refreshes authoritative period KPIs from TOTAL_VALUE snapshots and preserves manual blocks", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date("2026-08-04T00:00:00.000Z"));
+
     const manualBody = "توصيات مخصصة";
     const report = createReport([
       { type: BlockType.TEXT, position: 0, content: { body: "غلاف مخصص", page: "cover", refreshKey: "cover" } },
@@ -155,6 +158,8 @@ describe("refreshReportData", () => {
 
     const interactionsKpis = createdBlocks[2].content.kpis as Array<{ id: string; value: string }>;
     expect(interactionsKpis.find((k) => k.id === "total_interactions")?.value).toBe("50");
+
+    vi.useRealTimers();
   });
 
   it("keeps complete authoritative coverage despite an unrelated generic month closeout", async () => {
@@ -399,12 +404,11 @@ describe("refreshReportData", () => {
       { type: BlockType.KPI, position: 1, content: { body: "نظرة عامة", refreshKey: "kpi-overview", kpis: [{ id: "reach", label: "وصول", value: "312,688", available: true }] } },
       { type: BlockType.KPI, position: 2, content: { body: "تفاعلات", refreshKey: "kpi-interactions", kpis: [{ id: "total_interactions", label: "تفاعل", value: "4,450", available: true }] } },
       { type: BlockType.CHART, position: 3, content: { body: "متابعون", refreshKey: "chart-followers" } },
-      { type: BlockType.MEDIA, position: 4, content: { body: "أعلى المتابعين", refreshKey: "media-top-follows", mediaItems: [{ id: "p1", metrics: { follows: 1 } }] } },
-      { type: BlockType.MEDIA, position: 5, content: { body: "أعلى التفاعل", refreshKey: "media-top-interactions", mediaItems: [{ id: "p1", metrics: { total_interactions: 50 } }] } },
-      { type: BlockType.MEDIA, position: 6, content: { body: "أعلى المشاهدات", refreshKey: "media-top-views", mediaItems: [{ id: "p1", metrics: { views: 100 } }] } },
-      { type: BlockType.MEDIA, position: 7, content: { body: "محتوى الشهر", refreshKey: "media-month-content", mediaItems: [{ id: "p1", metrics: { total_interactions: 50, views: 100 } }] } },
-      { type: BlockType.NOTES, position: 8, content: { body: "توصيات", refreshKey: "notes-recommendations" } },
-      { type: BlockType.TEXT, position: 9, content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" } },
+      { type: BlockType.MEDIA, position: 4, content: { body: "أعلى التفاعل", refreshKey: "media-top-interactions", mediaItems: [{ id: "p1", metrics: { total_interactions: 50 } }] } },
+      { type: BlockType.MEDIA, position: 5, content: { body: "أعلى المشاهدات", refreshKey: "media-top-views", mediaItems: [{ id: "p1", metrics: { views: 100 } }] } },
+      { type: BlockType.MEDIA, position: 6, content: { body: "محتوى الشهر", refreshKey: "media-month-content", mediaItems: [{ id: "p1", metrics: { total_interactions: 50, views: 100 } }] } },
+      { type: BlockType.NOTES, position: 7, content: { body: "توصيات", refreshKey: "notes-recommendations" } },
+      { type: BlockType.TEXT, position: 8, content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" } },
     ]);
     mockDb.report.findUnique.mockResolvedValue(report);
     mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
@@ -425,8 +429,8 @@ describe("refreshReportData", () => {
     const secondUpdateData = mockDb.report.update.mock.calls[1][0].data as { blocks: { create: Array<{ content: Record<string, unknown> }> } };
     const secondKeys = secondUpdateData.blocks.create.map((block) => block.content.refreshKey);
 
-    expect(firstKeys).toHaveLength(10);
-    expect(secondKeys).toHaveLength(10);
+    expect(firstKeys).toHaveLength(9);
+    expect(secondKeys).toHaveLength(9);
     expect(secondKeys).toEqual(firstKeys);
   });
 });
