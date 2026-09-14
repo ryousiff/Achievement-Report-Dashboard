@@ -10,6 +10,7 @@ import { getCoverage } from "@/lib/report-coverage";
 import { buildStandardReportBlocksPreferStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
 
 import { dateValue, requiredText } from "@/lib/validators";
+import { ComparisonMode } from "@/lib/report-period";
 
 const reportBlockTypes = ["text", "kpi", "chart", "platformAnalytics", "media", "notes", "recommendations"] as const;
 type EditableBlockType = (typeof reportBlockTypes)[number];
@@ -76,6 +77,10 @@ export async function POST(request: NextRequest) {
     const draft = createReportDraft(template);
     const periodStart = dateValue(body.periodStart, "periodStart");
     const periodEnd = dateValue(body.periodEnd, "periodEnd");
+    const rawComparisonMode = typeof body.comparisonMode === "string" ? body.comparisonMode : "none";
+    const comparisonMode: ComparisonMode = ["none", "previousMonth", "sameMonthLastYear"].includes(rawComparisonMode)
+      ? (rawComparisonMode as ComparisonMode)
+      : "none";
     const duplicateFromId = typeof body.duplicateFromId === "string" ? body.duplicateFromId : null;
     if (duplicateFromId) {
       const source = await db.report.findUnique({ where: { id: duplicateFromId }, include: { blocks: { orderBy: { position: "asc" } } } });
@@ -88,7 +93,7 @@ export async function POST(request: NextRequest) {
     // Reuse authoritative account-period snapshots whenever they already exist. Only a recent missing
     // period falls back to Meta during initial creation; later refresh/export stays database-only.
     const populatedBlocks = template === "standard"
-      ? await buildStandardReportBlocksPreferStoredPeriodSnapshots(clientId, periodStart, periodEnd)
+      ? await buildStandardReportBlocksPreferStoredPeriodSnapshots(clientId, periodStart, periodEnd, comparisonMode)
       : [];
     const report = await db.report.create({
       data: {
@@ -99,6 +104,7 @@ export async function POST(request: NextRequest) {
         periodEnd,
         status: draft.status,
         isBlank: draft.isBlank,
+        comparisonMode,
         blocks: { create: template === "standard" ? populatedBlocks.map((block, position) => ({ position, type: block.type, content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) : draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) },
       },
       include: { blocks: { orderBy: { position: "asc" } } },

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { completedPeriod, splitRangeByMonth } from "./report-period";
+import { completedPeriod, splitRangeByMonth, comparisonPeriod } from "./report-period";
 
 describe("completedPeriod", () => {
   it("returns the previous completed calendar month", () => {
@@ -80,5 +80,29 @@ describe("splitRangeByMonth", () => {
     expect(chunks).toHaveLength(1);
     expect(chunks[0].start.toISOString().slice(0, 10)).toBe("2026-07-01");
     expect(chunks[0].end.toISOString().slice(0, 10)).toBe("2026-07-31");
+  });
+});
+
+describe("comparisonPeriod", () => {
+  it("returns null when comparison mode is none", () => {
+    const start = new Date(Date.UTC(2026, 6, 1));
+    const end = new Date(Date.UTC(2026, 6, 31, 23, 59, 59, 999));
+    expect(comparisonPeriod(start, end, "none")).toBeNull();
+  });
+
+  it("shifts a monthly period back by one month", () => {
+    const start = new Date(Date.UTC(2026, 6, 1));
+    const end = new Date(Date.UTC(2026, 6, 31, 23, 59, 59, 999));
+    const result = comparisonPeriod(start, end, "previousMonth");
+    expect(result?.start.toISOString()).toBe("2026-06-01T00:00:00.000Z");
+    expect(result?.end.toISOString()).toBe("2026-06-30T23:59:59.999Z");
+  });
+
+  it("shifts a monthly period back by one year", () => {
+    const start = new Date(Date.UTC(2026, 6, 1));
+    const end = new Date(Date.UTC(2026, 6, 31, 23, 59, 59, 999));
+    const result = comparisonPeriod(start, end, "sameMonthLastYear");
+    expect(result?.start.toISOString()).toBe("2025-07-01T00:00:00.000Z");
+    expect(result?.end.toISOString()).toBe("2025-07-31T23:59:59.999Z");
   });
 });

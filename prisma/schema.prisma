@@ -414,6 +414,7 @@ model Report {
   periodEnd              DateTime
   status                 ReportStatus    @default(DRAFT)
   isBlank                Boolean         @default(false)
+  comparisonMode         String          @default("none")
   orientation            String          @default("landscape")
   approvalOverrideReason String?
   // Set whenever refreshReportData() (src/lib/report-refresh.ts) recomputes this report's

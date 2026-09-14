@@ -12,7 +12,7 @@ import {
   type ReportBlock,
   type ViewsResult,
 } from "@/lib/report-data";
-import { splitRangeByMonth } from "@/lib/report-period";
+import { splitRangeByMonth, type ComparisonMode } from "@/lib/report-period";
 
 const LONG_RANGE_REACH_TOOLTIP = "لا يمكن حساب الوصول الفريد لأكثر من 31 يوماً؛ Meta API لا توفر نافذة وصول فريدة لهذه المدة وتجميع نوافذ أقصر لا يُنتج قيمة فريدة صحيحة.";
 const LONG_RANGE_AGGREGATE_TOOLTIP = "قيمة محسوبة بجمع القيم الشهرية المحفوظة في قاعدة البيانات. تنطبق على المقاييس التراكمية فقط.";
@@ -209,13 +209,14 @@ export async function buildStandardReportBlocksFromStoredPeriodSnapshots(
   clientId: string,
   periodStart: Date,
   periodEnd: Date,
+  comparisonMode: ComparisonMode = "none",
 ): Promise<ReportBlock[]> {
   return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
     reach: storedAccountReachForRange,
     views: storedAccountViewsForRange,
     followers: storedAccountFollowersForRange,
     dailyFollowerMovement: dailyFollowerMovementFromDatabase,
-  });
+  }, new Date(), comparisonMode);
 }
 
 /** Initial report creation prefers DB snapshots to avoid unnecessary Meta requests, but can still fall back
@@ -224,11 +225,12 @@ export async function buildStandardReportBlocksPreferStoredPeriodSnapshots(
   clientId: string,
   periodStart: Date,
   periodEnd: Date,
+  comparisonMode: ComparisonMode = "none",
 ): Promise<ReportBlock[]> {
   return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
     reach: reachPreferStored,
     views: viewsPreferStored,
     followers: followersPreferStored,
     dailyFollowerMovement,
-  });
+  }, new Date(), comparisonMode);
 }

@@ -70,6 +70,7 @@ function mergeKpis(existing: unknown, fresh: unknown): unknown {
       ...kpi,
       value: freshKpi.value,
       available: freshKpi.available,
+      change: freshKpi.change,
       reachAccuracy: freshKpi.reachAccuracy,
       reachMethod: freshKpi.reachMethod,
       followersAccuracy: freshKpi.followersAccuracy,
@@ -162,7 +163,7 @@ export async function refreshReportData(reportId: string, options: RefreshOption
     throw new Error("Only skipMetaApi=true is currently supported.");
   }
 
-  const freshBlocks = await builder(report.clientId, report.periodStart, report.periodEnd);
+  const freshBlocks = await builder(report.clientId, report.periodStart, report.periodEnd, report.comparisonMode as import("@/lib/report-period").ComparisonMode);
   const freshByKey = new Map(
     freshBlocks
       .map((block) => ({ block, key: getRefreshKey(block.content) }))

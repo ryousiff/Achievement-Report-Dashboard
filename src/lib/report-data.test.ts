@@ -488,6 +488,23 @@ describe("buildStandardReportBlocks", () => {
     expect(avgKpi!.available).toBe(true);
     expect(avgKpi!.value).toBe("50.0");
   });
+
+  it("emits a comparison block when comparisonMode is enabled", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([
+      { id: "p1", externalPostId: "ig-1", caption: "Post", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-08-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 1 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE" }, mediaSource: MediaSource.OWNED },
+    ]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialConnection.findFirst.mockResolvedValue(defaultConnection());
+    mockDecryptToken.mockReturnValue("token-123");
+    mockGraph.mockResolvedValue({ data: [{ total_value: { value: 200 } }] });
+
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-08-01T00:00:00.000Z"), new Date("2026-08-01T23:59:59.999Z"), {}, new Date("2026-08-15T00:00:00.000Z"), "previousMonth");
+    const comparisonBlock = blocks.find((block) => block.type === "KPI" && block.title === "المقارنة بالشهر الماضي");
+    expect(comparisonBlock).toBeDefined();
+    const kpis = (comparisonBlock!.content as Record<string, unknown>).kpis as Array<{ id: string; value: string; change?: string }>;
+    expect(kpis.length).toBeGreaterThan(0);
+    expect(kpis.find((kpi) => kpi.id === "interactions-comparison")?.change).toBe("0.0%");
+  });
 });
 
 describe("periodAccountFollowers", () => {

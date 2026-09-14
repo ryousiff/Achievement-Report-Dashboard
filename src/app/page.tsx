@@ -2,7 +2,7 @@
 
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { completedPeriod, type ReportPeriod } from "@/lib/report-period";
+import { completedPeriod, type ReportPeriod, type ComparisonMode } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import { DEFAULT_AD_BUDGET_CURRENCY } from "@/lib/ad-budget";
 import { isEmployeeVisibleSyncError, mapEmployeeSyncErrorPresentation } from "@/lib/meta-error-classification";
@@ -222,6 +222,7 @@ type ReportMetadata = {
   periodStart: string;
   periodEnd: string;
   periodType: ReportPeriod;
+  comparisonMode: ComparisonMode;
 };
 type Dictionary = (typeof copy)[Language];
 type MediaSort = "score" | "interactions" | "views" | "follows" | "newest";
@@ -586,6 +587,7 @@ export default function Home() {
       periodStart: period.periodStart,
       periodEnd: period.periodEnd,
       periodType: "monthly",
+      comparisonMode: "none",
     };
   });
   const [draftId, setDraftId] = useState<string | null>(null);
@@ -984,6 +986,7 @@ export default function Home() {
       periodStart: period.periodStart,
       periodEnd: period.periodEnd,
       periodType: "monthly",
+      comparisonMode: "none",
     });
     setSetupTemplate(template);
     setReportSetupOpen(true);
@@ -1015,6 +1018,7 @@ export default function Home() {
           title: metadata.title,
           periodStart: `${metadata.periodStart}T00:00:00.000Z`,
           periodEnd: `${metadata.periodEnd}T23:59:59.999Z`,
+          comparisonMode: metadata.comparisonMode,
         }),
       });
       if (!response.ok) {
@@ -1336,6 +1340,7 @@ export default function Home() {
         periodStart: string;
         periodEnd: string;
         isBlank: boolean;
+        comparisonMode: string;
         status: "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED";
         dataRefreshedAt?: string | null;
         blocks: Array<{ type: string; position: number; content: unknown }>;
@@ -1414,6 +1419,7 @@ export default function Home() {
       periodStart: report.periodStart.slice(0, 10),
       periodEnd: report.periodEnd.slice(0, 10),
       periodType: "monthly",
+      comparisonMode: report.comparisonMode === "previousMonth" || report.comparisonMode === "sameMonthLastYear" ? report.comparisonMode : "none",
     });
     setSelectedClientId(report.clientId);
     setDraftId(report.id);
@@ -4001,6 +4007,17 @@ function ReportSetup({
       };
     });
   };
+  const comparisonOptions: Array<{ value: ComparisonMode; label: string }> = arabic
+    ? [
+        { value: "none", label: "بدون مقارنة" },
+        { value: "previousMonth", label: "الشهر الماضي" },
+        { value: "sameMonthLastYear", label: "الشهر نفسه السنة الماضية" },
+      ]
+    : [
+        { value: "none", label: "No comparison" },
+        { value: "previousMonth", label: "Previous month" },
+        { value: "sameMonthLastYear", label: "Same month last year" },
+      ];
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="report-setup card" role="dialog" aria-modal="true">
@@ -4026,6 +4043,22 @@ function ReportSetup({
                 name="report-period"
                 checked={form.periodType === option.value}
                 onChange={() => setPeriod(option.value)}
+              />
+              {option.label}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset className="report-periods">
+          <legend>{arabic ? "المقارنة" : "Comparison"}</legend>
+          {comparisonOptions.map((option) => (
+            <label key={option.value}>
+              <input
+                type="radio"
+                name="report-comparison"
+                checked={form.comparisonMode === option.value}
+                onChange={() =>
+                  setForm((current) => ({ ...current, comparisonMode: option.value }))
+                }
               />
               {option.label}
             </label>

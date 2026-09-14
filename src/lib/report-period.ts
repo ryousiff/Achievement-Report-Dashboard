@@ -1,4 +1,5 @@
 export type ReportPeriod = "monthly" | "quarterly" | "halfYearly" | "yearly";
+export type ComparisonMode = "none" | "previousMonth" | "sameMonthLastYear";
 
 export type CompletedPeriod = {
   periodStart: string;
@@ -63,6 +64,37 @@ export function completedPeriod(periodType: ReportPeriod, today = new Date()): C
 }
 
 export type PeriodChunk = { start: Date; end: Date };
+
+function daysInMonthUTC(year: number, month: number) {
+  return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
+function shiftCalendarMonthUTC(date: Date, months: number): Date {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + months;
+  const day = date.getUTCDate();
+  const daysInTarget = daysInMonthUTC(year, month);
+  return new Date(Date.UTC(year, month, Math.min(day, daysInTarget), date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds(), date.getUTCMilliseconds()));
+}
+
+function shiftCalendarYearUTC(date: Date, years: number): Date {
+  const year = date.getUTCFullYear() + years;
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const daysInTarget = daysInMonthUTC(year, month);
+  return new Date(Date.UTC(year, month, Math.min(day, daysInTarget), date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds(), date.getUTCMilliseconds()));
+}
+
+/** Compute the comparison period for a given report period and comparison mode. */
+export function comparisonPeriod(periodStart: Date, periodEnd: Date, mode: ComparisonMode): { start: Date; end: Date } | null {
+  if (mode === "none") return null;
+  const start = new Date(Date.UTC(periodStart.getUTCFullYear(), periodStart.getUTCMonth(), periodStart.getUTCDate()));
+  const end = new Date(Date.UTC(periodEnd.getUTCFullYear(), periodEnd.getUTCMonth(), periodEnd.getUTCDate(), 23, 59, 59, 999));
+  if (mode === "previousMonth") {
+    return { start: shiftCalendarMonthUTC(start, -1), end: shiftCalendarMonthUTC(end, -1) };
+  }
+  return { start: shiftCalendarYearUTC(start, -1), end: shiftCalendarYearUTC(end, -1) };
+}
 
 /** Split an arbitrary date range into chunks that each fall within a single
  *  calendar month and therefore never exceed 31 days. Useful when aggregating

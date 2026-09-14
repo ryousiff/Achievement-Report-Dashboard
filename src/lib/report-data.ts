@@ -2,7 +2,7 @@ import { BlockType, InsightPeriodType, MediaSource } from "@prisma/client";
 import { db } from "@/lib/db";
 import { decryptToken } from "@/lib/token-encryption";
 import { graph } from "@/lib/meta-sync";
-import { splitRangeByMonth } from "@/lib/report-period";
+import { splitRangeByMonth, comparisonPeriod, type ComparisonMode } from "@/lib/report-period";
 import { mediaThumbnailUrl } from "@/lib/media-storage";
 import { resolveReportPostMetrics, summarizePostMetricsAccuracy, type PostMetricsSource } from "@/lib/post-metric-snapshots";
 
@@ -19,6 +19,7 @@ export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | 
  * drops any block still carrying it from older, already-saved reports on their next refresh. */
 export const REPORT_DATA_DRIVEN_REFRESH_KEYS = [
   "kpi-overview",
+  "kpi-comparison",
   "kpi-interactions",
   "chart-followers",
   "kpi-content-type",
@@ -75,6 +76,79 @@ function kpi(id: string, label: string, value: string, available = true, extra?:
 
 function mediaBlock(title: string, body: string, posts: ReportPost[], display: string[], refreshKey: ReportRefreshKey) {
   return { type: BlockType.MEDIA, title, content: { body, mediaItems: posts, mediaDisplay: display, autoFilled: true, refreshKey, postMetricsAccuracy: summarizePostMetricsAccuracy(posts.map((post) => post.metricsSource)) } };
+}
+
+function formatMetricChange(current: number, previous: number): string {
+  if (previous === 0) return current > 0 ? "+∞" : "—";
+  const pct = ((current - previous) / previous) * 100;
+  if (pct === 0) return "0.0%";
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+type PeriodMetricsSummary = {
+  reach: number;
+  hasReach: boolean;
+  totalInteractions: number;
+  hasTotalInteractions: boolean;
+  views: number;
+  follows: number;
+  hasFollows: boolean;
+  posts: number;
+};
+
+async function fetchPeriodMetricsSummary(
+  clientId: string,
+  periodStart: Date,
+  periodEnd: Date,
+  resolvers: Partial<ReportDataResolvers>,
+  now: Date,
+): Promise<PeriodMetricsSummary> {
+  const resolve = { ...defaultReportDataResolvers, ...resolvers };
+  const [posts, reach, followers, totalViews] = await Promise.all([
+    reportPosts(clientId, periodStart, periodEnd, now),
+    resolve.reach(clientId, periodStart, periodEnd),
+    resolve.followers(clientId, periodStart, periodEnd),
+    resolve.views(clientId, periodStart, periodEnd),
+  ]);
+  const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
+  const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
+  return {
+    reach: reach.value ?? totals.reach,
+    hasReach: reach.value !== null || totals.reach > 0,
+    totalInteractions: totals.total_interactions,
+    hasTotalInteractions: hasMetric("total_interactions"),
+    views: totalViews.value ?? totals.views,
+    follows: followers.gained ?? totals.follows,
+    hasFollows: followers.gained !== null || totals.follows > 0,
+    posts: posts.length,
+  };
+}
+
+async function buildComparisonBlock(
+  clientId: string,
+  periodStart: Date,
+  periodEnd: Date,
+  mode: ComparisonMode,
+  resolvers: Partial<ReportDataResolvers>,
+  now: Date,
+): Promise<ReportBlock | null> {
+  const comp = comparisonPeriod(periodStart, periodEnd, mode);
+  if (!comp) return null;
+  const [primary, previous] = await Promise.all([
+    fetchPeriodMetricsSummary(clientId, periodStart, periodEnd, resolvers, now),
+    fetchPeriodMetricsSummary(clientId, comp.start, comp.end, resolvers, now),
+  ]);
+  const label = mode === "previousMonth" ? "المقارنة بالشهر الماضي" : "المقارنة بالشهر نفسه السنة الماضية";
+  const body = "الفرق بين الفترة الحالية والفترة المقارنة بها.";
+  const kpis = [
+    kpi("reach-comparison", "الوصول", primary.hasReach ? primary.reach.toLocaleString() : "غير متاح", primary.hasReach, { change: formatMetricChange(primary.reach, previous.reach) }),
+    kpi("follows-comparison", "المتابعون الجدد", primary.hasFollows ? primary.follows.toLocaleString() : "غير متاح", primary.hasFollows, { change: formatMetricChange(primary.follows, previous.follows) }),
+    kpi("views-comparison", "المشاهدات", primary.views.toLocaleString(), true, { change: formatMetricChange(primary.views, previous.views) }),
+    kpi("interactions-comparison", "التفاعل", primary.hasTotalInteractions ? primary.totalInteractions.toLocaleString() : "غير متاح", primary.hasTotalInteractions, { change: formatMetricChange(primary.totalInteractions, previous.totalInteractions) }),
+    kpi("posts-comparison", "المنشورات", primary.posts.toLocaleString(), true, { change: formatMetricChange(primary.posts, previous.posts) }),
+  ];
+  return { type: BlockType.KPI, title: label, content: { body, kpis, autoFilled: true, refreshKey: "kpi-comparison" satisfies ReportRefreshKey } };
 }
 
 /** Post-level metrics for an already-completed (finalized) calendar month come from the immutable
@@ -951,16 +1025,16 @@ export async function periodAccountFollowersFromDatabase(clientId: string, perio
 }
 
 /** Build standard blocks using only data already in the database. */
-export async function buildStandardReportBlocksFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<ReportBlock[]> {
+export async function buildStandardReportBlocksFromDatabase(clientId: string, periodStart: Date, periodEnd: Date, comparisonMode: ComparisonMode = "none"): Promise<ReportBlock[]> {
   return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
     reach: periodAccountReachFromDatabase,
     followers: periodAccountFollowersFromDatabase,
     views: periodAccountViewsFromDatabase,
     dailyFollowerMovement: dailyFollowerMovementFromDatabase,
-  });
+  }, new Date(), comparisonMode);
 }
 
-export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}, now: Date = new Date()): Promise<ReportBlock[]> {
+export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}, now: Date = new Date(), comparisonMode: ComparisonMode = "none"): Promise<ReportBlock[]> {
   // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
   // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
@@ -1092,7 +1166,8 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     );
   };
 
-  return [
+  const comparisonBlock = await buildComparisonBlock(clientId, periodStart, periodEnd, comparisonMode, resolvers, now);
+  const blocks: ReportBlock[] = [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("avg-interactions-per-post", "متوسط التفاعل بالنسبة للمنشور", avgInteractionsPerPost, hasAvgInteractionsPerPost, { tooltip: "إجمالي التفاعل على المنشورات مقسوماً على عدد المنشورات المنشورة خلال الفترة." }), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [postMetricKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), postMetricKpi("likes", metricLabel.likes, "likes"), postMetricKpi("comments", metricLabel.comments, "comments"), postMetricKpi("saved", "حفظ", "saved"), postMetricKpi("shares", "مشاركة", "shares")], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
@@ -1103,6 +1178,8 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     { type: BlockType.NOTES, title: "التوصيات", content: { body: "أضيفي توصيات عملية قابلة للتنفيذ للشهر القادم.", refreshKey: "notes-recommendations" satisfies ReportRefreshKey } },
     { type: BlockType.TEXT, title: "شكراً على ثقتكم", content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" satisfies ReportRefreshKey } },
   ];
+  if (comparisonBlock) blocks.splice(2, 0, comparisonBlock);
+  return blocks;
 }
 
 const LONG_RANGE_REACH_TOOLTIP = "لا يمكن حساب الوصول الفريد لأكثر من 31 يوماً؛ Meta API لا توفر نافذة وصول فريدة لهذه المدة وتجميع نوافذ أقصر لا يُنتج قيمة فريدة صحيحة.";
