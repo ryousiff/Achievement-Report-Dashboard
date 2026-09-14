@@ -26,6 +26,15 @@ export function getHistoricalBackfillConfig() {
   };
 }
 
+/** Snapshots for a completed calendar month stay open for late-arriving Meta metrics
+ *  for this many days after the month ends. Only after the grace period do they become
+ *  immutable historical records. */
+export function getSnapshotFinalizationConfig() {
+  return {
+    monthEndGraceDays: numberFromEnv("SNAPSHOT_MONTH_END_GRACE_DAYS", 10),
+  };
+}
+
 /** Low-priority background backfill of permanent post-thumbnail storage (see src/lib/media-storage.ts
  * and src/lib/media-backfill.ts). Kept deliberately small/slow-paced so it never competes meaningfully
  * with normal account-insight/media sync for Meta's app-level request budget. */

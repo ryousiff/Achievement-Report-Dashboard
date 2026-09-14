@@ -36,10 +36,13 @@ describe("monthPeriodUTC / isMonthFinalized", () => {
     expect(periodEnd.toISOString()).toBe("2025-12-31T23:59:59.999Z");
   });
 
-  it("treats a month as finalized only once its last instant is in the past", () => {
+  it("treats a month as finalized only once the configured post-month grace period has passed", () => {
     const periodEnd = new Date("2026-07-31T23:59:59.999Z");
     expect(isMonthFinalized(periodEnd, new Date("2026-07-31T23:59:59.999Z"))).toBe(false);
-    expect(isMonthFinalized(periodEnd, new Date("2026-08-01T00:00:00.000Z"))).toBe(true);
+    expect(isMonthFinalized(periodEnd, new Date("2026-08-01T00:00:00.000Z"))).toBe(false);
+    expect(isMonthFinalized(periodEnd, new Date("2026-08-10T23:59:59.999Z"))).toBe(false);
+    expect(isMonthFinalized(periodEnd, new Date("2026-08-11T00:00:00.000Z"))).toBe(true);
+    expect(isMonthFinalized(periodEnd, new Date("2026-08-11T00:00:00.000Z"), 0)).toBe(true);
   });
 });
 
@@ -75,11 +78,23 @@ describe("persistPostMetricSnapshot", () => {
     expect(call.create.views).toBe(100);
   });
 
-  it("finalizes the snapshot the first time it is written after the month has fully elapsed", async () => {
+  it("keeps updating the snapshot during the post-month grace period without finalizing", async () => {
     mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
     mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
 
-    const now = new Date("2026-08-01T03:00:00.000Z"); // just after July ended
+    const now = new Date("2026-08-05T03:00:00.000Z"); // inside the default 10-day grace period
+    await persistPostMetricSnapshot("post-1", publishedAt, { ...completeMetrics, views: 714848 }, completeAvailability, now);
+
+    const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
+    expect(call.create.finalizedAt).toBeNull();
+    expect(call.create.views).toBe(714848);
+  });
+
+  it("finalizes the snapshot the first time it is written after the grace period has elapsed", async () => {
+    mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
+    mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
+
+    const now = new Date("2026-08-11T03:00:00.000Z"); // just after the 10-day grace period
     await persistPostMetricSnapshot("post-1", publishedAt, { ...completeMetrics, views: 714848 }, completeAvailability, now);
 
     const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
@@ -93,7 +108,7 @@ describe("persistPostMetricSnapshot", () => {
     const metrics = { ...completeMetrics };
     delete (metrics as Partial<typeof completeMetrics>).views;
 
-    await persistPostMetricSnapshot("post-1", publishedAt, metrics, { ...completeAvailability, views: "FAILED" }, new Date("2026-08-01T03:00:00.000Z"));
+    await persistPostMetricSnapshot("post-1", publishedAt, metrics, { ...completeAvailability, views: "FAILED" }, new Date("2026-08-11T03:00:00.000Z"));
 
     const call = mockDb.socialPostMetricSnapshot.upsert.mock.calls[0][0] as { create: Record<string, unknown> };
     expect(call.create.views).toBe(0);
@@ -102,10 +117,10 @@ describe("persistPostMetricSnapshot", () => {
     expect((call.create.metricAvailability as Record<string, string>).views).toBe("UNRESOLVED");
   });
 
-  it("finalizes a genuine numeric zero", async () => {
+  it("finalizes a genuine numeric zero once the grace period has passed", async () => {
     mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
     mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
-    const now = new Date("2026-08-01T03:00:00.000Z");
+    const now = new Date("2026-08-11T03:00:00.000Z");
 
     await persistPostMetricSnapshot("post-1", publishedAt, { ...completeMetrics, views: 0 }, completeAvailability, now);
 
@@ -115,10 +130,10 @@ describe("persistPostMetricSnapshot", () => {
     expect(call.create.validityState).toBe("VALID");
   });
 
-  it("accepts explicitly NOT_SUPPORTED metrics without treating them as zeros", async () => {
+  it("accepts explicitly NOT_SUPPORTED metrics without treating them as zeros once the grace period has passed", async () => {
     mockDb.socialPostMetricSnapshot.findUnique.mockResolvedValue(null);
     mockDb.socialPostMetricSnapshot.upsert.mockResolvedValue(null);
-    const now = new Date("2026-08-01T03:00:00.000Z");
+    const now = new Date("2026-08-11T03:00:00.000Z");
     const metrics = { ...completeMetrics };
     delete (metrics as Partial<typeof completeMetrics>).follows;
 

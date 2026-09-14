@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { getSnapshotFinalizationConfig } from "@/lib/env";
 
 /** Historical, per-post-per-month metric snapshots. See prisma/schema.prisma's
  * `SocialPostMetricSnapshot` model doc comment for the full rationale: `SocialPost.metrics` is the
@@ -82,21 +83,25 @@ export function monthPeriodUTC(date: Date): { periodStart: Date; periodEnd: Date
   return { periodStart, periodEnd };
 }
 
-/** A calendar month is "finalized" once it has fully elapsed as of `now`. */
-export function isMonthFinalized(periodEnd: Date, now: Date = new Date()): boolean {
-  return periodEnd.valueOf() < now.valueOf();
+/** A calendar month is "finalized" once `now` is past the end of its configured grace period.
+ *  During the grace period (default 10 days after month end) late-arriving Meta metrics can still
+ *  update the snapshot, so reports keep refreshing. */
+export function isMonthFinalized(periodEnd: Date, now: Date = new Date(), graceDays: number = getSnapshotFinalizationConfig().monthEndGraceDays): boolean {
+  const graceEnd = new Date(periodEnd.valueOf() + graceDays * 24 * 60 * 60 * 1000);
+  return graceEnd.valueOf() < now.valueOf();
 }
 
 /** Persist (or, once finalized, leave untouched forever) the historical snapshot of a post's metrics
  * for the calendar month it was published in.
  *
  * Called every time a post's live metrics are written (see meta-sync.ts's upsertPost). While the
- * month is still open, this keeps the snapshot in step with the post's live metrics. The first call
- * observed on or after the month's last day has fully elapsed records one final value and marks the
- * snapshot finalized; every subsequent call for that post/month is then a no-op, so later Meta
- * refreshes (which legitimately keep changing lifetime metrics for up to RECENT_POST_REFRESH_DAYS)
- * can never retroactively change an already-completed month's report. Best-effort: failures are the
- * caller's responsibility to handle so a snapshot write can never break the primary sync. */
+ * month is still open or inside the configured post-month grace period, this keeps the snapshot in
+ * step with the post's live metrics. The first call observed after the grace period has elapsed
+ * records one final value and marks the snapshot finalized; every subsequent call for that
+ * post/month is then a no-op, so later Meta refreshes (which legitimately keep changing lifetime
+ * metrics for up to RECENT_POST_REFRESH_DAYS) can never retroactively change an already-completed
+ * month's report. Best-effort: failures are the caller's responsibility to handle so a snapshot
+ * write can never break the primary sync. */
 export async function persistPostMetricSnapshot(
   postId: string,
   publishedAt: Date,
