@@ -832,6 +832,7 @@ export default function Home() {
             kind: "text",
             title: "شكراً على ثقتكم",
             body: "Kaan Creative",
+            page: "closing",
           },
         ]
       : [
@@ -911,7 +912,13 @@ export default function Home() {
             title: "Recommendations",
             body: "Add clear, practical recommendations for the coming month.",
           },
-          { id: 11, kind: "text", title: "Thank you", body: "Kaan Creative" },
+          {
+            id: 11,
+            kind: "text",
+            title: "Thank you",
+            body: "Kaan Creative",
+            page: "closing",
+          },
         ];
   };
   const blocksFromReport = (
@@ -4402,9 +4409,17 @@ function ReportPreview({
             {blocks
               .filter((block) => block.page !== "cover")
               .map((block) => (
-                <section className="print-section" key={block.id}>
-                  <h2>{block.title}</h2>
-                  {block.kind === "kpi" && block.kpis ? (
+                <section
+                  className={`print-section${block.page === "closing" ? " print-closing" : ""}`}
+                  key={block.id}
+                >
+                  {block.page !== "closing" && <h2>{block.title}</h2>}
+                  {block.page === "closing" ? (
+                    <div className="print-closing-content">
+                      <h1>{block.title}</h1>
+                      <p>{block.body}</p>
+                    </div>
+                  ) : block.kind === "kpi" && block.kpis ? (
                     <div className="print-kpi-grid">
                       {block.kpis.map((kpi) =>
                         kpi.display === "line" || kpi.display === "bar" ? (

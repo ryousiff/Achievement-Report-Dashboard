@@ -118,4 +118,9 @@ button { cursor: pointer; border: 0; }
 .print-kpi strong { font-size: 26px; margin: 10px 0 6px; }
 .print-kpi small { color: var(--success); font: 12px Manrope, sans-serif; direction: ltr; display: block; text-align: start; }
 .print-section:has(h2 + .print-kpi-grid) .print-kpi-grid:only-child { margin-top: 24px; }
-@media print { .print-cover { min-height: 793px; } .print-kpi-grid { grid-template-columns: repeat(5, 1fr); } }
+.print-closing { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: linear-gradient(180deg, #fff 0%, #fff8f4 100%); }
+.print-closing-content { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+.print-closing-content h1 { margin: 0; font-size: clamp(42px, 6vw, 72px); font-weight: 700; color: var(--purple); letter-spacing: -0.02em; }
+.print-closing-content p { margin: 0; font-size: 18px; color: var(--muted); }
+.print-closing .print-logo { width: 160px; height: 110px; margin-bottom: 24px; }
+@media print { .print-cover { min-height: 793px; } .print-kpi-grid { grid-template-columns: repeat(5, 1fr); } .print-closing { min-height: 793px; } }
