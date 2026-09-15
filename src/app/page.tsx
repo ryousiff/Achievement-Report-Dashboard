@@ -4401,7 +4401,17 @@ function ReportPreview({
             <div>
               <h1>{reportTitle}</h1>
               <p>
-                {t.instagram} · {periodStart}
+                {new Intl.DateTimeFormat("ar", {
+                  day: "numeric",
+                  month: "long",
+                  year: "numeric",
+                }).format(new Date(periodStart))}
+                {" — "}
+                {new Intl.DateTimeFormat("ar", {
+                  day: "numeric",
+                  month: "long",
+                  year: "numeric",
+                }).format(new Date(periodEnd))}
               </p>
             </div>
           </header>
