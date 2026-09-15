@@ -95,6 +95,7 @@ type PeriodMetricsSummary = {
   follows: number;
   hasFollows: boolean;
   posts: number;
+  metrics: Record<ReportMetric, number>;
 };
 
 async function fetchPeriodMetricsSummary(
@@ -122,6 +123,7 @@ async function fetchPeriodMetricsSummary(
     follows: followers.gained ?? totals.follows,
     hasFollows: followers.gained !== null || totals.follows > 0,
     posts: posts.length,
+    metrics: totals,
   };
 }
 
@@ -1166,7 +1168,6 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     );
   };
 
-  const comparisonBlock = await buildComparisonBlock(clientId, periodStart, periodEnd, comparisonMode, resolvers, now);
   const blocks: ReportBlock[] = [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("avg-interactions-per-post", "متوسط التفاعل بالنسبة للمنشور", avgInteractionsPerPost, hasAvgInteractionsPerPost, { tooltip: "إجمالي التفاعل على المنشورات مقسوماً على عدد المنشورات المنشورة خلال الفترة." }), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
@@ -1178,8 +1179,47 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     { type: BlockType.NOTES, title: "التوصيات", content: { body: "أضيفي توصيات عملية قابلة للتنفيذ للشهر القادم.", refreshKey: "notes-recommendations" satisfies ReportRefreshKey } },
     { type: BlockType.TEXT, title: "شكراً على ثقتكم", content: { body: "Kaan Creative", page: "closing", refreshKey: "closing" satisfies ReportRefreshKey } },
   ];
-  if (comparisonBlock) blocks.splice(2, 0, comparisonBlock);
-  return blocks;
+  const comparisonModes = ["previousMonth", "sameMonthLastYear"] as const;
+  const comparisonSummaries = await Promise.all(
+    comparisonModes.map(async (mode) => {
+      const period = comparisonPeriod(periodStart, periodEnd, mode)!;
+      return fetchPeriodMetricsSummary(clientId, period.start, period.end, resolvers, now);
+    }),
+  );
+  const comparisonValue = (id: string, summary: PeriodMetricsSummary) => {
+    const metricById: Record<string, ReportMetric> = {
+      reach: "reach",
+      "post-reach-sum": "reach",
+      follows: "follows",
+      "total-views": "views",
+      views: "views",
+      total_interactions: "total_interactions",
+      likes: "likes",
+      comments: "comments",
+      saved: "saved",
+      shares: "shares",
+      posts: "posts",
+    };
+    if (id === "engagement-rate") return summary.reach > 0 ? `${((summary.totalInteractions / summary.reach) * 100).toFixed(2)}%` : "غير متاح";
+    if (id === "avg-interactions-per-post") return summary.posts > 0 ? (summary.totalInteractions / summary.posts).toFixed(1) : "غير متاح";
+    const metric = metricById[id];
+    if (!metric) return "غير متاح";
+    if (metric === "reach") return summary.hasReach ? summary.reach.toLocaleString() : "غير متاح";
+    if (metric === "follows") return summary.hasFollows ? summary.follows.toLocaleString() : "غير متاح";
+    if (metric === "views" && id === "total-views") return summary.views.toLocaleString();
+    return summary.metrics[metric].toLocaleString();
+  };
+  return blocks.map((block) => block.type !== BlockType.KPI ? block : {
+    ...block,
+    content: {
+      ...block.content,
+      kpis: (block.content.kpis as Array<Record<string, unknown>>).map((item) => ({
+        ...item,
+        comparisonMode: "none",
+        comparisonValues: Object.fromEntries(comparisonModes.map((mode, index) => [mode, comparisonValue(String(item.id), comparisonSummaries[index])])),
+      })),
+    },
+  });
 }
 
 const LONG_RANGE_REACH_TOOLTIP = "لا يمكن حساب الوصول الفريد لأكثر من 31 يوماً؛ Meta API لا توفر نافذة وصول فريدة لهذه المدة وتجميع نوافذ أقصر لا يُنتج قيمة فريدة صحيحة.";

@@ -69,6 +69,7 @@ function mergeKpis(existing: unknown, fresh: unknown): unknown {
     return {
       ...kpi,
       value: freshKpi.value,
+      comparisonValues: freshKpi.comparisonValues,
       available: freshKpi.available,
       change: freshKpi.change,
       reachAccuracy: freshKpi.reachAccuracy,

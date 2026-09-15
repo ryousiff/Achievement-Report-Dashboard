@@ -103,7 +103,7 @@ describe("refreshReportData", () => {
           body: "نظرة عامة",
           refreshKey: "kpi-overview",
           kpis: [
-            { id: "reach", label: "وصول", value: "0", available: true },
+            { id: "reach", label: "وصول يدوي", value: "0", available: true, display: "bar", comparisonMode: "sameMonthLastYear", comparisonValues: { previousMonth: "old", sameMonthLastYear: "old" } },
             { id: "follows", label: "المتابعون الجدد", value: "512", available: true },
             { id: "total-views", label: "إجمالي المشاهدات", value: "818,485", available: true },
           ],
@@ -149,8 +149,13 @@ describe("refreshReportData", () => {
     expect(createdBlocks[3].content.body).toBe(manualBody);
     expect(createdBlocks[4].content.body).toBe("Kaan Creative");
 
-    const overviewKpis = createdBlocks[1].content.kpis as Array<{ id: string; value: string }>;
-    expect(overviewKpis.find((k) => k.id === "reach")?.value).toBe("300");
+    const overviewKpis = createdBlocks[1].content.kpis as Array<{ id: string; label: string; value: string; display?: string; comparisonMode?: string; comparisonValues?: Record<string, string> }>;
+    const reachKpi = overviewKpis.find((k) => k.id === "reach");
+    expect(reachKpi?.value).toBe("300");
+    expect(reachKpi?.label).toBe("وصول يدوي");
+    expect(reachKpi?.display).toBe("bar");
+    expect(reachKpi?.comparisonMode).toBe("sameMonthLastYear");
+    expect(reachKpi?.comparisonValues).not.toEqual({ previousMonth: "old", sameMonthLastYear: "old" });
     expect(overviewKpis.find((k) => k.id === "follows")?.value).toBe("520");
     expect(overviewKpis.find((k) => k.id === "followers-lost")?.value).toBe("370");
     expect(overviewKpis.find((k) => k.id === "net-follower-growth")?.value).toBe("+150");

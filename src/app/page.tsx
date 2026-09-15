@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { completedPeriod, type ReportPeriod, type ComparisonMode } from "@/lib/report-period";
 import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
@@ -31,7 +31,6 @@ import {
   Megaphone,
   Plus,
   RefreshCw,
-  Repeat2,
   Save,
   Settings,
   ShieldCheck,
@@ -52,6 +51,8 @@ type Kpi = {
   value: string;
   change?: string;
   display?: MetricPresentation;
+  comparisonMode?: ComparisonMode;
+  comparisonValues?: Partial<Record<Exclude<ComparisonMode, "none">, string>>;
   custom?: boolean;
 };
 type MonthlySummary = {
@@ -591,6 +592,7 @@ export default function Home() {
     };
   });
   const [draftId, setDraftId] = useState<string | null>(null);
+  const autoRefreshedReportIds = useRef<Set<string>>(new Set());
   const [reportStatus, setReportStatus] = useState<
     "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED"
   >("DRAFT");
@@ -605,7 +607,7 @@ export default function Home() {
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [user, setUser] = useState<WorkspaceUser | null | undefined>(undefined);
   const t = copy[language];
-  const rtl = language === "AR";
+  const rtl = t.dashboard === "الرئيسية";
 
   useEffect(() => {
     document.documentElement.lang = rtl ? "ar" : "en";
@@ -677,33 +679,35 @@ export default function Home() {
       return waitForClientSync(clientId, attempt + 1);
     }
   };
-  const refreshReportData = async () => {
-    if (reportStatus === "APPROVED")
+  const refreshReportData = async (
+    targetReportId?: string,
+    targetClientId?: string,
+  ) => {
+    const reportId = targetReportId ?? draftId;
+    const clientId = targetClientId ?? reportMetadata.clientId;
+    if (reportStatus === "APPROVED" && !targetReportId)
       throw new Error(
         "التقرير المعتمد محفوظ كنسخة نهائية. انسخي التقرير للفترة التالية لإجراء التحديثات.",
       );
-    if (!reportMetadata.clientId)
-      throw new Error("لم يتم اختيار عميل للتقرير.");
-    if (!draftId) throw new Error("لم يتم حفظ التقرير بعد.");
+    if (!clientId) throw new Error("لم يتم اختيار عميل للتقرير.");
+    if (!reportId) throw new Error("لم يتم حفظ التقرير بعد.");
     // Queue a sync first so the database has the latest data, then refresh the report server-side.
-    const syncResponse = await fetch(
-      `/api/clients/${reportMetadata.clientId}/sync`,
-      { method: "POST" },
-    );
+    const syncResponse = await fetch(`/api/clients/${clientId}/sync`, {
+      method: "POST",
+    });
     if (!syncResponse.ok)
       throw new Error(
         "تعذر وضع مزامنة Meta في قائمة الانتظار. تأكدي من اتصال الحساب.",
       );
-    if (syncResponse.status === 202)
-      await waitForClientSync(reportMetadata.clientId);
-    const response = await fetch(`/api/reports/${draftId}/refresh`, {
+    if (syncResponse.status === 202) await waitForClientSync(clientId);
+    const response = await fetch(`/api/reports/${reportId}/refresh`, {
       method: "POST",
     });
     if (!response.ok) {
       const data = (await response.json()) as { error?: string };
       throw new Error(data.error ?? "تعذر تحديث بيانات التقرير.");
     }
-    await loadReport(draftId);
+    await loadReport(reportId);
     const now = new Date().toISOString();
     setLastSyncedAt(now);
     return now;
@@ -1019,7 +1023,7 @@ export default function Home() {
           periodStart: `${metadata.periodStart}T00:00:00.000Z`,
           periodEnd: `${metadata.periodEnd}T23:59:59.999Z`,
           periodType: metadata.periodType,
-          comparisonMode: metadata.comparisonMode,
+          comparisonMode: "none",
         }),
       });
       if (!response.ok) {
@@ -1249,7 +1253,7 @@ export default function Home() {
   const updateKpi = (
     blockId: number,
     kpiId: string,
-    field: "label" | "value" | "change" | "display",
+    field: "label" | "value" | "change" | "display" | "comparisonMode",
     value: string,
   ) =>
     setBlocks((current) =>
@@ -1365,55 +1369,71 @@ export default function Home() {
       NOTES: "notes",
       RECOMMENDATIONS: "notes",
     };
-    setBlocks(
-      report.blocks.map((block) => {
-        const content = block.content as Record<string, unknown>;
-        return {
-          id: block.position + 1,
-          kind: typeMap[block.type] ?? "text",
-          title: typeof content.title === "string" ? content.title : t.text,
-          body: typeof content.body === "string" ? content.body : "",
-          page:
-            content.page === "cover" || content.page === "closing"
-              ? content.page
-              : undefined,
-          pageNote:
-            typeof content.pageNote === "string" ? content.pageNote : undefined,
-          presentation:
-            content.presentation === "cards" ||
-            content.presentation === "line" ||
-            content.presentation === "bar"
-              ? content.presentation
-              : undefined,
-          chart:
-            content.chart &&
-            typeof content.chart === "object" &&
-            !Array.isArray(content.chart)
-              ? (content.chart as ChartConfig)
-              : undefined,
-          mediaItems: Array.isArray(content.mediaItems)
-            ? (content.mediaItems as MediaPost[]).filter(
-                (item, index, items) =>
-                  items.findIndex((candidate) => candidate.id === item.id) ===
-                  index,
-              )
+    const loadedBlocks = report.blocks.map((block) => {
+      const content = block.content as Record<string, unknown>;
+      return {
+        id: block.position + 1,
+        kind: typeMap[block.type] ?? "text",
+        title: typeof content.title === "string" ? content.title : t.text,
+        body: typeof content.body === "string" ? content.body : "",
+        page:
+          content.page === "cover" || content.page === "closing"
+            ? content.page
             : undefined,
-          mediaDisplay: normalizeLegacyMediaDisplay(
-            typeof content.title === "string" ? content.title : t.text,
-            content.mediaDisplay,
-          ),
-          summary:
-            content.summary &&
-            typeof content.summary === "object" &&
-            !Array.isArray(content.summary)
-              ? (content.summary as MonthlySummary)
-              : undefined,
-          kpis: Array.isArray(content.kpis)
-            ? (content.kpis as Kpi[])
+        pageNote:
+          typeof content.pageNote === "string" ? content.pageNote : undefined,
+        presentation:
+          content.presentation === "cards" ||
+          content.presentation === "line" ||
+          content.presentation === "bar"
+            ? content.presentation
             : undefined,
-        };
-      }),
-    );
+        chart:
+          content.chart &&
+          typeof content.chart === "object" &&
+          !Array.isArray(content.chart)
+            ? (content.chart as ChartConfig)
+            : undefined,
+        mediaItems: Array.isArray(content.mediaItems)
+          ? (content.mediaItems as MediaPost[]).filter(
+              (item, index, items) =>
+                items.findIndex((candidate) => candidate.id === item.id) ===
+                index,
+            )
+          : undefined,
+        mediaDisplay: normalizeLegacyMediaDisplay(
+          typeof content.title === "string" ? content.title : t.text,
+          content.mediaDisplay,
+        ),
+        summary:
+          content.summary &&
+          typeof content.summary === "object" &&
+          !Array.isArray(content.summary)
+            ? (content.summary as MonthlySummary)
+            : undefined,
+        kpis: Array.isArray(content.kpis)
+          ? (content.kpis as Kpi[])
+          : undefined,
+      };
+    });
+    setBlocks(loadedBlocks as Block[]);
+    const needsComparisonRefresh =
+      report.status !== "APPROVED" &&
+      report.status !== "EXPORTED" &&
+      loadedBlocks.some((block) =>
+        block.kpis?.some(
+          (kpi) =>
+            (kpi.comparisonMode ?? "none") !== "none" &&
+            !kpi.comparisonValues?.[kpi.comparisonMode as Exclude<ComparisonMode, "none">],
+        ),
+      );
+    if (
+      needsComparisonRefresh &&
+      !autoRefreshedReportIds.current.has(report.id)
+    ) {
+      autoRefreshedReportIds.current.add(report.id);
+      void refreshReportData(report.id, report.clientId);
+    }
     setBlank(report.isBlank);
     const loadedPeriodType: ReportPeriod = ["monthly", "quarterly", "halfYearly", "yearly", "custom"].includes(report.periodType)
       ? (report.periodType as ReportPeriod)
@@ -1878,12 +1898,6 @@ function Dashboard({
           Icon={CheckCircle2}
           warn={completedDiff < 0}
         />
-        <Metric
-          label={t.shares}
-          value={loading ? "..." : formatValue(stats.shares)}
-          change={loading ? "" : t.sharesDesc}
-          Icon={Repeat2}
-        />
       </section>
       <section className="card">
         <div className="card-title">
@@ -2208,7 +2222,7 @@ function ReportBuilder({
   updateKpi: (
     blockId: number,
     kpiId: string,
-    field: "label" | "value" | "change" | "display",
+    field: "label" | "value" | "change" | "display" | "comparisonMode",
     value: string,
   ) => void;
   updateChart: (id: number, field: keyof ChartConfig, value: string) => void;
@@ -2573,7 +2587,7 @@ function ReportBlock({
   onUpdateKpi: (
     blockId: number,
     kpiId: string,
-    field: "label" | "value" | "change" | "display",
+    field: "label" | "value" | "change" | "display" | "comparisonMode",
     value: string,
   ) => void;
   onAddMetrics: (id: number) => void;
@@ -2649,21 +2663,40 @@ function ReportBlock({
                 />
               ) : (
                 <div className="report-kpi-card" key={kpi.id}>
-                  <select
-                    value={kpi.display ?? "cards"}
-                    onChange={(event) =>
-                      onUpdateKpi(
-                        block.id,
-                        kpi.id,
-                        "display",
-                        event.target.value,
-                      )
-                    }
-                  >
-                    <option value="cards">بطاقة رقم</option>
-                    <option value="line">رسم خطي</option>
-                    <option value="bar">رسم أعمدة</option>
-                  </select>
+                  <div className="kpi-card-selectors">
+                    <select
+                      aria-label={t.dashboard === "الرئيسية" ? "طريقة العرض" : "Display"}
+                      value={kpi.display ?? "cards"}
+                      onChange={(event) =>
+                        onUpdateKpi(
+                          block.id,
+                          kpi.id,
+                          "display",
+                          event.target.value,
+                        )
+                      }
+                    >
+                      <option value="cards">{t.dashboard === "الرئيسية" ? "بطاقة رقم" : "Number card"}</option>
+                      <option value="line">{t.dashboard === "الرئيسية" ? "رسم خطي" : "Line chart"}</option>
+                      <option value="bar">{t.dashboard === "الرئيسية" ? "رسم أعمدة" : "Bar chart"}</option>
+                    </select>
+                    <select
+                      aria-label={t.dashboard === "الرئيسية" ? "فترة المقارنة" : "Comparison period"}
+                      value={kpi.comparisonMode ?? "none"}
+                      onChange={(event) =>
+                        onUpdateKpi(
+                          block.id,
+                          kpi.id,
+                          "comparisonMode",
+                          event.target.value,
+                        )
+                      }
+                    >
+                      <option value="none">{t.dashboard === "الرئيسية" ? "بدون مقارنة" : "No comparison"}</option>
+                      <option value="previousMonth">{t.dashboard === "الرئيسية" ? "الشهر الماضي" : "Previous month"}</option>
+                      <option value="sameMonthLastYear">{t.dashboard === "الرئيسية" ? "الشهر نفسه السنة الماضية" : "Same month last year"}</option>
+                    </select>
+                  </div>
                   <span
                     contentEditable
                     suppressContentEditableWarning
@@ -2678,20 +2711,33 @@ function ReportBlock({
                   >
                     {kpi.label}
                   </span>
-                  <strong
-                    contentEditable
-                    suppressContentEditableWarning
-                    onBlur={(event) =>
-                      onUpdateKpi(
-                        block.id,
-                        kpi.id,
-                        "value",
-                        event.currentTarget.textContent ?? "",
-                      )
-                    }
-                  >
-                    {kpi.value}
-                  </strong>
+                  <div className="kpi-current-value">
+                    <small>{t.dashboard === "الرئيسية" ? "الفترة الحالية" : "Current period"}</small>
+                    <strong
+                      contentEditable
+                      suppressContentEditableWarning
+                      onBlur={(event) =>
+                        onUpdateKpi(
+                          block.id,
+                          kpi.id,
+                          "value",
+                          event.currentTarget.textContent ?? "",
+                        )
+                      }
+                    >
+                      {kpi.value}
+                    </strong>
+                  </div>
+                  {(kpi.comparisonMode ?? "none") !== "none" && (
+                    <div className="kpi-comparison-value">
+                      <small>
+                        {kpi.comparisonMode === "previousMonth"
+                          ? t.dashboard === "الرئيسية" ? "الشهر الماضي" : "Previous month"
+                          : t.dashboard === "الرئيسية" ? "الشهر نفسه السنة الماضية" : "Same month last year"}
+                      </small>
+                      <strong>{kpi.comparisonValues?.[kpi.comparisonMode as Exclude<ComparisonMode, "none">] ?? (t.dashboard === "الرئيسية" ? "غير متاح" : "N/A")}</strong>
+                    </div>
+                  )}
                   {kpi.change && (
                     <small
                       contentEditable
@@ -4024,17 +4070,6 @@ function ReportSetup({
       };
     });
   };
-  const comparisonOptions: Array<{ value: ComparisonMode; label: string }> = arabic
-    ? [
-        { value: "none", label: "بدون مقارنة" },
-        { value: "previousMonth", label: "الشهر الماضي" },
-        { value: "sameMonthLastYear", label: "الشهر نفسه السنة الماضية" },
-      ]
-    : [
-        { value: "none", label: "No comparison" },
-        { value: "previousMonth", label: "Previous month" },
-        { value: "sameMonthLastYear", label: "Same month last year" },
-      ];
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="report-setup card" role="dialog" aria-modal="true">
@@ -4060,22 +4095,6 @@ function ReportSetup({
                 name="report-period"
                 checked={form.periodType === option.value}
                 onChange={() => setPeriod(option.value)}
-              />
-              {option.label}
-            </label>
-          ))}
-        </fieldset>
-        <fieldset className="report-periods">
-          <legend>{arabic ? "المقارنة" : "Comparison"}</legend>
-          {comparisonOptions.map((option) => (
-            <label key={option.value}>
-              <input
-                type="radio"
-                name="report-comparison"
-                checked={form.comparisonMode === option.value}
-                onChange={() =>
-                  setForm((current) => ({ ...current, comparisonMode: option.value }))
-                }
               />
               {option.label}
             </label>
@@ -4393,7 +4412,18 @@ function ReportPreview({
                         ) : (
                           <div className="print-kpi" key={kpi.id}>
                             <span>{kpi.label}</span>
+                            <small>{t.dashboard === "الرئيسية" ? "الفترة الحالية" : "Current period"}</small>
                             <strong>{kpi.value}</strong>
+                            {(kpi.comparisonMode ?? "none") !== "none" && (
+                              <div className="print-kpi-comparison">
+                                <small>
+                                  {kpi.comparisonMode === "previousMonth"
+                                    ? t.dashboard === "الرئيسية" ? "الشهر الماضي" : "Previous month"
+                                    : t.dashboard === "الرئيسية" ? "الشهر نفسه السنة الماضية" : "Same month last year"}
+                                </small>
+                                <strong>{kpi.comparisonValues?.[kpi.comparisonMode as Exclude<ComparisonMode, "none">] ?? (t.dashboard === "الرئيسية" ? "غير متاح" : "N/A")}</strong>
+                              </div>
+                            )}
                             {kpi.change && <small>{kpi.change}</small>}
                           </div>
                         ),
@@ -4640,6 +4670,9 @@ function KpiPicker({
       : ["metricReach", "metricViews", "metricInteractions"],
   );
   const [presentation, setPresentation] = useState<MetricPresentation>("cards");
+  const [comparisonMode, setComparisonMode] = useState<ComparisonMode>(
+    existingKpis?.[0]?.comparisonMode ?? "none",
+  );
   const [customName, setCustomName] = useState("");
   const [customValue, setCustomValue] = useState("");
   const [customChange, setCustomChange] = useState("");
@@ -4662,6 +4695,7 @@ function KpiPicker({
         value: customValue.trim(),
         change: customChange.trim(),
         display: presentation,
+        comparisonMode,
         custom: true,
       },
     ]);
@@ -4686,7 +4720,10 @@ function KpiPicker({
         }
       );
     });
-    onAdd([...metrics, ...customKpis], presentation);
+    onAdd(
+      [...metrics, ...customKpis].map((kpi) => ({ ...kpi, comparisonMode })),
+      presentation,
+    );
   };
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -4752,6 +4789,26 @@ function KpiPicker({
                     : t.dashboard === "الرئيسية"
                       ? "رسم أعمدة"
                       : "Bar chart"}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <fieldset className="picker-section">
+          <legend>{t.dashboard === "الرئيسية" ? "المقارنة الافتراضية" : "Default comparison"}</legend>
+          <div className="comparison-options">
+            {([
+              ["none", t.dashboard === "الرئيسية" ? "بدون مقارنة" : "No comparison"],
+              ["previousMonth", t.dashboard === "الرئيسية" ? "الشهر الماضي" : "Previous month"],
+              ["sameMonthLastYear", t.dashboard === "الرئيسية" ? "الشهر نفسه السنة الماضية" : "Same month last year"],
+            ] as const).map(([value, label]) => (
+              <label key={value}>
+                <input
+                  type="radio"
+                  name="kpi-comparison"
+                  checked={comparisonMode === value}
+                  onChange={() => setComparisonMode(value)}
+                />
+                {label}
               </label>
             ))}
           </div>
