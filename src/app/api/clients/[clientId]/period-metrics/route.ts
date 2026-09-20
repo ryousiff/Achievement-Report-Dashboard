@@ -5,6 +5,7 @@ import {
   periodAccountReachForRange,
   periodAccountViewsForRange,
   periodAccountFollowersForRange,
+  followersCountAt,
 } from "@/lib/report-data";
 
 function sumMetric(posts: Array<{ metrics: Record<string, number> }>, metric: string) {
@@ -28,10 +29,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const ownedPosts = posts.filter((post) => post.mediaSource === "OWNED");
   const collabPosts = posts.filter((post) => post.mediaSource === "COLLABORATIVE");
 
-  const [reach, totalViews, followers] = await Promise.all([
+  const [reach, totalViews, followers, followersCount] = await Promise.all([
     periodAccountReachForRange(clientId, since, until),
     periodAccountViewsForRange(clientId, since, until),
     periodAccountFollowersForRange(clientId, since, until),
+    followersCountAt(clientId, until),
   ]);
 
   const totalInteractions = sumMetric(posts, "total_interactions");
@@ -41,6 +43,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       : null;
 
   return NextResponse.json({
+    followers: followersCount,
     reach: reach.value,
     reachAccuracy: reach.accuracy,
     reachMethod: reach.method,

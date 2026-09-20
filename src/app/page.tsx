@@ -137,6 +137,7 @@ type Block = {
   id: number;
   kind: BlockKind;
   title: string;
+  refreshKey?: string;
   body: string;
   page?: "cover" | "closing";
   pageNote?: string;
@@ -303,7 +304,7 @@ const copy = {
     reviewReports: "تقارير بانتظار المراجعة",
     instagramAccounts: "حسابات إنستغرام متصلة",
     completedReports: "تقارير مكتملة هذا الشهر",
-    shares: "مشاركات / إعادة نشر",
+    shares: "مشاركات",
     sharesDesc: "عدد المشاركات على المنشورات (Stories + DMs + إعادة نشر) خلال آخر 30 يوماً. Meta لا تفصل الإعادة النشر منفردة.",
     reviewNeeded: "تحتاج إلى مراجعتك",
     allReviewed: "لا تقارير بانتظار المراجعة",
@@ -396,11 +397,7 @@ const copy = {
     metricShares: "المشاركات",
     metricSaves: "الحفظ",
     metricMediaFollows: "متابعات من المحتوى",
-    metricImpressions: "مرات الظهور",
     metricEngagementRate: "معدل التفاعل",
-    metricProfileVisits: "زيارات الملف الشخصي",
-    metricLinkClicks: "نقرات الرابط",
-    metricReelsPlays: "مشاهدات الريلز",
   },
   EN: {
     workspace: "WORKSPACE",
@@ -519,11 +516,7 @@ const copy = {
     metricShares: "Shares",
     metricSaves: "Saves",
     metricMediaFollows: "Media follows",
-    metricImpressions: "Impressions",
     metricEngagementRate: "Engagement rate",
-    metricProfileVisits: "Profile visits",
-    metricLinkClicks: "Link clicks",
-    metricReelsPlays: "Reels plays",
   },
 } as const;
 
@@ -551,11 +544,7 @@ const metricValues = {
   metricShares: ["", ""],
   metricSaves: ["", ""],
   metricMediaFollows: ["", ""],
-  metricImpressions: ["", ""],
   metricEngagementRate: ["", ""],
-  metricProfileVisits: ["", ""],
-  metricLinkClicks: ["", ""],
-  metricReelsPlays: ["", ""],
 } as const;
 type MetricKey = keyof typeof metricValues;
 
@@ -938,6 +927,8 @@ export default function Home() {
       return {
         id: block.position + 1,
         kind: typeMap[block.type] ?? "text",
+        refreshKey:
+          typeof content.refreshKey === "string" ? content.refreshKey : undefined,
         title: typeof content.title === "string" ? content.title : t.text,
         body: typeof content.body === "string" ? content.body : "",
         page:
@@ -1071,6 +1062,7 @@ export default function Home() {
       type: block.kind,
       title: block.title,
       content: {
+        refreshKey: block.refreshKey,
         body: block.body,
         page: block.page,
         pageNote: block.pageNote,
@@ -1105,6 +1097,7 @@ export default function Home() {
       type: block.kind,
       title: block.title,
       content: {
+        refreshKey: block.refreshKey,
         body: block.body,
         page: block.page,
         pageNote: block.pageNote,
@@ -1381,6 +1374,8 @@ export default function Home() {
       return {
         id: block.position + 1,
         kind: typeMap[block.type] ?? "text",
+        refreshKey:
+          typeof content.refreshKey === "string" ? content.refreshKey : undefined,
         title: typeof content.title === "string" ? content.title : t.text,
         body: typeof content.body === "string" ? content.body : "",
         page:
@@ -1668,6 +1663,9 @@ export default function Home() {
         <KpiPicker
           t={t}
           periodType={reportMetadata.periodType}
+          clientId={reportMetadata.clientId ?? selectedClientId}
+          periodStart={reportMetadata.periodStart}
+          periodEnd={reportMetadata.periodEnd}
           existingKpis={
             kpiTargetBlockId !== null
               ? blocks.find((block) => block.id === kpiTargetBlockId)?.kpis
@@ -2669,7 +2667,8 @@ function ReportBlock({
                   }
                 />
               ) : (
-                <div className="report-kpi-card" key={kpi.id}>
+                <div className="report-kpi-item" key={kpi.id}>
+                  <div className="report-kpi-card">
                   <div className="kpi-card-selectors">
                     <select
                       aria-label={t.dashboard === "الرئيسية" ? "طريقة العرض" : "Display"}
@@ -2704,20 +2703,6 @@ function ReportBlock({
                       <option value="sameMonthLastYear">{t.dashboard === "الرئيسية" ? "الشهر نفسه السنة الماضية" : "Same month last year"}</option>
                     </select>
                   </div>
-                  <span
-                    contentEditable
-                    suppressContentEditableWarning
-                    onBlur={(event) =>
-                      onUpdateKpi(
-                        block.id,
-                        kpi.id,
-                        "label",
-                        event.currentTarget.textContent ?? "",
-                      )
-                    }
-                  >
-                    {kpi.label}
-                  </span>
                   <div className="kpi-current-value">
                     <small>{t.dashboard === "الرئيسية" ? "الفترة الحالية" : "Current period"}</small>
                     <strong
@@ -2734,6 +2719,27 @@ function ReportBlock({
                     >
                       {kpi.value}
                     </strong>
+                  </div>
+                  <div className="kpi-label-row">
+                    <img
+                      className="report-kpi-icon"
+                      src={`/icons/icons-${String((kpiIndex % 10) + 1).padStart(2, "0")}.svg`}
+                      alt=""
+                    />
+                    <h4
+                      contentEditable
+                      suppressContentEditableWarning
+                      onBlur={(event) =>
+                        onUpdateKpi(
+                          block.id,
+                          kpi.id,
+                          "label",
+                          event.currentTarget.textContent ?? "",
+                        )
+                      }
+                    >
+                      {kpi.label}
+                    </h4>
                   </div>
                   {(kpi.comparisonMode ?? "none") !== "none" && (
                     <div className="kpi-comparison-value">
@@ -2761,6 +2767,7 @@ function ReportBlock({
                       {kpi.change}
                     </small>
                   )}
+                  </div>
                 </div>
               ),
             )}
@@ -4431,14 +4438,22 @@ function ReportPreview({
                     </div>
                   ) : block.kind === "kpi" && block.kpis ? (
                     <div className="print-kpi-grid">
-                      {block.kpis.map((kpi) =>
+                      {block.kpis.map((kpi, kpiIndex) =>
                         kpi.display === "line" || kpi.display === "bar" ? (
                           <PrintMetricTrend key={kpi.id} kpi={kpi} />
                         ) : (
-                          <div className="print-kpi" key={kpi.id}>
-                            <span>{kpi.label}</span>
+                          <div className="print-kpi-item" key={kpi.id}>
+                            <div className="print-kpi">
                             <small>{t.dashboard === "الرئيسية" ? "الفترة الحالية" : "Current period"}</small>
                             <strong>{kpi.value}</strong>
+                            <div className="print-kpi-label">
+                              <img
+                                className="print-kpi-icon"
+                                src={`/icons/icons-${String((kpiIndex % 10) + 1).padStart(2, "0")}.svg`}
+                                alt=""
+                              />
+                              <h3>{kpi.label}</h3>
+                            </div>
                             {(kpi.comparisonMode ?? "none") !== "none" && (
                               <div className="print-kpi-comparison">
                                 <small>
@@ -4450,6 +4465,7 @@ function ReportPreview({
                               </div>
                             )}
                             {kpi.change && <small>{kpi.change}</small>}
+                            </div>
                           </div>
                         ),
                       )}
@@ -4651,11 +4667,7 @@ const kpiPickerIdMap: Record<MetricKey, string> = {
   metricShares: "shares",
   metricSaves: "saved",
   metricMediaFollows: "media-follows",
-  metricImpressions: "impressions",
   metricEngagementRate: "engagement-rate",
-  metricProfileVisits: "profile-visits",
-  metricLinkClicks: "link-clicks",
-  metricReelsPlays: "reels-plays",
 };
 const kpiPickerReverseIdMap = Object.fromEntries(
   Object.entries(kpiPickerIdMap).map(([key, id]) => [id, key]),
@@ -4664,6 +4676,9 @@ const kpiPickerReverseIdMap = Object.fromEntries(
 function KpiPicker({
   t,
   periodType,
+  clientId,
+  periodStart,
+  periodEnd,
   existingKpis,
   reportBlocks,
   onClose,
@@ -4671,12 +4686,31 @@ function KpiPicker({
 }: {
   t: Dictionary;
   periodType: ReportPeriod;
+  clientId: string | null;
+  periodStart: string;
+  periodEnd: string;
   existingKpis?: Kpi[];
   reportBlocks?: Block[];
   onClose: () => void;
   onAdd: (kpis: Kpi[], presentation: MetricPresentation) => void;
 }) {
   const metricKeys = Object.keys(metricValues) as MetricKey[];
+  const [liveMetrics, setLiveMetrics] = useState<Record<string, number | string | null>>({});
+  useEffect(() => {
+    if (!clientId) return;
+    let cancelled = false;
+    fetch(
+      `/api/clients/${clientId}/period-metrics?periodStart=${periodStart}&periodEnd=${periodEnd}`,
+    )
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (data && !cancelled) setLiveMetrics(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId, periodStart, periodEnd]);
   const existingById = new Map((existingKpis ?? []).map((kpi) => [kpi.id, kpi]));
   const reportKpiById = useMemo(() => {
     const map = new Map<string, Kpi>();
@@ -4735,12 +4769,19 @@ function KpiPicker({
     const metrics = selected.map((key) => {
       const id = idMap[key];
       const existingKpi = existingById.get(id) ?? reportKpiById.get(id);
+      const raw = liveMetrics[id];
+      const liveValue =
+        raw === null || raw === undefined
+          ? "غير متاح"
+          : typeof raw === "number"
+            ? raw.toLocaleString()
+            : String(raw);
       return (
         existingKpi ?? {
           id,
           label: t[key],
-          value: metricValues[key][0] || "—",
-          change: metricValues[key][1],
+          value: liveValue,
+          change: "",
           display: presentation,
         }
       );

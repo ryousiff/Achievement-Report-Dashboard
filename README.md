@@ -157,3 +157,4 @@ FROM \"Setting\"
 WHERE \"moduleId\" = 'meta_cooldown';
 "
 
+docker compose up -d --build

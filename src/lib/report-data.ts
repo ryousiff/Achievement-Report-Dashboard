@@ -878,6 +878,21 @@ export async function periodAccountFollowerCount(clientId: string, periodStart: 
   return snapshots.reduce((sum, s) => sum + s.value, 0);
 }
 
+/** Latest follower_count snapshot on or before `date` — the account's follower total at period end. */
+export async function followersCountAt(clientId: string, date: Date): Promise<number | null> {
+  const snapshot = await db.socialInsightSnapshot.findFirst({
+    where: {
+      connection: { clientId },
+      metric: "follower_count",
+      periodType: InsightPeriodType.DAY,
+      periodEnd: { lte: endOfDayUTC(date) },
+    },
+    orderBy: { periodEnd: "desc" },
+    select: { value: true },
+  });
+  return snapshot?.value ?? null;
+}
+
 /** Find the most recent reach snapshot of a specific period type ending on or immediately before `date`.
  * Used to expose "الوصول خلال آخر 28 يوماُ" as a separate, honestly-labeled metric when period Reach is unavailable. */
 export async function latestAccountReachWindow(
@@ -1171,7 +1186,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const blocks: ReportBlock[] = [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("avg-interactions-per-post", "متوسط التفاعل بالنسبة للمنشور", avgInteractionsPerPost, hasAvgInteractionsPerPost, { tooltip: "إجمالي التفاعل على المنشورات مقسوماً على عدد المنشورات المنشورة خلال الفترة." }), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
-    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [postMetricKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), postMetricKpi("likes", metricLabel.likes, "likes"), postMetricKpi("comments", metricLabel.comments, "comments"), postMetricKpi("saved", "حفظ", "saved"), { ...postMetricKpi("shares", "مشاركة / إعادة نشر", "shares"), tooltip: "Meta لا تُعيد متريكناً منفصلاً لإعادة النشر؛ تعرض هذه القيمة العدد الإجمالي للمشاركات (Stories، DMs، إعادة النشر) المتاح عبر Instagram Insights." }], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [postMetricKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), postMetricKpi("likes", metricLabel.likes, "likes"), postMetricKpi("comments", metricLabel.comments, "comments"), postMetricKpi("saved", "حفظ", "saved"), { ...postMetricKpi("shares", "مشاركة", "shares"), tooltip: "Meta لا تُعيد متريكناً منفصلاً لإعادة النشر؛ تعرض هذه القيمة العدد الإجمالي للمشاركات (Stories، DMs، إعادة النشر) المتاح عبر Instagram Insights." }], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),
     mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"], "media-top-views"),

@@ -172,6 +172,15 @@ export async function refreshReportData(reportId: string, options: RefreshOption
       .map((entry) => [entry.key, entry.block]),
   );
 
+  // Legacy reports (saved before refreshKey round-tripped through the builder) have identical
+  // standard sections but no stored refreshKey — recover the key by matching title+type so they
+  // merge instead of duplicating, and so already-duplicated copies collapse back to one block.
+  const freshKeyByTitleType = new Map<string, ReportRefreshKey>(
+    freshBlocks
+      .map((block) => [`${block.type}::${block.title}` as string, getRefreshKey(block.content)] as const)
+      .filter((entry): entry is readonly [string, ReportRefreshKey] => Boolean(entry[1])),
+  );
+
   const mergedBlocks: ReportBlock[] = [];
   const usedKeys = new Set<ReportRefreshKey>();
   const seenKeys = new Set<ReportRefreshKey>();
@@ -182,7 +191,9 @@ export async function refreshReportData(reportId: string, options: RefreshOption
       title: (dbBlock.content as Record<string, unknown>).title as string,
       content: dbBlock.content as Record<string, unknown>,
     };
-    const key = getRefreshKey(existing.content);
+    const key =
+      getRefreshKey(existing.content) ??
+      freshKeyByTitleType.get(`${existing.type}::${existing.title}`);
     if (key && isDataDrivenRefreshKey(key)) {
       // Defensive: if a report somehow contains multiple data-driven blocks with the same refreshKey,
       // keep only the first occurrence. This prevents duplicate standard sections from persisting
@@ -197,8 +208,13 @@ export async function refreshReportData(reportId: string, options: RefreshOption
       mergedBlocks.push(mergeBlockContent(existing, freshByKey.get(key)!));
       usedKeys.add(key);
     } else {
+      // Same-title legacy duplicates of cover/closing/notes blocks collapse here too.
+      if (key && seenKeys.has(key)) continue;
       mergedBlocks.push(existing);
-      if (key) usedKeys.add(key);
+      if (key) {
+        usedKeys.add(key);
+        seenKeys.add(key);
+      }
     }
   }
 
