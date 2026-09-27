@@ -5311,7 +5311,7 @@ function ClientWorkspace({
           </div>
         </section>
       )}
-      {selectedClient && <SponsoredAdsSection clientId={selectedClient.id} />}
+      {selectedClient && <SponsoredAdsSection clientId={selectedClient.id} clientName={selectedClient.name} />}
       <section className="card archived-clients">
         <div className="card-title">
           <div>
@@ -5398,7 +5398,7 @@ function parseMonthKey(key: string) {
   return { year, month };
 }
 
-function SponsoredAdsSection({ clientId }: { clientId: string }) {
+function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clientName: string }) {
   const [monthKey, setMonthKey] = useState(currentMonthKey());
   const { year, month } = parseMonthKey(monthKey);
   const [ads, setAds] = useState<SponsoredAd[]>([]);
@@ -5470,7 +5470,10 @@ function SponsoredAdsSection({ clientId }: { clientId: string }) {
     <section className="card sponsored-ads">
       <div className="card-title">
         <div>
-          <h2>الإعلانات الممولة</h2>
+          <h2>
+            الإعلانات الممولة
+            <span className="sponsored-ads-client">{clientName}</span>
+          </h2>
           <p>تتبّع المنشورات المدفوعة والإنفاق الفعلي عليها بدلاً من جدول Google.</p>
         </div>
         <div className="sponsored-ads-head-actions">
