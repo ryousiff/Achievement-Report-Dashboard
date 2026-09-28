@@ -18,7 +18,9 @@ type MetaTotalValueInsight = {
 };
 
 export type CompletedMonthPeriod = { start: Date; end: Date };
-type MonthlyAccountTotals = { reach: number; views: number; gained: number; lost: number };
+export const ENGAGEMENT_PERIOD_METRICS = ["total_interactions", "likes", "comments", "shares", "saved"] as const;
+export type EngagementPeriodMetric = (typeof ENGAGEMENT_PERIOD_METRICS)[number];
+type MonthlyAccountTotals = { reach: number; views: number; gained: number; lost: number; engagement: Partial<Record<EngagementPeriodMetric, number>> };
 
 const periodTypeToMetaPeriod: Record<InsightPeriodType, string> = {
   [InsightPeriodType.DAY]: "day",
@@ -176,14 +178,35 @@ async function fetchFollowerMovementTotal(accountId: string, token: string, sinc
   return { gained, lost };
 }
 
+/** Engagement totals are fetched in a single request but kept non-fatal: if Meta doesn't support
+ * one of them for an account, the core reach/views/followers snapshot still gets stored. */
+async function fetchEngagementTotals(accountId: string, token: string, since: Date, untilExclusive: Date): Promise<MonthlyAccountTotals["engagement"]> {
+  const response = await graph<{ data?: Array<{ name?: string; total_value?: { value?: number } }> }>(`${accountId}/insights`, token, {
+    metric: ENGAGEMENT_PERIOD_METRICS.join(","),
+    period: "day",
+    metric_type: "total_value",
+    since: String(Math.floor(startOfDayUTC(since).valueOf() / 1000)),
+    until: String(Math.floor(startOfDayUTC(untilExclusive).valueOf() / 1000)),
+  });
+  const engagement: MonthlyAccountTotals["engagement"] = {};
+  for (const item of response.data ?? []) {
+    if (!item.name || typeof item.total_value?.value !== "number") continue;
+    if ((ENGAGEMENT_PERIOD_METRICS as readonly string[]).includes(item.name)) {
+      engagement[item.name as EngagementPeriodMetric] = item.total_value.value;
+    }
+  }
+  return engagement;
+}
+
 async function fetchWindowTotals(accountId: string, token: string, since: Date, untilExclusive: Date): Promise<MonthlyAccountTotals | null> {
-  const [reach, views, followers] = await Promise.all([
+  const [reach, views, followers, engagement] = await Promise.all([
     fetchTotalValueNumber(accountId, token, "reach", since, untilExclusive),
     fetchTotalValueNumber(accountId, token, "views", since, untilExclusive),
     fetchFollowerMovementTotal(accountId, token, since, untilExclusive),
+    fetchEngagementTotals(accountId, token, since, untilExclusive).catch(() => ({})),
   ]);
   if (reach === null || views === null || !followers) return null;
-  return { reach, views, gained: followers.gained, lost: followers.lost };
+  return { reach, views, gained: followers.gained, lost: followers.lost, engagement };
 }
 
 /** Fetch the validated account totals for one completed calendar month. 28/29/30-day months use one
@@ -201,11 +224,20 @@ export async function fetchCompletedMonthTotals(accountId: string, token: string
   const C = await fetchWindowTotals(accountId, token, addDaysUTC(period.start, 1), addDaysUTC(period.start, 30));
   if (!C) return null;
 
+  const engagement: MonthlyAccountTotals["engagement"] = {};
+  for (const metric of ENGAGEMENT_PERIOD_METRICS) {
+    const a = A.engagement[metric];
+    const b = B.engagement[metric];
+    const c = C.engagement[metric];
+    if (a !== undefined && b !== undefined && c !== undefined) engagement[metric] = a + b - c;
+  }
+
   return {
     reach: A.reach + B.reach - C.reach,
     views: A.views + B.views - C.views,
     gained: A.gained + B.gained - C.gained,
     lost: A.lost + B.lost - C.lost,
+    engagement,
   };
 }
 
@@ -230,6 +262,23 @@ export async function storeCompletedMonthTotals(connectionId: string, period: Co
     },
     create: { connectionId, metric, periodType: InsightPeriodType.TOTAL_VALUE, periodStart, periodEnd, value: values[metric] },
     update: { value: values[metric], capturedAt: new Date() },
+  })));
+
+  // Engagement metrics are additive and stored alongside, but never gate month completeness — some
+  // may be unsupported for a given account and we don't want that to loop the backfill forever.
+  const engagementEntries = Object.entries(totals.engagement) as Array<[EngagementPeriodMetric, number]>;
+  await Promise.all(engagementEntries.map(([metric, value]) => db.socialInsightSnapshot.upsert({
+    where: {
+      connectionId_metric_periodType_periodStart_periodEnd: {
+        connectionId,
+        metric,
+        periodType: InsightPeriodType.TOTAL_VALUE,
+        periodStart,
+        periodEnd,
+      },
+    },
+    create: { connectionId, metric, periodType: InsightPeriodType.TOTAL_VALUE, periodStart, periodEnd, value },
+    update: { value, capturedAt: new Date() },
   })));
 }
 

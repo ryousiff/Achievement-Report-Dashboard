@@ -5,6 +5,7 @@ import {
   periodAccountReachForRange,
   periodAccountViewsForRange,
   periodAccountFollowersForRange,
+  periodAccountInteractionsForRange,
   followersCountAt,
 } from "@/lib/report-data";
 
@@ -29,11 +30,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const ownedPosts = posts.filter((post) => post.mediaSource === "OWNED");
   const collabPosts = posts.filter((post) => post.mediaSource === "COLLABORATIVE");
 
-  const [reach, totalViews, followers, followersCount] = await Promise.all([
+  const [reach, totalViews, followers, followersCount, interactions] = await Promise.all([
     periodAccountReachForRange(clientId, since, until),
     periodAccountViewsForRange(clientId, since, until),
     periodAccountFollowersForRange(clientId, since, until),
     followersCountAt(clientId, until),
+    periodAccountInteractionsForRange(clientId, since, until),
   ]);
 
   const totalInteractions = sumMetric(posts, "total_interactions");
@@ -60,11 +62,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     posts: posts.length,
     "owned-posts": ownedPosts.length,
     "collaborative-posts": collabPosts.length,
-    total_interactions: totalInteractions,
-    likes: sumMetric(posts, "likes"),
-    comments: sumMetric(posts, "comments"),
-    shares: sumMetric(posts, "shares"),
-    saved: sumMetric(posts, "saved"),
+    total_interactions: interactions.values.total_interactions ?? totalInteractions,
+    likes: interactions.values.likes ?? sumMetric(posts, "likes"),
+    comments: interactions.values.comments ?? sumMetric(posts, "comments"),
+    shares: interactions.values.shares ?? sumMetric(posts, "shares"),
+    saved: interactions.values.saved ?? sumMetric(posts, "saved"),
     "media-follows": sumMetric(posts, "follows"),
     "engagement-rate": engagementRate,
   });

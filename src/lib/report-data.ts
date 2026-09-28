@@ -719,6 +719,120 @@ export async function periodAccountFollowers(clientId: string, periodStart: Date
   return unavailable;
 }
 
+// ===== Account-level interaction totals (matching Meta's own period numbers) =====
+
+export const ACCOUNT_INTERACTION_METRICS = ["total_interactions", "likes", "comments", "shares", "saved"] as const;
+export type AccountInteractionMetric = (typeof ACCOUNT_INTERACTION_METRICS)[number];
+
+export type InteractionsResult = {
+  values: Partial<Record<AccountInteractionMetric, number>>;
+  accuracy: "EXACT" | "DERIVED" | null;
+  method: FollowersMethod;
+  tooltip?: string;
+};
+
+const interactionsUnavailable: InteractionsResult = { values: {}, accuracy: null, method: "UNAVAILABLE" };
+
+/** One Meta total_value call returning every interaction metric for a <= 30 day window. */
+async function fetchInteractionsWindow(clientId: string, periodStart: Date, periodEnd: Date): Promise<InteractionsResult> {
+  const connection = await fetchConnection(clientId);
+  if (!connection || !connection.externalAccountId || !connection.encryptedToken) return interactionsUnavailable;
+  const since = startOfDayUTC(periodStart);
+  const until = addDaysUTC(periodEnd, 1);
+  try {
+    const token = decryptToken(connection.encryptedToken);
+    const res = await graph<{ data?: Array<{ name?: string; total_value?: { value?: number } }> }>(
+      `${connection.externalAccountId}/insights`,
+      token,
+      {
+        metric: ACCOUNT_INTERACTION_METRICS.join(","),
+        period: "day",
+        metric_type: "total_value",
+        since: String(Math.floor(since.valueOf() / 1000)),
+        until: String(Math.floor(until.valueOf() / 1000)),
+      },
+    );
+    const values: InteractionsResult["values"] = {};
+    for (const item of res.data ?? []) {
+      if (!item.name || typeof item.total_value?.value !== "number") continue;
+      if ((ACCOUNT_INTERACTION_METRICS as readonly string[]).includes(item.name)) {
+        values[item.name as AccountInteractionMetric] = item.total_value.value;
+      }
+    }
+    if (Object.keys(values).length === 0) return interactionsUnavailable;
+    return { values, accuracy: "EXACT", method: "META_TOTAL_VALUE" };
+  } catch {
+    return interactionsUnavailable;
+  }
+}
+
+/** Resolve account-level interaction totals for a report period — the same numbers Meta's
+ * own dashboard shows (activity received during the period on all content, not just posts
+ * published inside it).
+ * - 1–30 days: exact Meta total_value for the range.
+ * - 31 days: derived from overlapping windows (A + B - C), additive per metric.
+ * - Longer: UNAVAILABLE (callers fall back to post-level sums). */
+export async function periodAccountInteractionsForRange(clientId: string, periodStart: Date, periodEnd: Date): Promise<InteractionsResult> {
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days <= 30) return fetchInteractionsWindow(clientId, periodStart, periodEnd);
+  if (days !== 31) return interactionsUnavailable;
+
+  const [A, B, C] = await Promise.all([
+    fetchInteractionsWindow(clientId, periodStart, addDaysUTC(periodStart, 29)),
+    fetchInteractionsWindow(clientId, addDaysUTC(periodStart, 1), periodEnd),
+    fetchInteractionsWindow(clientId, addDaysUTC(periodStart, 1), addDaysUTC(periodStart, 29)),
+  ]);
+  const values: InteractionsResult["values"] = {};
+  for (const metric of ACCOUNT_INTERACTION_METRICS) {
+    const a = A.values[metric];
+    const b = B.values[metric];
+    const c = C.values[metric];
+    if (a !== undefined && b !== undefined && c !== undefined) values[metric] = a + b - c;
+  }
+  if (Object.keys(values).length === 0) return interactionsUnavailable;
+  return { values, accuracy: "DERIVED", method: "OVERLAPPING_WINDOWS_COMPOSITION", tooltip: DERIVED_TOOLTIP };
+}
+
+/** DB-only variant: reads interaction TOTAL_VALUE snapshots persisted by the sync worker,
+ * chunking by calendar month for ranges longer than 31 days (these metrics are additive). */
+export async function periodAccountInteractionsFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<InteractionsResult> {
+  const readWindow = async (start: Date, end: Date): Promise<InteractionsResult["values"] | null> => {
+    const rows = await db.socialInsightSnapshot.findMany({
+      where: {
+        connection: { clientId },
+        metric: { in: [...ACCOUNT_INTERACTION_METRICS] },
+        periodType: InsightPeriodType.TOTAL_VALUE,
+        periodStart: { gte: startOfDayUTC(start), lte: endOfDayUTC(start) },
+        periodEnd: { gte: startOfDayUTC(end), lte: endOfDayUTC(end) },
+      },
+      select: { metric: true, value: true },
+    });
+    if (rows.length === 0) return null;
+    const values: InteractionsResult["values"] = {};
+    for (const row of rows) values[row.metric as AccountInteractionMetric] = row.value;
+    return values;
+  };
+
+  const days = daysBetweenInclusive(periodStart, periodEnd);
+  if (days <= 31) {
+    const values = await readWindow(periodStart, periodEnd);
+    if (!values) return interactionsUnavailable;
+    return { values, accuracy: days === 31 ? "DERIVED" : "EXACT", method: days === 31 ? "OVERLAPPING_WINDOWS_COMPOSITION" : "META_TOTAL_VALUE" };
+  }
+
+  const chunks = splitRangeByMonth(periodStart, periodEnd);
+  const values: InteractionsResult["values"] = {};
+  for (const chunk of chunks) {
+    const window = await readWindow(chunk.start, chunk.end);
+    if (!window) return { values: {}, accuracy: null, method: "UNAVAILABLE", tooltip: LONG_RANGE_AGGREGATE_TOOLTIP };
+    for (const metric of ACCOUNT_INTERACTION_METRICS) {
+      const v = window[metric];
+      if (v !== undefined) values[metric] = (values[metric] ?? 0) + v;
+    }
+  }
+  return { values, accuracy: "EXACT", method: "AGGREGATE_OF_PERIOD_CHUNKS", tooltip: LONG_RANGE_AGGREGATE_TOOLTIP };
+}
+
 /** Fetch the current total followers for an account from the IG User node (followers_count),
  * not from account insights. */
 export type DailyFollowerMovement = {
@@ -929,6 +1043,7 @@ type ReportDataResolvers = {
   followers: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<FollowersResult>;
   views: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<ViewsResult>;
   dailyFollowerMovement: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<DailyFollowerMovement>;
+  interactions: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<InteractionsResult>;
 };
 
 const defaultReportDataResolvers: ReportDataResolvers = {
@@ -936,6 +1051,7 @@ const defaultReportDataResolvers: ReportDataResolvers = {
   followers: periodAccountFollowersForRange,
   views: periodAccountViewsForRange,
   dailyFollowerMovement,
+  interactions: periodAccountInteractionsForRange,
 };
 
 const DB_ONLY_SUM_DAILY_REACH_TOOLTIP = "مجموع الوصول اليومي من بيانات متزامنة؛ قد يحتوي على أشخاص وصل إليهم أكثر من منشور واحد، لذا لا يُستخدم كوصول فريد.";
@@ -1048,6 +1164,7 @@ export async function buildStandardReportBlocksFromDatabase(clientId: string, pe
     followers: periodAccountFollowersFromDatabase,
     views: periodAccountViewsFromDatabase,
     dailyFollowerMovement: dailyFollowerMovementFromDatabase,
+    interactions: periodAccountInteractionsFromDatabase,
   }, new Date(), comparisonMode);
 }
 
@@ -1061,7 +1178,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // These reads are all independent of each other (none consumes another's result), so resolve them
   // concurrently instead of one-by-one — this is the dominant cost of building a report and doing it
   // sequentially previously added their latencies together for no reason.
-  const [posts, reach, followers, totalViews, dailyMovement, reachDailySnapshots] = await Promise.all([
+  const [posts, reach, followers, totalViews, dailyMovement, reachDailySnapshots, interactions] = await Promise.all([
     reportPosts(clientId, periodStart, periodEnd, now),
     resolve.reach(clientId, periodStart, periodEnd),
     resolve.followers(clientId, periodStart, periodEnd),
@@ -1079,6 +1196,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
       },
       select: { value: true },
     }),
+    resolve.interactions(clientId, periodStart, periodEnd),
   ]);
 
   const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
@@ -1088,7 +1206,8 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const hasTotalViews = totalViews.value !== null;
   totals.reach = reach.value ?? 0;
   totals.follows = followers.gained ?? 0;
-  const engagementRate = hasReach && totals.reach > 0 && hasMetric("total_interactions") ? `${((totals.total_interactions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
+  const engagementInteractions = interactions.values.total_interactions ?? (hasMetric("total_interactions") ? totals.total_interactions : null);
+  const engagementRate = hasReach && totals.reach > 0 && engagementInteractions !== null ? `${((engagementInteractions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
   const avgInteractionsPerPost = totals.posts > 0 && hasMetric("total_interactions") ? (totals.total_interactions / totals.posts).toFixed(1) : "غير متاح";
   const hasAvgInteractionsPerPost = totals.posts > 0 && hasMetric("total_interactions");
   const topBy = (metric: ReportMetric) => [...posts].sort((left, right) => value(right.metrics, metric) - value(left.metrics, metric)).filter((post) => value(post.metrics, metric) > 0).slice(0, 4);
@@ -1183,10 +1302,26 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     );
   };
 
+  // Prefer Meta's account-level period totals (activity received during the period on all content,
+  // identical to what the Meta dashboard shows); fall back to per-post sums only when the account
+  // total_value isn't synced/available for the range.
+  const ACCOUNT_INTERACTIONS_TOOLTIP = "إجمالي التفاعل المستلم خلال الفترة على مستوى الحساب كما تعرضه Meta، ويشمل المحتوى المنشور قبل الفترة أيضاً.";
+  const interactionKpi = (id: string, label: string, metric: AccountInteractionMetric, tooltip?: string) => {
+    const accountValue = interactions.values[metric];
+    if (accountValue !== undefined) {
+      return kpi(id, label, accountValue.toLocaleString(), true, {
+        interactionsAccuracy: interactions.accuracy,
+        interactionsMethod: interactions.method,
+        tooltip: tooltip ?? interactions.tooltip ?? ACCOUNT_INTERACTIONS_TOOLTIP,
+      });
+    }
+    return postMetricKpi(id, label, metric);
+  };
+
   const blocks: ReportBlock[] = [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("avg-interactions-per-post", "متوسط التفاعل بالنسبة للمنشور", avgInteractionsPerPost, hasAvgInteractionsPerPost, { tooltip: "إجمالي التفاعل على المنشورات مقسوماً على عدد المنشورات المنشورة خلال الفترة." }), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
-    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل للمنشورات خلال الفترة.", kpis: [postMetricKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), postMetricKpi("likes", metricLabel.likes, "likes"), postMetricKpi("comments", metricLabel.comments, "comments"), postMetricKpi("saved", "حفظ", "saved"), { ...postMetricKpi("shares", "مشاركة", "shares"), tooltip: "Meta لا تُعيد متريكناً منفصلاً لإعادة النشر؛ تعرض هذه القيمة العدد الإجمالي للمشاركات (Stories، DMs، إعادة النشر) المتاح عبر Instagram Insights." }], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
+    { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل المستلمة خلال الفترة على مستوى الحساب من بيانات Meta.", kpis: [interactionKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), interactionKpi("likes", metricLabel.likes, "likes"), interactionKpi("comments", metricLabel.comments, "comments"), interactionKpi("saved", "حفظ", "saved"), interactionKpi("shares", "مشاركة", "shares", "Meta لا تُعيد متريكناً منفصلاً لإعادة النشر؛ تعرض هذه القيمة العدد الإجمالي للمشاركات (Stories، DMs، إعادة النشر) المتاح عبر Instagram Insights.")], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),
     mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"], "media-top-views"),

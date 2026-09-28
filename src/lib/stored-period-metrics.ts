@@ -5,6 +5,8 @@ import {
   dailyFollowerMovement,
   dailyFollowerMovementFromDatabase,
   periodAccountFollowersForRange,
+  periodAccountInteractionsForRange,
+  periodAccountInteractionsFromDatabase,
   periodAccountReachForRange,
   periodAccountViewsForRange,
   type FollowersResult,
@@ -216,6 +218,7 @@ export async function buildStandardReportBlocksFromStoredPeriodSnapshots(
     views: storedAccountViewsForRange,
     followers: storedAccountFollowersForRange,
     dailyFollowerMovement: dailyFollowerMovementFromDatabase,
+    interactions: periodAccountInteractionsFromDatabase,
   }, new Date(), comparisonMode);
 }
 
@@ -227,10 +230,15 @@ export async function buildStandardReportBlocksPreferStoredPeriodSnapshots(
   periodEnd: Date,
   comparisonMode: ComparisonMode = "none",
 ): Promise<ReportBlock[]> {
+  const interactionsPreferStored = async (clientId: string, start: Date, end: Date) => {
+    const stored = await periodAccountInteractionsFromDatabase(clientId, start, end);
+    return Object.keys(stored.values).length > 0 ? stored : periodAccountInteractionsForRange(clientId, start, end);
+  };
   return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
     reach: reachPreferStored,
     views: viewsPreferStored,
     followers: followersPreferStored,
     dailyFollowerMovement,
+    interactions: interactionsPreferStored,
   }, new Date(), comparisonMode);
 }

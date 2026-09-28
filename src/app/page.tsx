@@ -2717,7 +2717,7 @@ function ReportBlock({
                         )
                       }
                     >
-                      {kpi.value}
+                      {formatKpiValue(kpi.value)}
                     </strong>
                   </div>
                   <div className="kpi-label-row">
@@ -2875,6 +2875,14 @@ const metricLabels: Record<string, string> = {
   saved: "حفظ",
   reach: "وصول",
 };
+/** Compact display for large KPI numbers — matches Meta's style (41,370 → 41.4K). */
+function formatKpiValue(value: string) {
+  if (!/^[\d,]+$/.test(value)) return value;
+  const num = Number(value.replace(/,/g, ""));
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (num >= 10_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  return value;
+}
 function MediaMetrics({
   metrics,
   display = ["total_interactions", "views"],
@@ -3685,7 +3693,7 @@ function MetricTrendChart({
       <div className="metric-trend-head">
         <div>
           <span>{kpi.label}</span>
-          <strong>{kpi.value}</strong>
+          <strong>{formatKpiValue(kpi.value)}</strong>
         </div>
         <select
           value={kpi.display}
@@ -4445,7 +4453,7 @@ function ReportPreview({
                           <div className="print-kpi-item" key={kpi.id}>
                             <div className="print-kpi">
                             <small>{t.dashboard === "الرئيسية" ? "الفترة الحالية" : "Current period"}</small>
-                            <strong>{kpi.value}</strong>
+                            <strong>{formatKpiValue(kpi.value)}</strong>
                             <div className="print-kpi-label">
                               <img
                                 className="print-kpi-icon"
@@ -4523,7 +4531,7 @@ function PrintMetricTrend({ kpi }: { kpi: Kpi }) {
   return (
     <div className="print-metric-trend">
       <span>{kpi.label}</span>
-      <strong>{kpi.value}</strong>
+      <strong>{formatKpiValue(kpi.value)}</strong>
       <svg viewBox="0 0 300 150" role="img" aria-label={kpi.label}>
         <g>
           <line x1="32" y1="30" x2="288" y2="30" />
