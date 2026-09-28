@@ -4828,8 +4828,11 @@ function KpiPicker({
   const [customName, setCustomName] = useState("");
   const [customValue, setCustomValue] = useState("");
   const [customChange, setCustomChange] = useState("");
+  const [manualReposts, setManualReposts] = useState(
+    () => existingKpis?.find((kpi) => kpi.id === "manual-reposts")?.value.replace(/,/g, "") ?? "",
+  );
   const [customKpis, setCustomKpis] = useState<Kpi[]>(
-    () => existingKpis?.filter((kpi) => !kpiPickerReverseIdMap[kpi.id]) ?? [],
+    () => existingKpis?.filter((kpi) => !kpiPickerReverseIdMap[kpi.id] && kpi.id !== "manual-reposts") ?? [],
   );
   const toggleMetric = (key: MetricKey) =>
     setSelected((current) =>
@@ -4879,11 +4882,34 @@ function KpiPicker({
         }
       );
     });
+    const pendingCustom = customName.trim() && customValue.trim()
+      ? [{
+          id: `custom-${Date.now()}`,
+          label: customName.trim(),
+          value: customValue.trim(),
+          change: customChange.trim(),
+          display: presentation,
+          custom: true,
+        } satisfies Kpi]
+      : [];
+    const repostKpi: Kpi[] = manualReposts.trim()
+      ? [{
+          id: "manual-reposts",
+          label: "إعادة النشر",
+          value: Number(manualReposts).toLocaleString(),
+          change: "يدوي",
+          display: presentation,
+          custom: true,
+        }]
+      : [];
     onAdd(
-      [...metrics, ...customKpis].map((kpi) => ({ ...kpi, comparisonMode })),
+      [...metrics, ...customKpis, ...pendingCustom, ...repostKpi].map((kpi) => ({ ...kpi, comparisonMode })),
       presentation,
     );
   };
+  const pendingCustomCount = customName.trim() && customValue.trim() ? 1 : 0;
+  const manualRepostsCount = manualReposts.trim() ? 1 : 0;
+  const selectedCount = selected.length + customKpis.length + pendingCustomCount + manualRepostsCount;
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -4973,6 +4999,25 @@ function KpiPicker({
           </div>
         </fieldset>
         <fieldset className="picker-section custom-section">
+          <legend>{t.dashboard === "الرئيسية" ? "إعادة النشر (إدخال يدوي)" : "Reposts (manual entry)"}</legend>
+          <p>
+            {t.dashboard === "الرئيسية"
+              ? "أدخلي العدد من تطبيق Instagram. سيظهر كمؤشر مستقل ولن يُضاف تلقائياً إلى المشاركات أو إجمالي التفاعل لتجنب التكرار."
+              : "Enter the value from Instagram. It remains separate and is not added to shares or total interactions to avoid double counting."}
+          </p>
+          <div className="custom-fields manual-reposts-field">
+            <input
+              type="number"
+              min="0"
+              step="1"
+              inputMode="numeric"
+              value={manualReposts}
+              onChange={(event) => setManualReposts(event.target.value)}
+              placeholder={t.dashboard === "الرئيسية" ? "عدد مرات إعادة النشر" : "Repost count"}
+            />
+          </div>
+        </fieldset>
+        <fieldset className="picker-section custom-section">
           <legend>{t.customKpi}</legend>
           <p>{t.customKpiHint}</p>
           <div className="custom-fields">
@@ -4992,7 +5037,7 @@ function KpiPicker({
               placeholder={t.kpiChange}
             />
           </div>
-          <button className="btn quiet compact" onClick={addCustom}>
+          <button type="button" className="btn quiet compact" onClick={addCustom}>
             <Plus size={14} />
             {t.addCustom}
           </button>
@@ -5015,7 +5060,7 @@ function KpiPicker({
         </fieldset>
         <div className="modal-actions">
           <span>
-            {selected.length + customKpis.length} {t.selectedMetrics}
+            {selectedCount} {t.selectedMetrics}
           </span>
           <div>
             <button className="btn quiet" onClick={onClose}>
@@ -5023,7 +5068,7 @@ function KpiPicker({
             </button>
             <button
               className="btn primary"
-              disabled={selected.length + customKpis.length === 0}
+              disabled={selectedCount === 0}
               onClick={submit}
             >
               <Plus size={16} />
