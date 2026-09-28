@@ -160,6 +160,14 @@ button { cursor: pointer; border: 0; }
 .print-kpi-grid-2 .print-kpi-label h3 { font-size: 20px; }
 .print-kpi-grid-1 .print-kpi-icon { width: 42px; height: 42px; }
 .print-kpi-grid-2 .print-kpi-icon { width: 36px; height: 36px; }
+.print-section:has(.print-kpi-grid-1),
+.print-section:has(.print-kpi-grid-2),
+.print-section:has(.print-kpi-grid-3),
+.print-section:has(.print-kpi-grid-4) { display: flex; min-height: 620px; flex-direction: column; justify-content: center; box-sizing: border-box; }
+.print-section:has(.print-kpi-grid-1) .print-kpi-grid,
+.print-section:has(.print-kpi-grid-2) .print-kpi-grid,
+.print-section:has(.print-kpi-grid-3) .print-kpi-grid,
+.print-section:has(.print-kpi-grid-4) .print-kpi-grid { margin-block: 0; }
 .print-section { break-inside: auto; min-height: 0; padding: 56px 0 40px; border-bottom: 0; break-before: page; box-decoration-break: clone; }
 .print-section h2 { text-align: center; margin-bottom: 24px; font-size: 28px; }
 
@@ -189,6 +197,10 @@ button { cursor: pointer; border: 0; }
 
 /* Portrait PDF keeps 2-column cards so they do not feel cramped */
 .report-preview.portrait .print-kpi-grid { grid-template-columns: repeat(2, 1fr); }
+.report-preview.portrait .print-section:has(.print-kpi-grid-1),
+.report-preview.portrait .print-section:has(.print-kpi-grid-2),
+.report-preview.portrait .print-section:has(.print-kpi-grid-3),
+.report-preview.portrait .print-section:has(.print-kpi-grid-4) { min-height: 980px; }
 .report-preview.portrait .print-media-grid { grid-template-columns: repeat(2, 1fr); }
 
 /* Page breaks: sections can continue, but individual blocks stay whole */
