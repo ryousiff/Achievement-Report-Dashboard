@@ -2381,13 +2381,11 @@ function ReportBuilder({
     action?: () => void;
   }> = [
     ...(!lastSyncedAt
-      ? [{ key: "not-synced", message: "لم يتم تحديث بيانات التقرير أثناء هذه الجلسة", actionLabel: t.refresh, action: refresh }]
+      ? [{ key: "not-synced", message: "لم يتم تحديث بيانات التقرير أثناء هذه الجلسة" }]
       : []),
     ...coverageIssues.map((message, index) => ({
       key: `coverage-${index}`,
       message,
-      actionLabel: t.refresh,
-      action: refresh,
     })),
     ...blocks
       .filter((block) => block.kind === "media" && (block.mediaItems?.length ?? 0) === 0)
@@ -2418,8 +2416,6 @@ function ReportBuilder({
       .map((block) => ({
         key: `chart-${block.id}`,
         message: `بيانات «${block.title}» غير متاحة`,
-        actionLabel: t.refresh,
-        action: refresh,
       })),
     ...(!blocks.some((block) => (block.kind === "notes" || block.title.includes("التوصيات")) && block.body.trim())
       ? [{ key: "recommendations", message: "التوصيات فارغة — أضيفي توصيات عملية قبل الاعتماد" }]
