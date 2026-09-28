@@ -4476,7 +4476,7 @@ function ReportPreview({
                       <p>{block.body}</p>
                     </div>
                   ) : block.kind === "kpi" && block.kpis ? (
-                    <div className="print-kpi-grid">
+                    <div className={`print-kpi-grid print-kpi-grid-${Math.min(block.kpis.length, 9)}`}>
                       {block.kpis.map((kpi, kpiIndex) =>
                         kpi.display === "line" || kpi.display === "bar" ? (
                           <PrintMetricTrend key={kpi.id} kpi={kpi} />
