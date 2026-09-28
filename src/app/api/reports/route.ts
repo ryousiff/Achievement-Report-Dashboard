@@ -88,11 +88,12 @@ export async function POST(request: NextRequest) {
     const comparisonMode: ComparisonMode = ["none", "previousMonth", "sameMonthLastYear"].includes(rawComparisonMode)
       ? (rawComparisonMode as ComparisonMode)
       : "none";
+    const includeCollaborative = body.includeCollaborative !== false;
     const duplicateFromId = typeof body.duplicateFromId === "string" ? body.duplicateFromId : null;
     if (duplicateFromId) {
       const source = await db.report.findUnique({ where: { id: duplicateFromId }, include: { blocks: { orderBy: { position: "asc" } } } });
       if (!source) return NextResponse.json({ error: "Source report not found." }, { status: 404 });
-      const report = await db.report.create({ data: { clientId, createdById, title: requiredText(body.title, "title"), periodStart, periodEnd, status: "DRAFT", isBlank: source.isBlank, blocks: { create: source.blocks.map((block, position) => { const content = block.content as Record<string, unknown>; const kpis = Array.isArray(content.kpis) ? content.kpis.map((item) => typeof item === "object" && item ? { ...(item as Record<string, unknown>), value: "0" } : item) : content.kpis; return { position, type: block.type, content: { ...content, mediaItems: Array.isArray(content.mediaItems) ? [] : content.mediaItems, kpis } as Prisma.InputJsonValue }; }) } }, include: { blocks: { orderBy: { position: "asc" } } } });
+      const report = await db.report.create({ data: { clientId, createdById, title: requiredText(body.title, "title"), periodStart, periodEnd, status: "DRAFT", isBlank: source.isBlank, comparisonMode: source.comparisonMode, periodType: source.periodType, includeCollaborative: source.includeCollaborative, blocks: { create: source.blocks.map((block, position) => { const content = block.content as Record<string, unknown>; const kpis = Array.isArray(content.kpis) ? content.kpis.map((item) => typeof item === "object" && item ? { ...(item as Record<string, unknown>), value: "0" } : item) : content.kpis; return { position, type: block.type, content: { ...content, mediaItems: Array.isArray(content.mediaItems) ? [] : content.mediaItems, kpis } as Prisma.InputJsonValue }; }) } }, include: { blocks: { orderBy: { position: "asc" } } } });
       return NextResponse.json({ report }, { status: 201 });
     }
     const hasSyncedPosts = template === "standard" && (await db.socialPost.count({ where: { connection: { clientId } } })) > 0;
@@ -100,7 +101,7 @@ export async function POST(request: NextRequest) {
     // Reuse authoritative account-period snapshots whenever they already exist. Only a recent missing
     // period falls back to Meta during initial creation; later refresh/export stays database-only.
     const populatedBlocks = template === "standard"
-      ? await buildStandardReportBlocksPreferStoredPeriodSnapshots(clientId, periodStart, periodEnd, comparisonMode)
+      ? await buildStandardReportBlocksPreferStoredPeriodSnapshots(clientId, periodStart, periodEnd, comparisonMode, includeCollaborative)
       : [];
     const report = await db.report.create({
       data: {
@@ -113,6 +114,7 @@ export async function POST(request: NextRequest) {
         isBlank: draft.isBlank,
         comparisonMode,
         periodType,
+        includeCollaborative,
         blocks: { create: template === "standard" ? populatedBlocks.map((block, position) => ({ position, type: block.type, content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) : draft.blocks.map((block, position) => ({ position, type: toDatabaseBlockType(block.type), content: { ...block.content, title: block.title } as Prisma.InputJsonValue })) },
       },
       include: { blocks: { orderBy: { position: "asc" } } },

@@ -164,7 +164,7 @@ export async function refreshReportData(reportId: string, options: RefreshOption
     throw new Error("Only skipMetaApi=true is currently supported.");
   }
 
-  const freshBlocks = await builder(report.clientId, report.periodStart, report.periodEnd, report.comparisonMode as import("@/lib/report-period").ComparisonMode);
+  const freshBlocks = await builder(report.clientId, report.periodStart, report.periodEnd, report.comparisonMode as import("@/lib/report-period").ComparisonMode, report.includeCollaborative);
   const freshByKey = new Map(
     freshBlocks
       .map((block) => ({ block, key: getRefreshKey(block.content) }))

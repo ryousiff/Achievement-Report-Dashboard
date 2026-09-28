@@ -157,12 +157,16 @@ async function buildComparisonBlock(
  * `SocialPostMetricSnapshot` for that post/month rather than the post's current, still-drifting
  * `SocialPost.metrics` — see post-metric-snapshots.ts. Posts whose publish month is still open keep
  * using their live metrics, matching the live media library. `now` is only overridable for tests. */
-export async function reportPosts(clientId: string, periodStart: Date, periodEnd: Date, now: Date = new Date()) {
+export async function reportPosts(clientId: string, periodStart: Date, periodEnd: Date, now: Date = new Date(), includeCollaborative = true) {
   // Explicit select: this runs on every report build/refresh/export, potentially over hundreds of
   // posts for a multi-month period. Skips mediaMetadata (can hold owner/collaborator objects),
   // connectionId, and sync bookkeeping fields (lastInsightRefreshAt, syncedAt) that ReportPost never uses.
   const posts = await db.socialPost.findMany({
-    where: { connection: { clientId }, publishedAt: { gte: periodStart, lte: periodEnd } },
+    where: {
+      connection: { clientId },
+      publishedAt: { gte: periodStart, lte: periodEnd },
+      ...(includeCollaborative ? {} : { mediaSource: "OWNED" as const }),
+    },
     orderBy: { publishedAt: "desc" },
     select: {
       id: true,
@@ -1168,7 +1172,7 @@ export async function buildStandardReportBlocksFromDatabase(clientId: string, pe
   }, new Date(), comparisonMode);
 }
 
-export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}, now: Date = new Date(), comparisonMode: ComparisonMode = "none"): Promise<ReportBlock[]> {
+export async function buildStandardReportBlocks(clientId: string, periodStart: Date, periodEnd: Date, resolvers: Partial<ReportDataResolvers> = {}, now: Date = new Date(), comparisonMode: ComparisonMode = "none", includeCollaborative = true): Promise<ReportBlock[]> {
   // Account-level reach is Meta's unique-accounts-reached metric for the account; summing per-post reach would double-count
   // people reached by more than one post, so prefer the account-level daily snapshots (matches Meta's own dashboards and
   // third-party tools like Iconosquare) and only fall back to the per-post sum when no snapshots have been synced yet.
@@ -1179,7 +1183,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // concurrently instead of one-by-one — this is the dominant cost of building a report and doing it
   // sequentially previously added their latencies together for no reason.
   const [posts, reach, followers, totalViews, dailyMovement, reachDailySnapshots, interactions] = await Promise.all([
-    reportPosts(clientId, periodStart, periodEnd, now),
+    reportPosts(clientId, periodStart, periodEnd, now, includeCollaborative),
     resolve.reach(clientId, periodStart, periodEnd),
     resolve.followers(clientId, periodStart, periodEnd),
     resolve.views(clientId, periodStart, periodEnd),

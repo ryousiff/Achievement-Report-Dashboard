@@ -225,6 +225,7 @@ type ReportMetadata = {
   periodEnd: string;
   periodType: ReportPeriod;
   comparisonMode: ComparisonMode;
+  includeCollaborative: boolean;
 };
 type Dictionary = (typeof copy)[Language];
 type MediaSort = "score" | "interactions" | "views" | "follows" | "newest";
@@ -578,6 +579,7 @@ export default function Home() {
       periodEnd: period.periodEnd,
       periodType: "monthly",
       comparisonMode: "none",
+      includeCollaborative: true,
     };
   });
   const [draftId, setDraftId] = useState<string | null>(null);
@@ -989,6 +991,7 @@ export default function Home() {
       periodEnd: period.periodEnd,
       periodType: "monthly",
       comparisonMode: "none",
+      includeCollaborative: true,
     });
     setSetupTemplate(template);
     setReportSetupOpen(true);
@@ -1022,6 +1025,7 @@ export default function Home() {
           periodEnd: `${metadata.periodEnd}T23:59:59.999Z`,
           periodType: metadata.periodType,
           comparisonMode: "none",
+          includeCollaborative: metadata.includeCollaborative,
         }),
       });
       if (!response.ok) {
@@ -1347,6 +1351,7 @@ export default function Home() {
         isBlank: boolean;
         comparisonMode: string;
         periodType: string;
+        includeCollaborative?: boolean;
         status: "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED";
         dataRefreshedAt?: string | null;
         blocks: Array<{ type: string; position: number; content: unknown }>;
@@ -1447,6 +1452,7 @@ export default function Home() {
       periodEnd: report.periodEnd.slice(0, 10),
       periodType: loadedPeriodType,
       comparisonMode: report.comparisonMode === "previousMonth" || report.comparisonMode === "sameMonthLastYear" ? report.comparisonMode : "none",
+      includeCollaborative: report.includeCollaborative ?? true,
     });
     setSelectedClientId(report.clientId);
     setDraftId(report.id);
@@ -4121,6 +4127,31 @@ function ReportSetup({
               {option.label}
             </label>
           ))}
+        </fieldset>
+        <fieldset className="report-periods">
+          <legend>{arabic ? "نطاق المحتوى" : "Content scope"}</legend>
+          <label>
+            <input
+              type="radio"
+              name="content-scope"
+              checked={form.includeCollaborative}
+              onChange={() =>
+                setForm((current) => ({ ...current, includeCollaborative: true }))
+              }
+            />
+            {arabic ? "كل المحتوى — يشمل المنشورات التعاونية" : "All content — includes collaborative posts"}
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="content-scope"
+              checked={!form.includeCollaborative}
+              onChange={() =>
+                setForm((current) => ({ ...current, includeCollaborative: false }))
+              }
+            />
+            {arabic ? "المنشورات الأصلية فقط — بدون التعاونية" : "Owned posts only — no collabs"}
+          </label>
         </fieldset>
         <div className="setup-fields">
           <label>

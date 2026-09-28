@@ -416,6 +416,7 @@ model Report {
   isBlank                Boolean         @default(false)
   comparisonMode         String          @default("none")
   periodType             String          @default("monthly")
+  includeCollaborative   Boolean         @default(true)
   orientation            String          @default("landscape")
   approvalOverrideReason String?
   // Set whenever refreshReportData() (src/lib/report-refresh.ts) recomputes this report's

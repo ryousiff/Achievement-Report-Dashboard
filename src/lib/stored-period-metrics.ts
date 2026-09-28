@@ -212,6 +212,7 @@ export async function buildStandardReportBlocksFromStoredPeriodSnapshots(
   periodStart: Date,
   periodEnd: Date,
   comparisonMode: ComparisonMode = "none",
+  includeCollaborative = true,
 ): Promise<ReportBlock[]> {
   return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
     reach: storedAccountReachForRange,
@@ -219,7 +220,7 @@ export async function buildStandardReportBlocksFromStoredPeriodSnapshots(
     followers: storedAccountFollowersForRange,
     dailyFollowerMovement: dailyFollowerMovementFromDatabase,
     interactions: periodAccountInteractionsFromDatabase,
-  }, new Date(), comparisonMode);
+  }, new Date(), comparisonMode, includeCollaborative);
 }
 
 /** Initial report creation prefers DB snapshots to avoid unnecessary Meta requests, but can still fall back
@@ -229,6 +230,7 @@ export async function buildStandardReportBlocksPreferStoredPeriodSnapshots(
   periodStart: Date,
   periodEnd: Date,
   comparisonMode: ComparisonMode = "none",
+  includeCollaborative = true,
 ): Promise<ReportBlock[]> {
   const interactionsPreferStored = async (clientId: string, start: Date, end: Date) => {
     const stored = await periodAccountInteractionsFromDatabase(clientId, start, end);
@@ -240,5 +242,5 @@ export async function buildStandardReportBlocksPreferStoredPeriodSnapshots(
     followers: followersPreferStored,
     dailyFollowerMovement,
     interactions: interactionsPreferStored,
-  }, new Date(), comparisonMode);
+  }, new Date(), comparisonMode, includeCollaborative);
 }
