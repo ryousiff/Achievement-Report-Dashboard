@@ -1576,6 +1576,7 @@ export default function Home() {
               t={t}
               reportTitle={reportMetadata.title}
               reportPeriod={reportMetadata.periodType}
+              includeCollaborative={reportMetadata.includeCollaborative}
               reportStatus={reportStatus}
               saveState={saveState}
               blocks={blocks}
@@ -2167,6 +2168,7 @@ function ReportBuilder({
   t,
   reportTitle,
   reportPeriod,
+  includeCollaborative,
   reportStatus,
   saveState,
   blocks,
@@ -2202,6 +2204,7 @@ function ReportBuilder({
   t: Dictionary;
   reportTitle: string;
   reportPeriod: ReportPeriod;
+  includeCollaborative: boolean;
   reportStatus: "DRAFT" | "NEEDS_REVIEW" | "APPROVED" | "EXPORTED";
   saveState: "idle" | "saving" | "saved" | "failed";
   blocks: Block[];
@@ -2371,18 +2374,56 @@ function ReportBuilder({
   };
   const coverageIssues = summarizeCoverageIssues(coverage, coverageCheckError);
   const coverageReady = isCoverageReady(coverage, coverageCheckError);
-  const readinessIssues = [
-    ...(!lastSyncedAt ? ["لم يتم تحديث بيانات التقرير أثناء هذه الجلسة"] : []),
-    ...coverageIssues,
+  const readinessIssues: Array<{
+    key: string;
+    message: string;
+    actionLabel?: string;
+    action?: () => void;
+  }> = [
+    ...(!lastSyncedAt
+      ? [{ key: "not-synced", message: "لم يتم تحديث بيانات التقرير أثناء هذه الجلسة", actionLabel: t.refresh, action: refresh }]
+      : []),
+    ...coverageIssues.map((message, index) => ({
+      key: `coverage-${index}`,
+      message,
+      actionLabel: t.refresh,
+      action: refresh,
+    })),
     ...blocks
-      .filter(
-        (block) =>
-          block.kind === "media" && (block.mediaItems?.length ?? 0) === 0,
-      )
-      .map((block) => `قسم «${block.title}» بلا منشورات`),
+      .filter((block) => block.kind === "media" && (block.mediaItems?.length ?? 0) === 0)
+      .map((block) => ({
+        key: `empty-media-${block.id}`,
+        message: `قسم «${block.title}» بلا منشورات`,
+        actionLabel: "اختيار منشورات",
+        action: () => openMediaForBlock(block.id),
+      })),
+    ...blocks
+      .filter((block) => !includeCollaborative && block.mediaItems?.some((item) => item.isCollaborative))
+      .map((block) => ({
+        key: `collab-${block.id}`,
+        message: `قسم «${block.title}» يحتوي منشور Collab بينما نطاق التقرير هو المحتوى الأصلي فقط`,
+        actionLabel: "مراجعة المنشورات",
+        action: () => openMediaForBlock(block.id),
+      })),
+    ...blocks
+      .filter((block) => block.kpis?.some((kpi) => kpi.value === "غير متاح" || kpi.value === "N/A"))
+      .map((block) => ({
+        key: `unavailable-kpi-${block.id}`,
+        message: `قسم «${block.title}» يحتوي مؤشراً غير متاح`,
+        actionLabel: "مراجعة المؤشرات",
+        action: () => openKpiForBlock(block.id),
+      })),
     ...blocks
       .filter((block) => block.chartUnavailable)
-      .map((block) => `بيانات «${block.title}» غير متاحة`),
+      .map((block) => ({
+        key: `chart-${block.id}`,
+        message: `بيانات «${block.title}» غير متاحة`,
+        actionLabel: t.refresh,
+        action: refresh,
+      })),
+    ...(!blocks.some((block) => (block.kind === "notes" || block.title.includes("التوصيات")) && block.body.trim())
+      ? [{ key: "recommendations", message: "التوصيات فارغة — أضيفي توصيات عملية قبل الاعتماد" }]
+      : []),
   ];
   return (
     <>
@@ -2400,6 +2441,11 @@ function ReportBuilder({
                     ? "تعذر الحفظ"
                     : "مسودة"}
           </p>
+          <span className="report-scope-badge">
+            {includeCollaborative
+              ? arabic ? "كل المحتوى · يشمل Collab" : "All content · includes collabs"
+              : arabic ? "المحتوى الأصلي فقط" : "Owned content only"}
+          </span>
         </div>
         <div className="actions">
           <button
@@ -2459,7 +2505,19 @@ function ReportBuilder({
               <>
                 <ul>
                   {readinessIssues.map((issue) => (
-                    <li key={issue}>⚠️ {issue}</li>
+                    <li key={issue.key}>
+                      <span>{issue.message}</span>
+                      {issue.action && issue.actionLabel && (
+                        <button
+                          type="button"
+                          className="readiness-fix"
+                          disabled={refreshing || checkingCoverage}
+                          onClick={() => issue.action?.()}
+                        >
+                          {issue.actionLabel}
+                        </button>
+                      )}
+                    </li>
                   ))}
                 </ul>
                 {coverage?.status === "SYNCING" && (

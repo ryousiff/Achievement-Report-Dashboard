@@ -41,16 +41,17 @@ function editableBlocks(value: unknown): EditableBlock[] {
 }
 
 async function readiness(reportId: string, blocks: EditableBlock[]) {
-  const report = await db.report.findUnique({ where: { id: reportId }, select: { clientId: true, periodStart: true, periodEnd: true } });
+  const report = await db.report.findUnique({ where: { id: reportId }, select: { clientId: true, periodStart: true, periodEnd: true, includeCollaborative: true } });
   if (!report) return ["Report not found."];
   const issues: string[] = [];
   const media = blocks.filter((block) => block.type === "media");
-  if (media.some((block) => !Array.isArray(block.content.mediaItems) || block.content.mediaItems.length === 0)) issues.push("One or more required media sections are empty.");
-  if (blocks.some((block) => Array.isArray(block.content.kpis) && block.content.kpis.some((item) => typeof item === "object" && item && ((item as Record<string, unknown>).available === false || (item as Record<string, unknown>).value === "غير متاح")))) issues.push("One or more critical metrics are unavailable.");
+  if (media.some((block) => !Array.isArray(block.content.mediaItems) || block.content.mediaItems.length === 0)) issues.push("أحد أقسام المنشورات فارغ — اختاري منشورات أو احذفي القسم قبل الاعتماد.");
+  if (!report.includeCollaborative && media.some((block) => Array.isArray(block.content.mediaItems) && block.content.mediaItems.some((item) => typeof item === "object" && item && (item as Record<string, unknown>).isCollaborative === true))) issues.push("التقرير مضبوط على المحتوى الأصلي فقط، لكنه يحتوي منشور Collab — أزيلي المنشور التعاوني قبل الاعتماد.");
+  if (blocks.some((block) => Array.isArray(block.content.kpis) && block.content.kpis.some((item) => typeof item === "object" && item && ((item as Record<string, unknown>).available === false || (item as Record<string, unknown>).value === "غير متاح")))) issues.push("أحد المؤشرات غير متاح — حدّثي البيانات أو راجعي المؤشر قبل الاعتماد.");
   const recommendations = blocks.find((block) => block.type === "notes" || block.type === "recommendations");
-  if (!recommendations || typeof recommendations.content.body !== "string" || !recommendations.content.body.trim()) issues.push("Recommendations are missing.");
+  if (!recommendations || typeof recommendations.content.body !== "string" || !recommendations.content.body.trim()) issues.push("التوصيات فارغة — أضيفي توصيات عملية قبل الاعتماد.");
   const connection = await db.socialConnection.findFirst({ where: { clientId: report.clientId, platform: "INSTAGRAM" }, select: { id: true, lastSuccessfulSyncAt: true } });
-  if (!connection?.lastSuccessfulSyncAt || Date.now() - connection.lastSuccessfulSyncAt.valueOf() > 24 * 60 * 60 * 1000) issues.push("Client data has not been synchronized in the last 24 hours.");
+  if (!connection?.lastSuccessfulSyncAt || Date.now() - connection.lastSuccessfulSyncAt.valueOf() > 24 * 60 * 60 * 1000) issues.push("بيانات العميل لم تُزامن خلال آخر 24 ساعة — حدّثي بيانات التقرير قبل الاعتماد.");
   if (connection) {
     const coverage = await getCoverage(connection.id, report.periodStart, report.periodEnd);
     if (coverage.status !== "COMPLETE") issues.push(...coverage.warnings.slice(0, 3));
