@@ -15,6 +15,7 @@ import {
   type ViewsResult,
 } from "@/lib/report-data";
 import { splitRangeByMonth, type ComparisonMode } from "@/lib/report-period";
+import { periodPaidMetricsFromDatabase, periodPaidMetricsForRange, type PaidMetricsResult } from "@/lib/ads-insights";
 
 const LONG_RANGE_REACH_TOOLTIP = "لا يمكن حساب الوصول الفريد لأكثر من 31 يوماً؛ Meta API لا توفر نافذة وصول فريدة لهذه المدة وتجميع نوافذ أقصر لا يُنتج قيمة فريدة صحيحة.";
 const LONG_RANGE_AGGREGATE_TOOLTIP = "قيمة محسوبة بجمع القيم الشهرية المحفوظة في قاعدة البيانات. تنطبق على المقاييس التراكمية فقط.";
@@ -220,6 +221,7 @@ export async function buildStandardReportBlocksFromStoredPeriodSnapshots(
     followers: storedAccountFollowersForRange,
     dailyFollowerMovement: dailyFollowerMovementFromDatabase,
     interactions: periodAccountInteractionsFromDatabase,
+    paid: periodPaidMetricsFromDatabase,
   }, new Date(), comparisonMode, includeCollaborative);
 }
 
@@ -236,11 +238,16 @@ export async function buildStandardReportBlocksPreferStoredPeriodSnapshots(
     const stored = await periodAccountInteractionsFromDatabase(clientId, start, end);
     return Object.keys(stored.values).length > 0 ? stored : periodAccountInteractionsForRange(clientId, start, end);
   };
+  const paidPreferStored = async (clientId: string, start: Date, end: Date): Promise<PaidMetricsResult> => {
+    const stored = await periodPaidMetricsFromDatabase(clientId, start, end);
+    return Object.keys(stored.values).length > 0 ? stored : periodPaidMetricsForRange(clientId, start, end);
+  };
   return buildStandardReportBlocks(clientId, periodStart, periodEnd, {
     reach: reachPreferStored,
     views: viewsPreferStored,
     followers: followersPreferStored,
     dailyFollowerMovement,
     interactions: interactionsPreferStored,
+    paid: paidPreferStored,
   }, new Date(), comparisonMode, includeCollaborative);
 }

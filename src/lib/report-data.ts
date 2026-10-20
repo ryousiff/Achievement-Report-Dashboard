@@ -5,6 +5,7 @@ import { graph } from "@/lib/meta-sync";
 import { splitRangeByMonth, comparisonPeriod, type ComparisonMode } from "@/lib/report-period";
 import { mediaThumbnailUrl } from "@/lib/media-storage";
 import { resolveReportPostMetrics, summarizePostMetricsAccuracy, type PostMetricsSource } from "@/lib/post-metric-snapshots";
+import { periodPaidMetricsForRange, periodPaidMetricsFromDatabase, type PaidMetricsResult } from "@/lib/ads-insights";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
@@ -1048,6 +1049,7 @@ type ReportDataResolvers = {
   views: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<ViewsResult>;
   dailyFollowerMovement: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<DailyFollowerMovement>;
   interactions: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<InteractionsResult>;
+  paid: (clientId: string, periodStart: Date, periodEnd: Date) => Promise<PaidMetricsResult>;
 };
 
 const defaultReportDataResolvers: ReportDataResolvers = {
@@ -1056,6 +1058,7 @@ const defaultReportDataResolvers: ReportDataResolvers = {
   views: periodAccountViewsForRange,
   dailyFollowerMovement,
   interactions: periodAccountInteractionsForRange,
+  paid: periodPaidMetricsForRange,
 };
 
 const DB_ONLY_SUM_DAILY_REACH_TOOLTIP = "مجموع الوصول اليومي من بيانات متزامنة؛ قد يحتوي على أشخاص وصل إليهم أكثر من منشور واحد، لذا لا يُستخدم كوصول فريد.";
@@ -1182,7 +1185,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // These reads are all independent of each other (none consumes another's result), so resolve them
   // concurrently instead of one-by-one — this is the dominant cost of building a report and doing it
   // sequentially previously added their latencies together for no reason.
-  const [posts, reach, followers, totalViews, dailyMovement, reachDailySnapshots, interactions] = await Promise.all([
+  const [posts, reach, followers, totalViews, dailyMovement, reachDailySnapshots, interactions, paid] = await Promise.all([
     reportPosts(clientId, periodStart, periodEnd, now, includeCollaborative),
     resolve.reach(clientId, periodStart, periodEnd),
     resolve.followers(clientId, periodStart, periodEnd),
@@ -1201,6 +1204,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
       select: { value: true },
     }),
     resolve.interactions(clientId, periodStart, periodEnd),
+    resolve.paid(clientId, periodStart, periodEnd),
   ]);
 
   const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
@@ -1210,7 +1214,11 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const hasTotalViews = totalViews.value !== null;
   totals.reach = reach.value ?? 0;
   totals.follows = followers.gained ?? 0;
-  const engagementInteractions = interactions.values.total_interactions ?? (hasMetric("total_interactions") ? totals.total_interactions : null);
+  // Paid ad interactions are added on top of the organic Meta total so the cards show the same
+  // combined figure Meta's app shows ("Content interactions … including ads").
+  const paidInteractions = paid.values.paid_interactions ?? 0;
+  const organicInteractions = interactions.values.total_interactions ?? (hasMetric("total_interactions") ? totals.total_interactions : null);
+  const engagementInteractions = organicInteractions !== null ? organicInteractions + paidInteractions : null;
   const engagementRate = hasReach && totals.reach > 0 && engagementInteractions !== null ? `${((engagementInteractions / totals.reach) * 100).toFixed(2)}%` : "غير متاح";
   const avgInteractionsPerPost = totals.posts > 0 && hasMetric("total_interactions") ? (totals.total_interactions / totals.posts).toFixed(1) : "غير متاح";
   const hasAvgInteractionsPerPost = totals.posts > 0 && hasMetric("total_interactions");
@@ -1309,14 +1317,18 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   // Prefer Meta's account-level period totals (activity received during the period on all content,
   // identical to what the Meta dashboard shows); fall back to per-post sums only when the account
   // total_value isn't synced/available for the range.
+  const PAID_TOOLTIP_SUFFIX = " يشمل التفاعلات الإعلانية (الإعلانات الممولة) الخاصة بالفترة.";
   const ACCOUNT_INTERACTIONS_TOOLTIP = "إجمالي التفاعل المستلم خلال الفترة على مستوى الحساب كما تعرضه Meta، ويشمل المحتوى المنشور قبل الفترة أيضاً.";
   const interactionKpi = (id: string, label: string, metric: AccountInteractionMetric, tooltip?: string) => {
     const accountValue = interactions.values[metric];
     if (accountValue !== undefined) {
-      return kpi(id, label, accountValue.toLocaleString(), true, {
+      const paidKey = { total_interactions: "paid_interactions", likes: "ad_likes", comments: "ad_comments", saved: "ad_saved", shares: "ad_shares" } as const;
+      const paidValue = paid.values[paidKey[metric]] ?? 0;
+      const hasPaid = paidValue > 0;
+      return kpi(id, label, (accountValue + paidValue).toLocaleString(), true, {
         interactionsAccuracy: interactions.accuracy,
         interactionsMethod: interactions.method,
-        tooltip: tooltip ?? interactions.tooltip ?? ACCOUNT_INTERACTIONS_TOOLTIP,
+        tooltip: (tooltip ?? interactions.tooltip ?? ACCOUNT_INTERACTIONS_TOOLTIP) + (hasPaid ? PAID_TOOLTIP_SUFFIX : ""),
       });
     }
     return postMetricKpi(id, label, metric);

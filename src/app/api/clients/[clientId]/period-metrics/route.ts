@@ -8,6 +8,7 @@ import {
   periodAccountInteractionsForRange,
   followersCountAt,
 } from "@/lib/report-data";
+import { periodPaidMetricsForRange } from "@/lib/ads-insights";
 
 function sumMetric(posts: Array<{ metrics: Record<string, number> }>, metric: string) {
   return posts.reduce((acc, post) => acc + (post.metrics[metric] ?? 0), 0);
@@ -30,18 +31,20 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const ownedPosts = posts.filter((post) => post.mediaSource === "OWNED");
   const collabPosts = posts.filter((post) => post.mediaSource === "COLLABORATIVE");
 
-  const [reach, totalViews, followers, followersCount, interactions] = await Promise.all([
+  const [reach, totalViews, followers, followersCount, interactions, paid] = await Promise.all([
     periodAccountReachForRange(clientId, since, until),
     periodAccountViewsForRange(clientId, since, until),
     periodAccountFollowersForRange(clientId, since, until),
     followersCountAt(clientId, until),
     periodAccountInteractionsForRange(clientId, since, until),
+    periodPaidMetricsForRange(clientId, since, until),
   ]);
 
   const totalInteractions = sumMetric(posts, "total_interactions");
+  const combinedInteractions = (interactions.values.total_interactions ?? totalInteractions) + (paid.values.paid_interactions ?? 0);
   const engagementRate =
     reach.value && reach.value > 0
-      ? `${((totalInteractions / reach.value) * 100).toFixed(2)}%`
+      ? `${((combinedInteractions / reach.value) * 100).toFixed(2)}%`
       : null;
 
   return NextResponse.json({
@@ -62,11 +65,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     posts: posts.length,
     "owned-posts": ownedPosts.length,
     "collaborative-posts": collabPosts.length,
-    total_interactions: interactions.values.total_interactions ?? totalInteractions,
-    likes: interactions.values.likes ?? sumMetric(posts, "likes"),
-    comments: interactions.values.comments ?? sumMetric(posts, "comments"),
-    shares: interactions.values.shares ?? sumMetric(posts, "shares"),
-    saved: interactions.values.saved ?? sumMetric(posts, "saved"),
+    total_interactions: combinedInteractions,
+    likes: (interactions.values.likes ?? sumMetric(posts, "likes")) + (paid.values.ad_likes ?? 0),
+    comments: (interactions.values.comments ?? sumMetric(posts, "comments")) + (paid.values.ad_comments ?? 0),
+    shares: (interactions.values.shares ?? sumMetric(posts, "shares")) + (paid.values.ad_shares ?? 0),
+    saved: (interactions.values.saved ?? sumMetric(posts, "saved")) + (paid.values.ad_saved ?? 0),
     "media-follows": sumMetric(posts, "follows"),
     "engagement-rate": engagementRate,
   });

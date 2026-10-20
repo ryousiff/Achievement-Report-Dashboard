@@ -122,10 +122,13 @@ model Client {
   active        Boolean            @default(true)
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
+  // Ad account ("act_123") whose paid performance is folded into this client's report KPIs.
+  metaAdAccountId String?
   connections   SocialConnection[]
   reports       Report[]
   sponsoredAds  SponsoredAd[]
   adBudgets     ClientAdBudget[]
+  adInsightSnapshots ClientAdInsightSnapshot[]
 }
 
 model MetaProfile {
@@ -133,6 +136,9 @@ model MetaProfile {
   displayName    String
   createdById    String
   tokenExpiresAt DateTime?
+  // The pasted non-expiring System User token, stored encrypted. Required for ad-account insights:
+  // per-Page tokens cannot query /act_<id>/insights. Never logged or returned to the client.
+  encryptedSystemToken String?
   lastSyncedAt   DateTime?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
@@ -328,6 +334,26 @@ model SponsoredAd {
   @@index([clientId, startDate])
   @@index([clientId, budgetYear, budgetMonth])
   @@index([socialPostId])
+}
+
+// A monthly snapshot of a client's paid (Meta Ads) metrics for one calendar month, fetched from the
+// ad account's insights API via the persisted system-user token. `finalizedAt` follows the same
+// post-month grace-period convention as SocialPostMetricSnapshot — after it, the row is immutable
+// so saved reports don't drift. Metric names: paid_interactions, ad_likes, ad_comments, ad_saved,
+// ad_shares, ad_spend, ad_impressions, ad_reach, ad_clicks.
+model ClientAdInsightSnapshot {
+  id          String    @id @default(cuid())
+  clientId    String
+  metric      String
+  periodStart DateTime
+  periodEnd   DateTime
+  value       Float
+  capturedAt  DateTime  @default(now())
+  finalizedAt DateTime?
+  client      Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, metric, periodStart, periodEnd])
+  @@index([clientId, periodStart])
 }
 
 // A client's planned advertising budget for one calendar month. `plannedBudget` is entered by an

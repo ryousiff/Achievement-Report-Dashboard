@@ -154,6 +154,7 @@ type WorkspaceClient = {
   id: string;
   name: string;
   logoUrl?: string | null;
+  metaAdAccountId?: string | null;
   connections?: Array<{
     platform: string;
     displayName: string;
@@ -6342,6 +6343,7 @@ function ConnectedAccounts({
   user: WorkspaceUser | null;
 }) {
   const [profiles, setProfiles] = useState<MetaProfile[]>([]);
+  const [adAccounts, setAdAccounts] = useState<Array<{ id: string; name: string }>>([]);
   const [saving, setSaving] = useState<string | null>(null);
   const [syncing, setSyncing] = useState<string | null>(null);
   const [backfilling, setBackfilling] = useState<string | null>(null);
@@ -6375,6 +6377,12 @@ function ConnectedAccounts({
   useEffect(() => {
     void refreshProfiles();
     void refreshMetaConfig();
+    void (async () => {
+      const response = await fetch("/api/connectors/meta/ad-accounts");
+      if (!response.ok) return;
+      const data = (await response.json()) as { adAccounts?: Array<{ id: string; name: string }> };
+      setAdAccounts(data.adAccounts ?? []);
+    })();
   }, []);
   const accounts = profiles.flatMap((profile) =>
     profile.accounts.map((account) => ({
@@ -6439,6 +6447,19 @@ function ConnectedAccounts({
     const data = (await response.json()) as { error?: string };
     if (!response.ok) setError(data.error ?? "تعذر حفظ تعيين الحسابات.");
     await Promise.all([onRefresh(), refreshProfiles()]);
+    setSaving(null);
+  };
+  const assignAdAccount = async (client: WorkspaceClient, metaAdAccountId: string) => {
+    setSaving(client.id);
+    setError("");
+    const response = await fetch(`/api/clients/${client.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ metaAdAccountId: metaAdAccountId || null }),
+    });
+    const data = (await response.json()) as { error?: string };
+    if (!response.ok) setError(data.error ?? "تعذر حفظ الحساب الإعلاني.");
+    await onRefresh();
     setSaving(null);
   };
   const pollSyncStatus = async (
@@ -6900,6 +6921,28 @@ function ConnectedAccounts({
                 </select>
               </label>
             ))}
+            {adAccounts.length > 0 ? (
+              <label className="account-assignment">
+                <span className="platform instagram">
+                  <Instagram size={18} />
+                </span>
+                <span>الحساب الإعلاني (اختياري)</span>
+                <select
+                  value={client.metaAdAccountId ?? ""}
+                  disabled={saving === client.id}
+                  onChange={(event) =>
+                    void assignAdAccount(client, event.target.value)
+                  }
+                >
+                  <option value="">بدون حساب إعلاني</option>
+                  {adAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name} — {account.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <button
               className="btn primary full-width"
               disabled={syncing === client.id || !selected(client, "INSTAGRAM")}
