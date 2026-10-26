@@ -114,6 +114,7 @@ const scopeLabels: Record<string, string> = {
   pages_read_engagement: "قراءة تفاعل الصفحات",
   instagram_basic: "بيانات Instagram الأساسية",
   instagram_manage_insights: "إدارة إحصائيات Instagram",
+  ads_read: "قراءة بيانات الإعلانات",
 };
 
 /** Returns a list of Arabic human-readable problems, or an empty array if the token is usable as-is. */

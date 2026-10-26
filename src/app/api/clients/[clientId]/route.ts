@@ -30,10 +30,16 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const user = await requireFeature(request, "manage_clients");
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { clientId } = await params;
-  const { active, logoUrl } = await request.json() as { active?: unknown; logoUrl?: unknown };
-  if (typeof active !== "boolean" && logoUrl !== null && typeof logoUrl !== "string") return NextResponse.json({ error: "Provide a valid client update." }, { status: 400 });
-  const data = typeof active === "boolean" ? { active } : { logoUrl: typeof logoUrl === "string" && logoUrl.trim() ? logoUrl.trim() : null };
-  const client = await db.client.update({ where: { id: clientId }, data, select: { id: true, name: true, logoUrl: true, active: true } }).catch(() => null);
+  const { active, logoUrl, metaAdAccountId } = await request.json() as { active?: unknown; logoUrl?: unknown; metaAdAccountId?: unknown };
+  const hasAdAccount = metaAdAccountId !== undefined;
+  if (!hasAdAccount && typeof active !== "boolean" && logoUrl !== null && typeof logoUrl !== "string") return NextResponse.json({ error: "Provide a valid client update." }, { status: 400 });
+  if (hasAdAccount && metaAdAccountId !== null && !(typeof metaAdAccountId === "string" && /^act_\d+$/.test(metaAdAccountId.trim()))) {
+    return NextResponse.json({ error: "Provide a valid ad account ID (act_...)." }, { status: 400 });
+  }
+  const data = hasAdAccount
+    ? { metaAdAccountId: typeof metaAdAccountId === "string" ? metaAdAccountId.trim() : null }
+    : typeof active === "boolean" ? { active } : { logoUrl: typeof logoUrl === "string" && logoUrl.trim() ? logoUrl.trim() : null };
+  const client = await db.client.update({ where: { id: clientId }, data, select: { id: true, name: true, logoUrl: true, active: true, metaAdAccountId: true } }).catch(() => null);
   if (!client) return NextResponse.json({ error: "Client not found." }, { status: 404 });
   return NextResponse.json({ client });
 }

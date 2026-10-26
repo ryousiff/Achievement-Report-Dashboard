@@ -47,6 +47,11 @@ export async function POST(request: NextRequest) {
       fetchBusinessAdAccounts(token, businessId),
     ]);
     const warnings = [...pageWarnings, ...adWarnings];
+    // ads_read is optional today but required for the paid-metrics pipeline — surface it as a
+    // non-blocking warning so the admin knows reports will show organic-only interactions.
+    if (!(debug.scopes ?? []).includes("ads_read")) {
+      warnings.push("الرمز لا يحمل إذن ads_read — التفاعلات الإعلانية لن تُجلب حتى يُنشأ رمز جديد بهذا الإذن.");
+    }
 
     if (pages.length === 0) {
       return NextResponse.json({
@@ -65,11 +70,14 @@ export async function POST(request: NextRequest) {
 
     // Replace (update in place) an existing Kaan system-user profile rather than creating duplicates every time.
     let profile = await db.metaProfile.findFirst({ where: { displayName: systemUserProfileName }, orderBy: { createdAt: "desc" } });
+    // Persist the system-user token encrypted — ad-account insights (/act_<id>/insights) cannot be
+    // read with per-Page tokens. It is never returned, logged, or echoed to the client.
+    const encryptedSystemToken = encryptToken(token);
     if (profile) {
-      profile = await db.metaProfile.update({ where: { id: profile.id }, data: { lastSyncedAt: new Date(), updatedAt: new Date() } });
+      profile = await db.metaProfile.update({ where: { id: profile.id }, data: { lastSyncedAt: new Date(), updatedAt: new Date(), encryptedSystemToken } });
     } else {
       profile = await db.metaProfile.create({
-        data: { displayName: systemUserProfileName, createdById: user.id, tokenExpiresAt: null, lastSyncedAt: new Date() },
+        data: { displayName: systemUserProfileName, createdById: user.id, tokenExpiresAt: null, lastSyncedAt: new Date(), encryptedSystemToken },
       });
     }
 

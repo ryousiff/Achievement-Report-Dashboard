@@ -5,6 +5,7 @@ import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { graph, MetaSyncError } from "@/lib/meta-sync";
 import { isUnsupportedFollowerCountPeriodError } from "@/lib/meta-error-classification";
+import { syncMissingClientAdMonth } from "@/lib/ads-insights";
 
 type MetaInsight = { name?: string; period?: string; values?: Array<{ value?: number; end_time?: string }> };
 type MetaTotalValueInsight = {
@@ -332,6 +333,7 @@ export async function runDailyAccountInsightChunk(connectionId: string) {
     where: { id: connectionId },
     select: {
       id: true,
+      clientId: true,
       platform: true,
       externalAccountId: true,
       encryptedToken: true,
@@ -418,6 +420,14 @@ export async function runDailyAccountInsightChunk(connectionId: string) {
     if (error instanceof MetaSyncError && (error.code === "rate_limited" || error.code === "request_failed")) throw error;
     lastError = error instanceof Error ? error.message : "Completed-month account totals could not be synchronized.";
     allMetricsReachedFloor = false;
+  }
+
+  // Paid ads metrics: capture one missing completed month from the client's assigned ad account.
+  // Non-fatal — ads are an optional enrichment; a missing ad account or token just skips this.
+  try {
+    await syncMissingClientAdMonth(connection.clientId, now);
+  } catch {
+    // Enrichment only — never surface paid-metrics failures as account-insight errors.
   }
 
   await db.socialConnection.update({
