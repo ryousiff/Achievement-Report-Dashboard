@@ -23,8 +23,17 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   const assignedElsewhere = await db.socialConnection.findMany({ where: { sourceAccountId: { in: accountIds }, clientId: { not: clientId } }, select: { displayName: true } });
   if (assignedElsewhere.length) return NextResponse.json({ error: "One or more selected accounts are already assigned to another client." }, { status: 409 });
 
+  // Only delete connections that are actually being replaced (different account, or a platform
+  // intentionally left unassigned). The upsert preserves the same row — and with it every synced
+  // SocialPost + SocialInsightSnapshot — whenever the same external account is re-selected.
   await db.$transaction([
-    db.socialConnection.deleteMany({ where: { clientId, sourceAccountId: { not: null } } }),
+    db.socialConnection.deleteMany({
+      where: {
+        clientId,
+        sourceAccountId: { not: null },
+        NOT: { OR: accounts.map((account) => ({ platform: account.platform, externalAccountId: account.externalAccountId })) },
+      },
+    }),
     ...accounts.map((account) => db.socialConnection.upsert({
       where: { clientId_platform_externalAccountId: { clientId, platform: account.platform, externalAccountId: account.externalAccountId } },
       create: { clientId, sourceAccountId: account.id, platform: account.platform, externalAccountId: account.externalAccountId, displayName: account.displayName, encryptedToken: account.encryptedToken, tokenExpiresAt: account.tokenExpiresAt, lastSyncedAt: account.lastSyncedAt },
