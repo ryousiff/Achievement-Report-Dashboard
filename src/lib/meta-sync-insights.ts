@@ -243,6 +243,10 @@ export async function fetchCompletedMonthTotals(accountId: string, token: string
   };
 }
 
+/** Marker row written when Meta returns no engagement metrics for a month, so the worker stops
+ * retrying that month on every run (engagement is best-effort, never completeness-gating). */
+const ENGAGEMENT_UNAVAILABLE_SENTINEL = "engagement_unavailable";
+
 export async function storeCompletedMonthTotals(connectionId: string, period: CompletedMonthPeriod, totals: MonthlyAccountTotals) {
   const periodStart = startOfDayUTC(period.start);
   const periodEnd = endOfDayUTC(period.end);
@@ -300,18 +304,34 @@ async function syncOneMissingCompletedMonth(
       where: {
         connectionId,
         periodType: InsightPeriodType.TOTAL_VALUE,
-        metric: { in: [...authoritativePeriodMetrics] },
+        metric: { in: [...authoritativePeriodMetrics, ...ENGAGEMENT_PERIOD_METRICS, ENGAGEMENT_UNAVAILABLE_SENTINEL] },
         periodStart: startOfDayUTC(period.start),
         periodEnd: endOfDayUTC(period.end),
       },
       select: { metric: true },
     });
     const present = new Set(existing.map((row) => row.metric));
-    if (authoritativePeriodMetrics.every((metric) => present.has(metric))) continue;
+    const hasAuthoritative = authoritativePeriodMetrics.every((metric) => present.has(metric));
+    const engagementComplete = present.has(ENGAGEMENT_UNAVAILABLE_SENTINEL)
+      || ENGAGEMENT_PERIOD_METRICS.every((metric) => present.has(metric));
+    if (hasAuthoritative && engagementComplete) continue;
 
     const totals = await fetchCompletedMonthTotals(accountId, token, period);
     if (!totals) return { complete: false, stored: null };
     await storeCompletedMonthTotals(connectionId, period, totals);
+    if (Object.keys(totals.engagement).length === 0) {
+      await db.socialInsightSnapshot.upsert({
+        where: {
+          connectionId_metric_periodType_periodStart_periodEnd: {
+            connectionId, metric: ENGAGEMENT_UNAVAILABLE_SENTINEL,
+            periodType: InsightPeriodType.TOTAL_VALUE,
+            periodStart: startOfDayUTC(period.start), periodEnd: endOfDayUTC(period.end),
+          },
+        },
+        create: { connectionId, metric: ENGAGEMENT_UNAVAILABLE_SENTINEL, periodType: InsightPeriodType.TOTAL_VALUE, periodStart: startOfDayUTC(period.start), periodEnd: endOfDayUTC(period.end), value: 1 },
+        update: { capturedAt: new Date() },
+      });
+    }
     // There may still be older missing months. The next worker run will continue from the next gap.
     return { complete: index === candidates.length - 1, stored: period };
   }
