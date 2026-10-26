@@ -183,7 +183,7 @@ async function fetchFollowerMovementTotal(accountId: string, token: string, sinc
  * one of them for an account, the core reach/views/followers snapshot still gets stored. */
 async function fetchEngagementTotals(accountId: string, token: string, since: Date, untilExclusive: Date): Promise<MonthlyAccountTotals["engagement"]> {
   const response = await graph<{ data?: Array<{ name?: string; total_value?: { value?: number } }> }>(`${accountId}/insights`, token, {
-    metric: ENGAGEMENT_PERIOD_METRICS.join(","),
+    metric: ENGAGEMENT_PERIOD_METRICS.map((m) => (m === "saved" ? "saves" : m)).join(","),
     period: "day",
     metric_type: "total_value",
     since: String(Math.floor(startOfDayUTC(since).valueOf() / 1000)),
@@ -192,8 +192,9 @@ async function fetchEngagementTotals(accountId: string, token: string, since: Da
   const engagement: MonthlyAccountTotals["engagement"] = {};
   for (const item of response.data ?? []) {
     if (!item.name || typeof item.total_value?.value !== "number") continue;
-    if ((ENGAGEMENT_PERIOD_METRICS as readonly string[]).includes(item.name)) {
-      engagement[item.name as EngagementPeriodMetric] = item.total_value.value;
+    const internalName = item.name === "saves" ? "saved" : item.name;
+    if ((ENGAGEMENT_PERIOD_METRICS as readonly string[]).includes(internalName)) {
+      engagement[internalName as EngagementPeriodMetric] = item.total_value.value;
     }
   }
   return engagement;

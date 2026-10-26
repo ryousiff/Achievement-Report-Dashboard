@@ -750,7 +750,7 @@ async function fetchInteractionsWindow(clientId: string, periodStart: Date, peri
       `${connection.externalAccountId}/insights`,
       token,
       {
-        metric: ACCOUNT_INTERACTION_METRICS.join(","),
+        metric: ACCOUNT_INTERACTION_METRICS.map((m) => (m === "saved" ? "saves" : m)).join(","),
         period: "day",
         metric_type: "total_value",
         since: String(Math.floor(since.valueOf() / 1000)),
@@ -760,8 +760,9 @@ async function fetchInteractionsWindow(clientId: string, periodStart: Date, peri
     const values: InteractionsResult["values"] = {};
     for (const item of res.data ?? []) {
       if (!item.name || typeof item.total_value?.value !== "number") continue;
-      if ((ACCOUNT_INTERACTION_METRICS as readonly string[]).includes(item.name)) {
-        values[item.name as AccountInteractionMetric] = item.total_value.value;
+      const internalName = item.name === "saves" ? "saved" : item.name;
+      if ((ACCOUNT_INTERACTION_METRICS as readonly string[]).includes(internalName)) {
+        values[internalName as AccountInteractionMetric] = item.total_value.value;
       }
     }
     if (Object.keys(values).length === 0) return interactionsUnavailable;

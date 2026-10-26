@@ -7,7 +7,7 @@ import { decryptToken } from "@/lib/token-encryption";
 const clientId = process.argv[2];
 const since = process.argv[3] ?? "2026-09-01";
 const until = process.argv[4] ?? "2026-09-30";
-const METRICS = "total_interactions,likes,comments,shares,saved";
+const METRICS = "total_interactions,likes,comments,shares,saves";
 
 async function call(igId: string, token: string, params: Record<string, string>) {
   const url = new URL(`https://graph.facebook.com/v23.0/${igId}/insights`);
