@@ -5,7 +5,7 @@ import { graph } from "@/lib/meta-sync";
 import { splitRangeByMonth, comparisonPeriod, type ComparisonMode } from "@/lib/report-period";
 import { mediaThumbnailUrl } from "@/lib/media-storage";
 import { resolveReportPostMetrics, summarizePostMetricsAccuracy, type PostMetricsSource } from "@/lib/post-metric-snapshots";
-import { periodPaidMetricsForRange, periodPaidMetricsFromDatabase, type PaidMetricsResult } from "@/lib/ads-insights";
+import { periodPaidMetricsForRange, periodPaidMetricsFromDatabase, type AdInsightMetric, type PaidMetricsResult } from "@/lib/ads-insights";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
@@ -22,6 +22,7 @@ export const REPORT_DATA_DRIVEN_REFRESH_KEYS = [
   "kpi-overview",
   "kpi-comparison",
   "kpi-interactions",
+  "kpi-paid",
   "chart-followers",
   "kpi-content-type",
   "media-top-interactions",
@@ -1335,10 +1336,31 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     return postMetricKpi(id, label, metric);
   };
 
+  // Paid (boosted) section — sourced from the client's Meta ad account, not post insights, so it
+  // captures delivery the organic per-post `reach` metric can't see (see ads-insights.ts). Only
+  // emitted when the client actually has paid data for the period.
+  const PAID_SECTION_TOOLTIP = "من بيانات حساب الإعلانات على Meta (Ads Insights) لهذه الفترة — تشمل الوصول والمشاهدات المدفوعة التي لا تظهر في مقاييس المنشورات العضوية.";
+  const paidMetric = (metric: AdInsightMetric) => paid.values[metric];
+  const paidKpi = (id: string, label: string, metric: AdInsightMetric, tooltip?: string) => {
+    const value = paidMetric(metric);
+    return kpi(id, label, value !== undefined ? value.toLocaleString() : "غير متاح", value !== undefined, { tooltip: tooltip ?? PAID_SECTION_TOOLTIP });
+  };
+  const paidKpis = [
+    paidMetric("ad_spend") !== undefined ? kpi("ad-spend", "المبلغ المدفوع", `${paidMetric("ad_spend")!.toLocaleString()} BHD`, true, { tooltip: "إجمالي الإنفاق على الإعلانات من حساب الإعلانات خلال الفترة (بعملة الحساب الإعلاني)." }) : null,
+    paidMetric("ad_reach") !== undefined ? paidKpi("ad-reach", "الوصول المدفوع", "ad_reach") : null,
+    paidMetric("ad_impressions") !== undefined ? paidKpi("ad-impressions", "المشاهدات المدفوعة", "ad_impressions") : null,
+    paidMetric("ad_link_clicks") !== undefined || paidMetric("ad_clicks") !== undefined
+      ? kpi("ad-clicks", "النقرات", (paidMetric("ad_link_clicks") ?? paidMetric("ad_clicks")!).toLocaleString(), true, { tooltip: "نقرات الرابط على الإعلانات خلال الفترة." + PAID_SECTION_TOOLTIP })
+      : null,
+    paidMetric("ad_messages") !== undefined ? paidKpi("ad-messages", "الرسائل", "ad_messages", "محادثات المراسلة التي بدأت من الإعلانات خلال الفترة (WhatsApp / DM).") : null,
+    paidMetric("paid_interactions") !== undefined ? paidKpi("ad-interactions", "التفاعل المدفوع", "paid_interactions", "إعجابات وتعليقات وحفظ ومشاركات قادمة من الإعلانات خلال الفترة.") : null,
+  ].filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
   const blocks: ReportBlock[] = [
     { type: BlockType.TEXT, title: "غلاف التقرير", content: { body: "تقرير الإنجاز الشهري", page: "cover", refreshKey: "cover" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "أهم الإحصائيات", content: { body: "إحصائيات الفترة المحددة من بيانات Meta المتاحة.", kpis: [...reachKpis, ...followKpis, ...totalViewsKpis, postMetricKpi("views", metricLabel.views, "views"), kpi("engagement-rate", "متوسط التفاعل على أساس الوصول", engagementRate, hasReach), kpi("avg-interactions-per-post", "متوسط التفاعل بالنسبة للمنشور", avgInteractionsPerPost, hasAvgInteractionsPerPost, { tooltip: "إجمالي التفاعل على المنشورات مقسوماً على عدد المنشورات المنشورة خلال الفترة." }), kpi("posts", metricLabel.posts, totals.posts.toLocaleString())], autoFilled: true, refreshKey: "kpi-overview" satisfies ReportRefreshKey } },
     { type: BlockType.KPI, title: "التفاعل مع المحتوى", content: { body: "إجماليات التفاعل المستلمة خلال الفترة على مستوى الحساب من بيانات Meta.", kpis: [interactionKpi("total_interactions", metricLabel.total_interactions, "total_interactions"), interactionKpi("likes", metricLabel.likes, "likes"), interactionKpi("comments", metricLabel.comments, "comments"), interactionKpi("saved", "حفظ", "saved"), interactionKpi("shares", "مشاركة", "shares", "Meta لا تُعيد متريكناً منفصلاً لإعادة النشر؛ تعرض هذه القيمة العدد الإجمالي للمشاركات (Stories، DMs، إعادة النشر) المتاح عبر Instagram Insights.")], autoFilled: true, refreshKey: "kpi-interactions" satisfies ReportRefreshKey } },
+    ...(paidKpis.length > 0 ? [{ type: BlockType.KPI, title: "الإعلانات الممولة", content: { body: "أداء الإعلانات المدفوعة من حساب إعلانات العميل على Meta خلال الفترة.", kpis: paidKpis, autoFilled: true, refreshKey: "kpi-paid" satisfies ReportRefreshKey } }] : []),
     { type: BlockType.CHART, title: "معدل اكتساب المتابعين اليومي", content: followerChartHasData ? { body: followerSource, chart: { type: "line", metric: "المتابعون الجدد يومياً", values: followerValues.join(", "), labels: followerLabels.join(", "), insight: followerInsight }, refreshKey: "chart-followers" satisfies ReportRefreshKey } : { body: followerSource, chartUnavailable: true, unavailableReason: "تعذّر جلب بيانات follows_and_unfollows اليومية للفترة؛ لا توجد بيانات يومية متاحة.", refreshKey: "chart-followers" satisfies ReportRefreshKey } },
     mediaBlock("أعلى المنشورات من حيث التفاعل", "تم اختيار المنشورات الأعلى تفاعلاً من بيانات الفترة.", topInteractions, ["total_interactions", "views"], "media-top-interactions"),
     mediaBlock("أعلى المنشورات من حيث المشاهدات العضوية", "تم اختيار المنشورات الأعلى مشاهدة عضوياً من بيانات الفترة.", topViews, ["views", "total_interactions"], "media-top-views"),

@@ -26,6 +26,8 @@ export const AD_INSIGHT_METRICS = [
   "ad_impressions",
   "ad_reach",
   "ad_clicks",
+  "ad_link_clicks",
+  "ad_messages",
 ] as const;
 export type AdInsightMetric = (typeof AD_INSIGHT_METRICS)[number];
 
@@ -47,6 +49,10 @@ const ACTION_TO_METRIC: Record<string, AdInsightMetric> = {
   "onsite_conversion.post_save": "ad_saved",
   post_save: "ad_saved",
   share: "ad_shares",
+  link_click: "ad_link_clicks",
+  "onsite_conversion.messaging_conversation_started_7d": "ad_messages",
+  messaging_conversation_started_7d: "ad_messages",
+  "onsite_conversion.messaging_first_reply": "ad_messages",
 };
 
 function startOfDayUTC(date: Date) {

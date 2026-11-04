@@ -125,7 +125,7 @@ function mergeBlockContent(existing: ReportBlock, fresh: ReportBlock): ReportBlo
     merged.body = existingContent.body;
   }
 
-  if (refreshKey === "kpi-overview" || refreshKey === "kpi-interactions") {
+  if (refreshKey === "kpi-overview" || refreshKey === "kpi-interactions" || refreshKey === "kpi-paid") {
     merged.kpis = mergeKpis(existingContent.kpis, freshContent.kpis);
   } else if (refreshKey === "chart-followers") {
     merged.chart = freshContent.chart;
