@@ -124,6 +124,9 @@ model Client {
   updatedAt     DateTime           @updatedAt
   // Ad account ("act_123") whose paid performance is folded into this client's report KPIs.
   metaAdAccountId String?
+  // Billing currency of metaAdAccountId (e.g. "SAR"), captured during ad-insights sync so the
+  // report can convert ad spend to BHD for display.
+  metaAdAccountCurrency String?
   connections   SocialConnection[]
   reports       Report[]
   sponsoredAds  SponsoredAd[]

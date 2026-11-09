@@ -33,10 +33,27 @@ export type AdInsightMetric = (typeof AD_INSIGHT_METRICS)[number];
 
 export type PaidMetricsResult = {
   values: Partial<Record<AdInsightMetric, number>>;
+  /** Billing currency of the client's ad account (e.g. "SAR"), for BHD conversion at display time. */
+  currency?: string | null;
   method: "ADS_API" | "AGGREGATE_OF_PERIOD_CHUNKS" | "UNAVAILABLE" | null;
 };
 
 const unavailable: PaidMetricsResult = { values: {}, method: "UNAVAILABLE" };
+
+/** Approximate ad-account-currency → BHD rates for displaying spend on reports. Spend stays
+ * stored in the ad account's own billing currency; conversion is display-only and labelled
+ * approximate (≈) on the card. Unknown currencies render as the raw value + currency code. */
+export const AD_CURRENCY_TO_BHD: Record<string, number> = {
+  BHD: 1,
+  SAR: 0.1003,
+  USD: 0.376,
+  AED: 0.1024,
+  KWD: 1.2269,
+  QAR: 0.1033,
+  OMR: 0.9774,
+  EUR: 0.4358,
+  GBP: 0.495,
+};
 
 /** Meta Ads action types that map to organic content-interaction buckets. Meta does not expose
  * reposts/story replies as separate ad actions; what Meta's app counts as "Content interactions"
@@ -78,6 +95,8 @@ export async function getSystemUserToken(): Promise<string | null> {
 }
 
 type AdInsightsRow = {
+  ad_id?: string;
+  adset_id?: string;
   impressions?: string;
   reach?: string;
   clicks?: string;
@@ -85,59 +104,164 @@ type AdInsightsRow = {
   actions?: Array<{ action_type?: string; value?: string }>;
 };
 
-/** One Meta Ads insights call for a date range (inclusive days), account level. */
-async function fetchAdWindow(token: string, adAccountId: string, since: Date, until: Date): Promise<Partial<Record<AdInsightMetric, number>>> {
-  const timeRange = JSON.stringify({ since: since.toISOString().slice(0, 10), until: until.toISOString().slice(0, 10) });
-  const res = await graph<{ data?: AdInsightsRow[] }>(`${adAccountId}/insights`, token, {
-    level: "account",
-    fields: "impressions,reach,clicks,spend,actions",
-    time_range: timeRange,
+/** Marker metric written alongside each synced month. Months captured before per-ad scoping
+ * existed (account-level totals that mix every client sharing the ad account) have no marker,
+ * so the sync re-fetches and overwrites them with correctly scoped values. */
+const AD_SCOPE_VERSION_METRIC = "ad_scope_version";
+const AD_SCOPE_VERSION = 2;
+
+/** What "belongs to this client" means at the ad level: ads promoting the client's own
+ * Instagram account (creative media id present in the client's synced SocialPost rows, or the
+ * creative/ad-set pointing at the client's IG actor) or its Facebook Page (object_story_id /
+ * promoted_object page id). An ad account is frequently shared between many clients' pages, so
+ * account-level totals must never be reported per-client. */
+type AdScope = { igUserIds: Set<string>; fbPageIds: Set<string>; postIds: Set<string> };
+
+async function clientAdScope(clientId: string): Promise<AdScope> {
+  const connections = await db.socialConnection.findMany({
+    where: { clientId },
+    select: { id: true, platform: true, externalAccountId: true },
   });
-  const row = res.data?.[0];
-  if (!row) return {};
+  const igUserIds = new Set(connections.filter((c) => c.platform === "INSTAGRAM").map((c) => c.externalAccountId));
+  const fbPageIds = new Set(connections.filter((c) => c.platform === "FACEBOOK").map((c) => c.externalAccountId));
+  const posts = await db.socialPost.findMany({
+    where: { connectionId: { in: connections.map((c) => c.id) } },
+    select: { externalPostId: true },
+  });
+  return { igUserIds, fbPageIds, postIds: new Set(posts.map((p) => p.externalPostId)) };
+}
+
+type AdCreativeInfo = {
+  instagram_actor_id?: string;
+  effective_instagram_media_id?: string;
+  object_story_id?: string;
+};
+
+async function batchFetch<T>(token: string, ids: string[], fields: string): Promise<Record<string, T>> {
+  const result: Record<string, T> = {};
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    const res = await graph<Record<string, T | { error?: unknown }>>("", token, { ids: chunk.join(","), fields });
+    for (const [id, value] of Object.entries(res ?? {})) {
+      if (value && typeof value === "object" && !("error" in value)) result[id] = value as T;
+    }
+  }
+  return result;
+}
+
+function adOwnedByScope(adsetPromoted: { page_id?: string; instagram_actor_id?: string } | undefined, creative: AdCreativeInfo | undefined, scope: AdScope): boolean {
+  if (adsetPromoted) {
+    if (adsetPromoted.instagram_actor_id && scope.igUserIds.has(adsetPromoted.instagram_actor_id)) return true;
+    if (adsetPromoted.page_id && scope.fbPageIds.has(adsetPromoted.page_id)) return true;
+  }
+  if (creative) {
+    if (creative.instagram_actor_id && scope.igUserIds.has(creative.instagram_actor_id)) return true;
+    if (creative.effective_instagram_media_id && scope.postIds.has(creative.effective_instagram_media_id)) return true;
+    if (creative.object_story_id) {
+      const pageId = creative.object_story_id.split("_")[0];
+      if (scope.fbPageIds.has(pageId)) return true;
+    }
+  }
+  return false;
+}
+
+const MAX_INSIGHT_PAGES = 20;
+
+/** Paid metrics for a date range (inclusive days), restricted to ads promoting this client's
+ * own Page/Instagram assets. Fetches per-ad insights, resolves each ad's ownership via its
+ * ad-set promoted_object or creative, and aggregates only the owned ads. */
+async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date): Promise<Partial<Record<AdInsightMetric, number>>> {
+  const timeRange = JSON.stringify({ since: since.toISOString().slice(0, 10), until: until.toISOString().slice(0, 10) });
+  const rows: AdInsightsRow[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_INSIGHT_PAGES; page++) {
+    const res = await graph<{ data?: AdInsightsRow[]; paging?: { cursors?: { after?: string }; next?: string } }>(`${adAccountId}/insights`, token, {
+      level: "ad",
+      fields: "ad_id,adset_id,impressions,reach,clicks,spend,actions",
+      time_range: timeRange,
+      limit: "500",
+      ...(after ? { after } : {}),
+    });
+    rows.push(...(res.data ?? []));
+    const next = res.paging?.next ? res.paging.cursors?.after : undefined;
+    if (!next) break;
+    after = next;
+  }
+  if (rows.length === 0) return {};
+
+  // Ownership passes: ad-set promoted_object first (covers page-like/conversion objectives),
+  // then the creative for every ad whose ad-set didn't already prove ownership (IG-profile
+  // boosts carry the promoted media id on the creative, not the ad set).
+  const adsetIds = [...new Set(rows.map((r) => r.adset_id).filter((id): id is string => Boolean(id)))];
+  const adsets = await batchFetch<{ promoted_object?: { page_id?: string; instagram_actor_id?: string } }>(token, adsetIds, "promoted_object");
+  const promotedByAdset = new Map(Object.entries(adsets).map(([id, adset]) => [id, adset.promoted_object]));
+
+  const needsCreative = rows.filter((r) => {
+    const promoted = r.adset_id ? promotedByAdset.get(r.adset_id) : undefined;
+    return !adOwnedByScope(promoted, undefined, scope);
+  }).map((r) => r.ad_id).filter((id): id is string => Boolean(id));
+  const creatives = needsCreative.length > 0
+    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_actor_id,object_story_id}")
+    : {};
+
   const values: Partial<Record<AdInsightMetric, number>> = {};
   const num = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
-  const spend = num(row.spend);
-  const impressions = num(row.impressions);
-  const reach = num(row.reach);
-  const clicks = num(row.clicks);
-  if (spend !== undefined) values.ad_spend = spend;
-  if (impressions !== undefined) values.ad_impressions = impressions;
-  if (reach !== undefined) values.ad_reach = reach;
-  if (clicks !== undefined) values.ad_clicks = clicks;
-  for (const action of row.actions ?? []) {
-    if (!action.action_type) continue;
-    const metric = ACTION_TO_METRIC[action.action_type];
-    const actionValue = num(action.value);
-    if (metric && actionValue !== undefined) values[metric] = (values[metric] ?? 0) + actionValue;
+  for (const row of rows) {
+    const promoted = row.adset_id ? promotedByAdset.get(row.adset_id) : undefined;
+    const creative = row.ad_id ? creatives[row.ad_id]?.creative : undefined;
+    if (!adOwnedByScope(promoted, creative, scope)) continue;
+
+    const spend = num(row.spend);
+    const impressions = num(row.impressions);
+    const reach = num(row.reach);
+    const clicks = num(row.clicks);
+    if (spend !== undefined) values.ad_spend = (values.ad_spend ?? 0) + spend;
+    if (impressions !== undefined) values.ad_impressions = (values.ad_impressions ?? 0) + impressions;
+    if (reach !== undefined) values.ad_reach = (values.ad_reach ?? 0) + reach;
+    if (clicks !== undefined) values.ad_clicks = (values.ad_clicks ?? 0) + clicks;
+    for (const action of row.actions ?? []) {
+      if (!action.action_type) continue;
+      const metric = ACTION_TO_METRIC[action.action_type];
+      const actionValue = num(action.value);
+      if (metric && actionValue !== undefined) values[metric] = (values[metric] ?? 0) + actionValue;
+    }
   }
   values.paid_interactions = (values.ad_likes ?? 0) + (values.ad_comments ?? 0) + (values.ad_saved ?? 0) + (values.ad_shares ?? 0);
   return values;
 }
 
-async function adAccountForClient(clientId: string): Promise<string | null> {
-  const client = await db.client.findUnique({ where: { id: clientId }, select: { metaAdAccountId: true } });
-  return client?.metaAdAccountId ?? null;
+async function adAccountForClient(clientId: string) {
+  return db.client.findUnique({ where: { id: clientId }, select: { metaAdAccountId: true, metaAdAccountCurrency: true } });
+}
+
+/** Billing currency of the ad account — fetched lazily during sync and persisted on the client
+ * so the report can convert spend to BHD without a live Meta call. */
+async function ensureAdAccountCurrency(clientId: string, adAccountId: string, current: string | null, token: string) {
+  const account = await graph<{ currency?: string }>(`${adAccountId}`, token, { fields: "currency" });
+  if (account.currency && account.currency !== current) {
+    await db.client.update({ where: { id: clientId }, data: { metaAdAccountCurrency: account.currency } });
+  }
 }
 
 /** Live paid metrics for an arbitrary report range — chunked per calendar month so the values match
  * the monthly snapshots. Returns UNAVAILABLE when the client has no ad account or no stored token. */
 export async function periodPaidMetricsForRange(clientId: string, periodStart: Date, periodEnd: Date): Promise<PaidMetricsResult> {
   try {
-    const adAccountId = await adAccountForClient(clientId);
-    if (!adAccountId) return unavailable;
+    const client = await adAccountForClient(clientId);
+    if (!client?.metaAdAccountId) return unavailable;
     const token = await getSystemUserToken();
     if (!token) return unavailable;
 
+    const scope = await clientAdScope(clientId);
     const values: PaidMetricsResult["values"] = {};
     for (const chunk of splitRangeByMonth(periodStart, periodEnd)) {
-      const window = await fetchAdWindow(token, adAccountId, startOfDayUTC(chunk.start), endOfDayUTC(chunk.end));
+      const window = await fetchAdWindow(token, client.metaAdAccountId, scope, startOfDayUTC(chunk.start), endOfDayUTC(chunk.end));
       for (const [metric, value] of Object.entries(window) as Array<[AdInsightMetric, number]>) {
         values[metric] = (values[metric] ?? 0) + value;
       }
     }
     if (Object.keys(values).length === 0) return unavailable;
-    return { values, method: "ADS_API" };
+    return { values, currency: client.metaAdAccountCurrency, method: "ADS_API" };
   } catch {
     return unavailable;
   }
@@ -146,6 +270,9 @@ export async function periodPaidMetricsForRange(clientId: string, periodStart: D
 /** DB-only paid metrics from stored monthly snapshots — used by refresh/export. */
 export async function periodPaidMetricsFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<PaidMetricsResult> {
   try {
+    const currency = await db.client.findUnique({ where: { id: clientId }, select: { metaAdAccountCurrency: true } })
+      .then((client) => client?.metaAdAccountCurrency ?? null)
+      .catch(() => null);
     const values: PaidMetricsResult["values"] = {};
     for (const chunk of splitRangeByMonth(periodStart, periodEnd)) {
       const rows = await db.clientAdInsightSnapshot.findMany({
@@ -164,7 +291,7 @@ export async function periodPaidMetricsFromDatabase(clientId: string, periodStar
       }
     }
     if (Object.keys(values).length === 0) return unavailable;
-    return { values, method: "AGGREGATE_OF_PERIOD_CHUNKS" };
+    return { values, currency, method: "AGGREGATE_OF_PERIOD_CHUNKS" };
   } catch {
     return unavailable;
   }
@@ -173,34 +300,43 @@ export async function periodPaidMetricsFromDatabase(clientId: string, periodStar
 /** Capture one missing completed calendar month of paid metrics for a client. Called from the
  * daily account-insight job; deliberately at most one month per run to bound API volume. */
 export async function syncMissingClientAdMonth(clientId: string, now: Date = new Date()): Promise<boolean> {
-  const adAccountId = await adAccountForClient(clientId);
-  if (!adAccountId) return false;
+  const client = await adAccountForClient(clientId);
+  if (!client?.metaAdAccountId) return false;
   const token = await getSystemUserToken();
   if (!token) return false;
+  await ensureAdAccountCurrency(clientId, client.metaAdAccountId, client.metaAdAccountCurrency, token).catch(() => undefined);
 
   const config = getHistoricalBackfillConfig();
   const lookbackStart = new Date(Date.now() - config.accountInsightMaxLookbackDays * 24 * 60 * 60 * 1000);
+  const scope = await clientAdScope(clientId);
   for (const period of completedMonthsWithinLookback(now, lookbackStart)) {
     const periodStart = startOfDayUTC(period.start);
     const periodEnd = endOfDayUTC(period.end);
+    // A month counts as captured only when it carries the current scope-version marker. Months
+    // synced at account level (pre-scoping, or missing newer metrics) get re-fetched and fully
+    // rewritten below so no stale account-level rows survive.
     const existing = await db.clientAdInsightSnapshot.findUnique({
       where: {
-        clientId_metric_periodStart_periodEnd: { clientId, metric: "paid_interactions", periodStart, periodEnd },
+        clientId_metric_periodStart_periodEnd: { clientId, metric: AD_SCOPE_VERSION_METRIC, periodStart, periodEnd },
       },
-      select: { id: true },
+      select: { value: true },
     });
-    if (existing) continue;
+    if (existing && existing.value >= AD_SCOPE_VERSION) continue;
 
-    const values = await fetchAdWindow(token, adAccountId, periodStart, periodEnd);
-    if (Object.keys(values).length === 0) continue;
+    const values = await fetchAdWindow(token, client.metaAdAccountId, scope, periodStart, periodEnd);
     const finalized = isMonthFinalized(periodEnd, now);
-    await Promise.all((Object.entries(values) as Array<[AdInsightMetric, number]>).map(([metric, value]) =>
-      db.clientAdInsightSnapshot.upsert({
-        where: { clientId_metric_periodStart_periodEnd: { clientId, metric, periodStart, periodEnd } },
-        create: { clientId, metric, periodStart, periodEnd, value, finalizedAt: finalized ? now : null },
-        update: { value, capturedAt: now, ...(finalized ? { finalizedAt: now } : {}) },
-      }),
-    ));
+    // Rewrite the month from scratch: drop any rows captured under an older scope so account-level
+    // leftovers can't linger next to the new per-client values, then insert the fresh rows plus
+    // the version marker (even when the month had no owned ads, so it isn't retried forever).
+    await db.clientAdInsightSnapshot.deleteMany({ where: { clientId, periodStart, periodEnd } });
+    await db.clientAdInsightSnapshot.createMany({
+      data: [
+        ...(Object.entries(values) as Array<[AdInsightMetric, number]>).map(([metric, value]) => ({
+          clientId, metric, periodStart, periodEnd, value, finalizedAt: finalized ? now : null,
+        })),
+        { clientId, metric: AD_SCOPE_VERSION_METRIC, periodStart, periodEnd, value: AD_SCOPE_VERSION, finalizedAt: finalized ? now : null },
+      ],
+    });
     return true; // one month per run
   }
   return false;

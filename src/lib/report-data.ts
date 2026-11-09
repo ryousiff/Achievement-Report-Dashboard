@@ -5,7 +5,7 @@ import { graph } from "@/lib/meta-sync";
 import { splitRangeByMonth, comparisonPeriod, type ComparisonMode } from "@/lib/report-period";
 import { mediaThumbnailUrl } from "@/lib/media-storage";
 import { resolveReportPostMetrics, summarizePostMetricsAccuracy, type PostMetricsSource } from "@/lib/post-metric-snapshots";
-import { periodPaidMetricsForRange, periodPaidMetricsFromDatabase, type AdInsightMetric, type PaidMetricsResult } from "@/lib/ads-insights";
+import { AD_CURRENCY_TO_BHD, periodPaidMetricsForRange, periodPaidMetricsFromDatabase, type AdInsightMetric, type PaidMetricsResult } from "@/lib/ads-insights";
 
 export type ReportMetric = "reach" | "views" | "total_interactions" | "likes" | "comments" | "saved" | "shares" | "follows" | "posts";
 
@@ -1208,6 +1208,7 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     resolve.interactions(clientId, periodStart, periodEnd),
     resolve.paid(clientId, periodStart, periodEnd),
   ]);
+  const clientAdCurrency = paid.currency ?? null;
 
   const totals = Object.fromEntries((["reach", "views", "total_interactions", "likes", "comments", "saved", "shares", "follows", "posts"] as ReportMetric[]).map((metric) => [metric, total(posts, metric)])) as Record<ReportMetric, number>;
   const hasMetric = (metric: ReportMetric) => metric === "posts" || posts.some((post) => post.metricAvailability[metric] === "returned" || (Object.keys(post.metricAvailability).length === 0 && typeof post.metrics[metric] === "number"));
@@ -1345,8 +1346,20 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
     const value = paidMetric(metric);
     return kpi(id, label, value !== undefined ? value.toLocaleString() : "غير متاح", value !== undefined, { tooltip: tooltip ?? PAID_SECTION_TOOLTIP });
   };
+  const adSpendDisplay = (() => {
+    const spend = paidMetric("ad_spend");
+    if (spend === undefined) return null;
+    const rate = clientAdCurrency ? AD_CURRENCY_TO_BHD[clientAdCurrency] : undefined;
+    if (rate !== undefined && clientAdCurrency !== "BHD") {
+      return {
+        value: `≈${(spend * rate).toLocaleString(undefined, { maximumFractionDigits: 2 })} BHD`,
+        tooltip: `${spend.toLocaleString()} ${clientAdCurrency} — قيمة الإنفاق بعملة الحساب الإعلاني، محوّلة إلى الدينار البحريني بسعر تقريبي.`,
+      };
+    }
+    return { value: `${spend.toLocaleString()} ${clientAdCurrency ?? "BHD"}`, tooltip: "إجمالي الإنفاق على الإعلانات من حساب الإعلانات خلال الفترة (بعملة الحساب الإعلاني)." };
+  })();
   const paidKpis = [
-    paidMetric("ad_spend") !== undefined ? kpi("ad-spend", "المبلغ المدفوع", `${paidMetric("ad_spend")!.toLocaleString()} BHD`, true, { tooltip: "إجمالي الإنفاق على الإعلانات من حساب الإعلانات خلال الفترة (بعملة الحساب الإعلاني)." }) : null,
+    adSpendDisplay ? kpi("ad-spend", "المبلغ المدفوع", adSpendDisplay.value, true, { tooltip: adSpendDisplay.tooltip }) : null,
     paidMetric("ad_reach") !== undefined ? paidKpi("ad-reach", "الوصول المدفوع", "ad_reach") : null,
     paidMetric("ad_impressions") !== undefined ? paidKpi("ad-impressions", "المشاهدات المدفوعة", "ad_impressions") : null,
     paidMetric("ad_link_clicks") !== undefined || paidMetric("ad_clicks") !== undefined
