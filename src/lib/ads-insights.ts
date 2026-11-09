@@ -97,6 +97,7 @@ export async function getSystemUserToken(): Promise<string | null> {
 type AdInsightsRow = {
   ad_id?: string;
   adset_id?: string;
+  ad_name?: string;
   impressions?: string;
   reach?: string;
   clicks?: string;
@@ -167,17 +168,30 @@ function adOwnedByScope(adsetPromoted: { page_id?: string; instagram_actor_id?: 
 
 const MAX_INSIGHT_PAGES = 20;
 
-/** Paid metrics for a date range (inclusive days), restricted to ads promoting this client's
- * own Page/Instagram assets. Fetches per-ad insights, resolves each ad's ownership via its
- * ad-set promoted_object or creative, and aggregates only the owned ads. */
-async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date): Promise<Partial<Record<AdInsightMetric, number>>> {
+export type ScopedAdInsight = {
+  metaAdId: string;
+  name: string | null;
+  permalink: string | null;
+  instagramMediaId: string | null;
+  spend: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  actions: AdInsightsRow["actions"];
+};
+
+/** Per-ad insights for a date range (inclusive days), restricted to ads promoting this client's
+ * own Page/Instagram assets. Ad-set promoted_object proves ownership first (covers page-like /
+ * conversion objectives); the creative decides for the rest — IG-profile boosts carry the
+ * promoted media id on the creative, not the ad set. */
+async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date): Promise<ScopedAdInsight[]> {
   const timeRange = JSON.stringify({ since: since.toISOString().slice(0, 10), until: until.toISOString().slice(0, 10) });
   const rows: AdInsightsRow[] = [];
   let after: string | undefined;
   for (let page = 0; page < MAX_INSIGHT_PAGES; page++) {
     const res = await graph<{ data?: AdInsightsRow[]; paging?: { cursors?: { after?: string }; next?: string } }>(`${adAccountId}/insights`, token, {
       level: "ad",
-      fields: "ad_id,adset_id,impressions,reach,clicks,spend,actions",
+      fields: "ad_id,adset_id,ad_name,impressions,reach,clicks,spend,actions",
       time_range: timeRange,
       limit: "500",
       ...(after ? { after } : {}),
@@ -187,11 +201,8 @@ async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope,
     if (!next) break;
     after = next;
   }
-  if (rows.length === 0) return {};
+  if (rows.length === 0) return [];
 
-  // Ownership passes: ad-set promoted_object first (covers page-like/conversion objectives),
-  // then the creative for every ad whose ad-set didn't already prove ownership (IG-profile
-  // boosts carry the promoted media id on the creative, not the ad set).
   const adsetIds = [...new Set(rows.map((r) => r.adset_id).filter((id): id is string => Boolean(id)))];
   const adsets = await batchFetch<{ promoted_object?: { page_id?: string; instagram_actor_id?: string } }>(token, adsetIds, "promoted_object");
   const promotedByAdset = new Map(Object.entries(adsets).map(([id, adset]) => [id, adset.promoted_object]));
@@ -201,24 +212,43 @@ async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope,
     return !adOwnedByScope(promoted, undefined, scope);
   }).map((r) => r.ad_id).filter((id): id is string => Boolean(id));
   const creatives = needsCreative.length > 0
-    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_actor_id,object_story_id}")
+    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_actor_id,object_story_id,instagram_permalink_url}")
     : {};
 
-  const values: Partial<Record<AdInsightMetric, number>> = {};
   const num = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
+  const owned: ScopedAdInsight[] = [];
   for (const row of rows) {
     const promoted = row.adset_id ? promotedByAdset.get(row.adset_id) : undefined;
     const creative = row.ad_id ? creatives[row.ad_id]?.creative : undefined;
     if (!adOwnedByScope(promoted, creative, scope)) continue;
+    owned.push({
+      metaAdId: row.ad_id ?? "",
+      name: row.ad_name ?? null,
+      permalink: creative?.instagram_permalink_url ?? null,
+      instagramMediaId: creative?.effective_instagram_media_id ?? null,
+      spend: num(row.spend) ?? 0,
+      impressions: num(row.impressions) ?? 0,
+      reach: num(row.reach) ?? 0,
+      clicks: num(row.clicks) ?? 0,
+      actions: row.actions,
+    });
+  }
+  return owned;
+}
 
-    const spend = num(row.spend);
-    const impressions = num(row.impressions);
-    const reach = num(row.reach);
-    const clicks = num(row.clicks);
-    if (spend !== undefined) values.ad_spend = (values.ad_spend ?? 0) + spend;
-    if (impressions !== undefined) values.ad_impressions = (values.ad_impressions ?? 0) + impressions;
-    if (reach !== undefined) values.ad_reach = (values.ad_reach ?? 0) + reach;
-    if (clicks !== undefined) values.ad_clicks = (values.ad_clicks ?? 0) + clicks;
+/** One Meta Ads insights call for a date range (inclusive days), restricted to ads promoting
+ * this client's own assets. Aggregates the owned per-ad rows from fetchScopedAdRows. */
+async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date): Promise<Partial<Record<AdInsightMetric, number>>> {
+  const scopeRows = await fetchScopedAdRows(token, adAccountId, scope, since, until);
+  if (scopeRows.length === 0) return {};
+
+  const values: Partial<Record<AdInsightMetric, number>> = {};
+  const num = (v: string | number | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
+  for (const row of scopeRows) {
+    values.ad_spend = (values.ad_spend ?? 0) + row.spend;
+    values.ad_impressions = (values.ad_impressions ?? 0) + row.impressions;
+    values.ad_reach = (values.ad_reach ?? 0) + row.reach;
+    values.ad_clicks = (values.ad_clicks ?? 0) + row.clicks;
     for (const action of row.actions ?? []) {
       if (!action.action_type) continue;
       const metric = ACTION_TO_METRIC[action.action_type];
@@ -232,6 +262,19 @@ async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope,
 
 async function adAccountForClient(clientId: string) {
   return db.client.findUnique({ where: { id: clientId }, select: { metaAdAccountId: true, metaAdAccountCurrency: true } });
+}
+
+/** Live per-ad list for a client's sponsored-ads section: every ad that promoted one of the
+ * client's own posts during the range, with its real Meta spend/reach/impressions/clicks.
+ * Returns null when the client has no ad account or no stored system-user token. */
+export async function listClientAds(clientId: string, since: Date, until: Date): Promise<{ ads: ScopedAdInsight[]; currency: string | null } | null> {
+  const client = await adAccountForClient(clientId);
+  if (!client?.metaAdAccountId) return null;
+  const token = await getSystemUserToken();
+  if (!token) return null;
+  const scope = await clientAdScope(clientId);
+  const ads = await fetchScopedAdRows(token, client.metaAdAccountId, scope, startOfDayUTC(since), endOfDayUTC(until));
+  return { ads, currency: client.metaAdAccountCurrency };
 }
 
 /** Billing currency of the ad account — fetched lazily during sync and persisted on the client

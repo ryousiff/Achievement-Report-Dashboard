@@ -5537,10 +5537,23 @@ function parseMonthKey(key: string) {
   return { year, month };
 }
 
+type AutoSponsoredAd = {
+  metaAdId: string;
+  name: string | null;
+  permalink: string | null;
+  instagramMediaId: string | null;
+  spend: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+};
+
 function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clientName: string }) {
   const [monthKey, setMonthKey] = useState(currentMonthKey());
   const { year, month } = parseMonthKey(monthKey);
   const [ads, setAds] = useState<SponsoredAd[]>([]);
+  const [autoAds, setAutoAds] = useState<AutoSponsoredAd[]>([]);
+  const [autoCurrency, setAutoCurrency] = useState<string | null>(null);
   const [budget, setBudget] = useState<AdBudget>(null);
   const [summary, setSummary] = useState<AdBudgetSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -5559,12 +5572,14 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
       fetch(`/api/clients/${clientId}/ad-budget?year=${year}&month=${month}`),
     ]);
     if (adsResponse.ok && budgetResponse.ok) {
-      const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[] };
+      const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[]; autoAds?: AutoSponsoredAd[]; autoCurrency?: string | null };
       const budgetData = (await budgetResponse.json()) as {
         budget?: AdBudget;
         summary?: AdBudgetSummary;
       };
       setAds(adsData.ads ?? []);
+      setAutoAds(adsData.autoAds ?? []);
+      setAutoCurrency(adsData.autoCurrency ?? null);
       setBudget(budgetData.budget ?? null);
       setSummary(budgetData.summary ?? null);
       setError("");
@@ -5688,7 +5703,7 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
       )}
       {loading ? (
         <p className="account-empty">جارٍ التحميل...</p>
-      ) : ads.length === 0 ? (
+      ) : ads.length === 0 && autoAds.length === 0 ? (
         <div className="empty-template">
           <div>
             <Megaphone size={30} />
@@ -5697,6 +5712,52 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
           </div>
         </div>
       ) : (
+        <>
+        {autoAds.length > 0 && (
+          <div className="sponsored-ads-table">
+            <div className="sponsored-ads-head">
+              <span>المنشور (من Meta)</span>
+              <span>الرابط</span>
+              <span>الإنفاق{autoCurrency ? ` (${autoCurrency})` : ""}</span>
+              <span>الوصول</span>
+              <span>المشاهدات</span>
+              <span>النقرات</span>
+              <span />
+            </div>
+            {autoAds.map((ad) => (
+              <div className="sponsored-ad-row" key={ad.metaAdId}>
+                <div className="sponsored-ad-title">
+                  <span className="sponsored-ad-thumb-empty">
+                    <Megaphone size={18} />
+                  </span>
+                  <span>
+                    <b>{ad.name?.replace(/^Instagram post:\s*/, "").slice(0, 60) ?? "إعلان"}</b>
+                    <small>بيانات تلقائية من حساب الإعلانات</small>
+                  </span>
+                </div>
+                {ad.permalink ? (
+                  <a
+                    className="btn quiet compact"
+                    href={ad.permalink}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLink size={13} />
+                    فتح
+                  </a>
+                ) : (
+                  <span className="account-empty">لا يوجد رابط</span>
+                )}
+                <span>{formatMoney(ad.spend, autoCurrency ?? "")}</span>
+                <span>{ad.reach.toLocaleString()}</span>
+                <span>{ad.impressions.toLocaleString()}</span>
+                <span>{ad.clicks.toLocaleString()}</span>
+                <span className="sponsored-ad-status active">Meta</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {ads.length > 0 && (
         <div className="sponsored-ads-table">
           <div className="sponsored-ads-head">
             <span>المنشور</span>
@@ -5783,6 +5844,8 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
             );
           })}
         </div>
+        )}
+        </>
       )}
       {showModal && (
         <SponsoredAdModal

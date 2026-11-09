@@ -4,6 +4,7 @@ import { requireFeature } from "@/lib/access";
 import { parseSponsoredAdCreateInput } from "@/lib/sponsored-ads";
 import { serializeSponsoredAd, sponsoredAdPostSelect } from "@/lib/sponsored-ads-serializer";
 import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
+import { listClientAds } from "@/lib/ads-insights";
 
 /** Optional `year`/`month` query params scope the list to a single budget month (the Sponsored Ads
  * month view); omitting both returns every ad for the client, as before. */
@@ -22,7 +23,28 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     orderBy: { startDate: "desc" },
     include: { socialPost: { select: sponsoredAdPostSelect } },
   });
-  return NextResponse.json({ ads: ads.map(serializeSponsoredAd) });
+
+  // Auto-filled rows: real per-ad Meta data for the selected month, scoped to ads promoting
+  // this client's own posts. Manual entries that already reference a Meta ad (metaAdId) hide
+  // the matching auto row so the same boost never shows twice. Failures never break the
+  // manual list — autoAds just comes back empty.
+  let autoAds: Array<{ metaAdId: string; name: string | null; permalink: string | null; instagramMediaId: string | null; spend: number; impressions: number; reach: number; clicks: number }> = [];
+  let autoCurrency: string | null = null;
+  if (year !== undefined && month !== undefined) {
+    try {
+      const since = new Date(Date.UTC(year, month - 1, 1));
+      const until = new Date(Date.UTC(year, month, 0));
+      const result = await listClientAds(clientId, since, until);
+      if (result) {
+        const manualMetaIds = new Set(ads.map((ad) => ad.metaAdId).filter((id): id is string => Boolean(id)));
+        autoAds = result.ads.filter((ad) => !manualMetaIds.has(ad.metaAdId));
+        autoCurrency = result.currency;
+      }
+    } catch {
+      autoAds = [];
+    }
+  }
+  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency });
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
