@@ -4,7 +4,8 @@ import { requireFeature } from "@/lib/access";
 import { combinedSponsoredAdSummary, parseSponsoredAdCreateInput } from "@/lib/sponsored-ads";
 import { serializeSponsoredAd, sponsoredAdPostSelect } from "@/lib/sponsored-ads-serializer";
 import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
-import { listClientAds } from "@/lib/ads-insights";
+import { listClientAds, paidFetchErrorCode } from "@/lib/ads-insights";
+import { logEvent } from "@/lib/observability";
 
 /** Optional `year`/`month` query params scope the list to a single budget month (the Sponsored Ads
  * month view); omitting both returns every ad for the client, as before. */
@@ -42,9 +43,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         autoCurrency = result.currency;
         autoStatus = "READY";
       }
-    } catch {
+    } catch (error) {
       autoAds = [];
       autoStatus = "ERROR";
+      logEvent("ads.client_list.failed", { clientId, code: paidFetchErrorCode(error) });
     }
   }
   const storedBudget = year !== undefined && month !== undefined

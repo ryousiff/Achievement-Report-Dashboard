@@ -5,7 +5,8 @@ import { calculateBackfillStart } from "@/lib/backfill-window";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { graph, MetaSyncError } from "@/lib/meta-sync";
 import { isUnsupportedFollowerCountPeriodError } from "@/lib/meta-error-classification";
-import { syncMissingClientAdMonth } from "@/lib/ads-insights";
+import { paidFetchErrorCode, syncMissingClientAdMonth } from "@/lib/ads-insights";
+import { logEvent } from "@/lib/observability";
 
 type MetaInsight = { name?: string; period?: string; values?: Array<{ value?: number; end_time?: string }> };
 type MetaTotalValueInsight = {
@@ -447,8 +448,9 @@ export async function runDailyAccountInsightChunk(connectionId: string) {
   // Non-fatal — ads are an optional enrichment; a missing ad account or token just skips this.
   try {
     await syncMissingClientAdMonth(connection.clientId, now);
-  } catch {
+  } catch (error) {
     // Enrichment only — never surface paid-metrics failures as account-insight errors.
+    logEvent("ads.sync.failed", { clientId: connection.clientId, code: paidFetchErrorCode(error) });
   }
 
   await db.socialConnection.update({

@@ -3,6 +3,7 @@ import { BackfillStatus, MediaSource } from "@prisma/client";
 import { completeDailySeries, reportPosts, buildStandardReportBlocks, periodAccountFollowers, periodAccountViews, dailyFollowerMovement, dailyFollowerMovementFromDatabase, currentFollowersCount, clearReachCache, clearFollowersCache, clearViewsCache, parseFollowerBreakdown, type ReachResult } from "@/lib/report-data";
 
 const mockDb = vi.hoisted(() => ({
+  client: { findUnique: vi.fn(async () => null) },
   socialPost: { findMany: vi.fn() },
   socialPostMetricSnapshot: { findMany: vi.fn(async (): Promise<Array<Record<string, unknown>>> => []), findUnique: vi.fn(async () => null), upsert: vi.fn() },
   socialInsightSnapshot: { findMany: vi.fn(), findFirst: vi.fn(), upsert: vi.fn() },
@@ -301,6 +302,17 @@ describe("buildStandardReportBlocks — historical metric snapshot drift regress
 });
 
 describe("buildStandardReportBlocks", () => {
+  it("keeps an explicit unavailable paid section while scoped snapshots are pending", async () => {
+    mockDb.socialPost.findMany.mockResolvedValue([]);
+    mockDb.socialInsightSnapshot.findMany.mockResolvedValue([]);
+    mockDb.socialConnection.findFirst.mockResolvedValue(null);
+    const blocks = await buildStandardReportBlocks("client-1", new Date("2026-10-01"), new Date("2026-10-31"), {
+      paid: async () => ({ configured: true, status: "PENDING", method: "UNAVAILABLE", values: {} }),
+    });
+    const paid = blocks.find((block) => block.content.refreshKey === "kpi-paid");
+    expect(paid?.content.paidStatus).toBe("PENDING");
+    expect(paid?.content.kpis).toEqual([expect.objectContaining({ id: "ad-spend", available: false, value: "غير متاح" })]);
+  });
   it("uses exact account-level total_value reach for short periods, never summing post reach", async () => {
     mockDb.socialPost.findMany.mockResolvedValue([
       { id: "p1", externalPostId: "ig-1", caption: "Owned", mediaType: "IMAGE", mediaUrl: null, thumbnailUrl: null, permalink: null, publishedAt: new Date("2026-08-01T00:00:00.000Z"), metrics: { views: 100, total_interactions: 50, follows: 7 }, metricAvailability: { views: "returned", total_interactions: "returned", follows: "returned" }, metricAvailabilityState: { views: "AVAILABLE", total_interactions: "AVAILABLE", follows: "AVAILABLE" }, mediaSource: MediaSource.OWNED },

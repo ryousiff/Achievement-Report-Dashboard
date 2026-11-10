@@ -8,6 +8,7 @@ import { refreshReportData } from "@/lib/report-refresh";
 import { enqueueClientSync } from "@/lib/sync-queue";
 import { getCoverage } from "@/lib/report-coverage";
 import { buildStandardReportBlocksPreferStoredPeriodSnapshots } from "@/lib/stored-period-metrics";
+import { periodPaidMetricsFromDatabase } from "@/lib/ads-insights";
 
 import { dateValue, requiredText } from "@/lib/validators";
 import { ComparisonMode, ReportPeriod } from "@/lib/report-period";
@@ -44,6 +45,8 @@ async function readiness(reportId: string, blocks: EditableBlock[]) {
   const report = await db.report.findUnique({ where: { id: reportId }, select: { clientId: true, periodStart: true, periodEnd: true, includeCollaborative: true } });
   if (!report) return ["Report not found."];
   const issues: string[] = [];
+  const paid = await periodPaidMetricsFromDatabase(report.clientId, report.periodStart, report.periodEnd);
+  if (paid.configured && (paid.status !== "READY" || !blocks.some((block) => block.content.refreshKey === "kpi-paid"))) issues.push("بيانات الإعلانات الممولة غير موثقة لهذه الفترة — حدّثي التقرير بعد نجاح مزامنة الإعلانات.");
   const media = blocks.filter((block) => block.type === "media");
   if (media.some((block) => !Array.isArray(block.content.mediaItems) || block.content.mediaItems.length === 0)) issues.push("أحد أقسام المنشورات فارغ — اختاري منشورات أو احذفي القسم قبل الاعتماد.");
   if (!report.includeCollaborative && media.some((block) => Array.isArray(block.content.mediaItems) && block.content.mediaItems.some((item) => typeof item === "object" && item && (item as Record<string, unknown>).isCollaborative === true))) issues.push("التقرير مضبوط على المحتوى الأصلي فقط، لكنه يحتوي منشور Collab — أزيلي المنشور التعاوني قبل الاعتماد.");

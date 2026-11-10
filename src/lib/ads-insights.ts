@@ -6,6 +6,7 @@
  * ClientAdInsightSnapshot — immutable after the same post-month grace period as post snapshots —
  * so saved reports don't drift and refresh/export stay DB-only. */
 
+import { createHash } from "node:crypto";
 import { db } from "@/lib/db";
 import { decryptToken } from "@/lib/token-encryption";
 import { graph } from "@/lib/meta-sync";
@@ -13,6 +14,7 @@ import { isMonthFinalized } from "@/lib/post-metric-snapshots";
 import { completedMonthsWithinLookback } from "@/lib/meta-sync-insights";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { splitRangeByMonth } from "@/lib/report-period";
+import { logEvent } from "@/lib/observability";
 
 export const SYSTEM_USER_PROFILE_NAME = "Meta Business · Kaan Creative (System user)";
 
@@ -33,12 +35,20 @@ export type AdInsightMetric = (typeof AD_INSIGHT_METRICS)[number];
 
 export type PaidMetricsResult = {
   values: Partial<Record<AdInsightMetric, number>>;
+  configured?: boolean;
+  status?: "READY" | "PENDING" | "ERROR";
   /** Billing currency of the client's ad account (e.g. "SAR"), for BHD conversion at display time. */
   currency?: string | null;
   method: "ADS_API" | "AGGREGATE_OF_PERIOD_CHUNKS" | "UNAVAILABLE" | null;
 };
 
 const unavailable: PaidMetricsResult = { values: {}, method: "UNAVAILABLE" };
+
+export function paidFetchErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && "metaErrorCode" in error && typeof error.metaErrorCode === "number") return `META_${error.metaErrorCode}`;
+  const known = ["META_AD_OWNER_UNRESOLVED", "META_AD_OWNERSHIP_LOOKUP_FAILED", "META_AD_OWNERSHIP_LOOKUP_INCOMPLETE", "META_AD_PAGINATION_INCOMPLETE"];
+  return error instanceof Error && known.includes(error.message) ? error.message : "META_AD_FETCH_FAILED";
+}
 
 /** Approximate ad-account-currency → BHD rates for displaying spend on reports. Spend stays
  * stored in the ad account's own billing currency; conversion is display-only and labelled
@@ -98,7 +108,8 @@ type AdInsightsRow = {
  * existed (account-level totals that mix every client sharing the ad account) have no marker,
  * so the sync re-fetches and overwrites them with correctly scoped values. */
 const AD_SCOPE_VERSION_METRIC = "ad_scope_version";
-const AD_SCOPE_VERSION = 2;
+const AD_SCOPE_CONTEXT_METRIC = "ad_scope_context";
+const AD_SCOPE_VERSION = 3;
 
 /** What "belongs to this client" means at the ad level: ads promoting the client's own
  * Instagram account (creative media id present in the client's synced SocialPost rows, or the
@@ -115,10 +126,15 @@ async function clientAdScope(clientId: string): Promise<AdScope> {
   const igUserIds = new Set(connections.filter((c) => c.platform === "INSTAGRAM").map((c) => c.externalAccountId));
   const fbPageIds = new Set(connections.filter((c) => c.platform === "FACEBOOK").map((c) => c.externalAccountId));
   const posts = await db.socialPost.findMany({
-    where: { connectionId: { in: connections.map((c) => c.id) } },
+    where: { connectionId: { in: connections.map((c) => c.id) }, mediaSource: "OWNED" },
     select: { externalPostId: true },
   });
   return { igUserIds, fbPageIds, postIds: new Set(posts.map((p) => p.externalPostId)) };
+}
+
+function scopeMarker(accountId: string, scope: AdScope) {
+  const identity = JSON.stringify([accountId, [...scope.igUserIds].sort(), [...scope.fbPageIds].sort()]);
+  return Number.parseInt(createHash("sha256").update(identity).digest("hex").slice(0, 12), 16);
 }
 
 type AdCreativeInfo = {
@@ -132,6 +148,7 @@ async function batchFetch<T>(token: string, ids: string[], fields: string): Prom
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50);
     const res = await graph<Record<string, T | { error?: unknown }>>("", token, { ids: chunk.join(","), fields });
+    if (chunk.some((id) => !res?.[id])) throw new Error("META_AD_OWNERSHIP_LOOKUP_INCOMPLETE");
     for (const [id, value] of Object.entries(res ?? {})) {
       if (value && typeof value === "object" && "error" in value) throw new Error("META_AD_OWNERSHIP_LOOKUP_FAILED");
       if (value && typeof value === "object") result[id] = value as T;
@@ -211,7 +228,10 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
   for (const row of rows) {
     const promoted = row.adset_id ? promotedByAdset.get(row.adset_id) : undefined;
     const creative = row.ad_id ? creatives[row.ad_id]?.creative : undefined;
-    if (!adOwnedByScope(promoted, creative, scope)) continue;
+    if (!adOwnedByScope(promoted, creative, scope)) {
+      if (!promoted?.page_id && !promoted?.instagram_user_id && !creative?.instagram_user_id && !creative?.object_story_id) throw new Error("META_AD_OWNER_UNRESOLVED");
+      continue;
+    }
     owned.push({
       metaAdId: row.ad_id ?? "",
       name: row.ad_name ?? null,
@@ -231,9 +251,7 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
  * this client's own assets. Aggregates the owned per-ad rows from fetchScopedAdRows. */
 async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date): Promise<Partial<Record<AdInsightMetric, number>>> {
   const scopeRows = await fetchScopedAdRows(token, adAccountId, scope, since, until);
-  if (scopeRows.length === 0) return {};
-
-  const values: Partial<Record<AdInsightMetric, number>> = {};
+  const values = Object.fromEntries(AD_INSIGHT_METRICS.map((metric) => [metric, 0])) as Record<AdInsightMetric, number>;
   const num = (v: string | number | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
   for (const row of scopeRows) {
     values.ad_spend = (values.ad_spend ?? 0) + row.spend;
@@ -288,8 +306,9 @@ export async function periodPaidMetricsForRange(clientId: string, periodStart: D
     const client = await adAccountForClient(clientId);
     if (!client?.metaAdAccountId) return unavailable;
     const token = await getSystemUserToken();
-    if (!token) return unavailable;
+    if (!token) return { ...unavailable, configured: true, status: "ERROR" };
 
+    const currency = client.metaAdAccountCurrency ?? await ensureAdAccountCurrency(clientId, client.metaAdAccountId, null, token);
     const scope = await clientAdScope(clientId);
     const values: PaidMetricsResult["values"] = {};
     for (const chunk of splitRangeByMonth(periodStart, periodEnd)) {
@@ -299,18 +318,21 @@ export async function periodPaidMetricsForRange(clientId: string, periodStart: D
       }
     }
     if (Object.keys(values).length === 0) return unavailable;
-    return { values, currency: client.metaAdAccountCurrency, method: "ADS_API" };
-  } catch {
-    return unavailable;
+    return { values, currency, configured: true, status: "READY", method: "ADS_API" };
+  } catch (error) {
+    logEvent("ads.fetch.failed", { clientId, code: paidFetchErrorCode(error) });
+    return { ...unavailable, configured: true, status: "ERROR" };
   }
 }
 
 /** DB-only paid metrics from stored monthly snapshots — used by refresh/export. */
 export async function periodPaidMetricsFromDatabase(clientId: string, periodStart: Date, periodEnd: Date): Promise<PaidMetricsResult> {
   try {
-    const currency = await db.client.findUnique({ where: { id: clientId }, select: { metaAdAccountCurrency: true } })
-      .then((client) => client?.metaAdAccountCurrency ?? null)
-      .catch(() => null);
+    const client = await adAccountForClient(clientId);
+    if (!client?.metaAdAccountId) return unavailable;
+    const currency = client.metaAdAccountCurrency;
+    const scope = await clientAdScope(clientId);
+    const marker = scopeMarker(client.metaAdAccountId, scope);
     const values: PaidMetricsResult["values"] = {};
     for (const chunk of splitRangeByMonth(periodStart, periodEnd)) {
       const rows = await db.clientAdInsightSnapshot.findMany({
@@ -321,7 +343,8 @@ export async function periodPaidMetricsFromDatabase(clientId: string, periodStar
         },
         select: { metric: true, value: true },
       });
-      if (rows.length === 0) return unavailable; // any missing month makes the paid contribution unknown
+      if (rows.length === 0) return { ...unavailable, configured: true, status: "PENDING" }; // any missing month makes the paid contribution unknown
+      if (!rows.some((row) => row.metric === AD_SCOPE_VERSION_METRIC && row.value === AD_SCOPE_VERSION) || !rows.some((row) => row.metric === AD_SCOPE_CONTEXT_METRIC && row.value === marker)) return { ...unavailable, configured: true, status: "PENDING" };
       for (const row of rows) {
         if ((AD_INSIGHT_METRICS as readonly string[]).includes(row.metric)) {
           values[row.metric as AdInsightMetric] = (values[row.metric as AdInsightMetric] ?? 0) + row.value;
@@ -329,9 +352,10 @@ export async function periodPaidMetricsFromDatabase(clientId: string, periodStar
       }
     }
     if (Object.keys(values).length === 0) return unavailable;
-    return { values, currency, method: "AGGREGATE_OF_PERIOD_CHUNKS" };
-  } catch {
-    return unavailable;
+    return { values, currency, configured: true, status: "READY", method: "AGGREGATE_OF_PERIOD_CHUNKS" };
+  } catch (error) {
+    logEvent("ads.fetch.failed", { clientId, code: paidFetchErrorCode(error) });
+    return { ...unavailable, configured: true, status: "ERROR" };
   }
 }
 
@@ -342,38 +366,38 @@ export async function syncMissingClientAdMonth(clientId: string, now: Date = new
   if (!client?.metaAdAccountId) return false;
   const token = await getSystemUserToken();
   if (!token) return false;
-  await ensureAdAccountCurrency(clientId, client.metaAdAccountId, client.metaAdAccountCurrency, token).catch(() => undefined);
+  await ensureAdAccountCurrency(clientId, client.metaAdAccountId, client.metaAdAccountCurrency, token);
 
   const config = getHistoricalBackfillConfig();
   const lookbackStart = new Date(Date.now() - config.accountInsightMaxLookbackDays * 24 * 60 * 60 * 1000);
   const scope = await clientAdScope(clientId);
+  const marker = scopeMarker(client.metaAdAccountId, scope);
   for (const period of completedMonthsWithinLookback(now, lookbackStart)) {
     const periodStart = startOfDayUTC(period.start);
     const periodEnd = endOfDayUTC(period.end);
     // A month counts as captured only when it carries the current scope-version marker. Months
     // synced at account level (pre-scoping, or missing newer metrics) get re-fetched and fully
     // rewritten below so no stale account-level rows survive.
-    const existing = await db.clientAdInsightSnapshot.findUnique({
-      where: {
-        clientId_metric_periodStart_periodEnd: { clientId, metric: AD_SCOPE_VERSION_METRIC, periodStart, periodEnd },
-      },
-      select: { value: true },
+    const existing = await db.clientAdInsightSnapshot.findMany({
+      where: { clientId, periodStart, periodEnd, metric: { in: [AD_SCOPE_VERSION_METRIC, AD_SCOPE_CONTEXT_METRIC] } },
+      select: { metric: true, value: true, finalizedAt: true },
     });
-    if (existing && existing.value >= AD_SCOPE_VERSION) continue;
+    if (existing.some((row) => row.metric === AD_SCOPE_VERSION_METRIC && row.value === AD_SCOPE_VERSION && row.finalizedAt) && existing.some((row) => row.metric === AD_SCOPE_CONTEXT_METRIC && row.value === marker)) continue;
 
     const values = await fetchAdWindow(token, client.metaAdAccountId, scope, periodStart, periodEnd);
     const finalized = isMonthFinalized(periodEnd, now);
     // Rewrite the month from scratch: drop any rows captured under an older scope so account-level
     // leftovers can't linger next to the new per-client values, then insert the fresh rows plus
     // the version marker (even when the month had no owned ads, so it isn't retried forever).
-    await db.clientAdInsightSnapshot.deleteMany({ where: { clientId, periodStart, periodEnd } });
-    await db.clientAdInsightSnapshot.createMany({
-      data: [
-        ...(Object.entries(values) as Array<[AdInsightMetric, number]>).map(([metric, value]) => ({
-          clientId, metric, periodStart, periodEnd, value, finalizedAt: finalized ? now : null,
-        })),
-        { clientId, metric: AD_SCOPE_VERSION_METRIC, periodStart, periodEnd, value: AD_SCOPE_VERSION, finalizedAt: finalized ? now : null },
-      ],
+    await db.$transaction(async (tx) => {
+      const entries = [...Object.entries(values), [AD_SCOPE_VERSION_METRIC, AD_SCOPE_VERSION], [AD_SCOPE_CONTEXT_METRIC, marker]] as Array<[string, number]>;
+      for (const [metric, value] of entries) {
+        await tx.clientAdInsightSnapshot.upsert({
+          where: { clientId_metric_periodStart_periodEnd: { clientId, metric, periodStart, periodEnd } },
+          create: { clientId, metric, periodStart, periodEnd, value, capturedAt: now, finalizedAt: finalized ? now : null },
+          update: { value, capturedAt: now, finalizedAt: finalized ? now : null },
+        });
+      }
     });
     return true; // one month per run
   }

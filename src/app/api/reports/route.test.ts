@@ -4,6 +4,7 @@ import { BlockType } from "@prisma/client";
 import { GET, POST, PATCH } from "./route";
 
 const mockDb = vi.hoisted(() => ({
+  client: { findUnique: vi.fn(async () => null) },
   report: {
     findMany: vi.fn(),
     findUnique: vi.fn(),

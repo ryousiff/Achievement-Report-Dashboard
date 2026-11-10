@@ -5,6 +5,7 @@ import { refreshReportData } from "@/lib/report-refresh";
 const mockGetCoverage = vi.hoisted(() => vi.fn());
 
 const mockDb = vi.hoisted(() => ({
+  client: { findUnique: vi.fn(async () => null) },
   report: {
     findUnique: vi.fn(),
     update: vi.fn(),
