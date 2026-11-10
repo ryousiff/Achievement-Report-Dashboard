@@ -6,6 +6,7 @@ import { serializeSponsoredAd, sponsoredAdPostSelect } from "@/lib/sponsored-ads
 import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
 import { listClientAds, paidFetchErrorCode } from "@/lib/ads-insights";
 import { logEvent } from "@/lib/observability";
+import { getAdCurrencyRates } from "@/lib/ad-currency";
 
 /** Optional `year`/`month` query params scope the list to a single budget month (the Sponsored Ads
  * month view); omitting both returns every ad for the client, as before. */
@@ -53,10 +54,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     ? await db.clientAdBudget.findUnique({ where: { clientId_year_month: { clientId, year, month } } })
     : null;
   const budget = storedBudget ? { year, month, plannedBudget: Number(storedBudget.plannedBudget), currency: storedBudget.currency } : null;
+  const fx = await getAdCurrencyRates([autoCurrency, budget?.currency, ...ads.map((ad) => ad.currency)]);
   const summary = year !== undefined && month !== undefined && autoStatus !== "ERROR"
-    ? combinedSponsoredAdSummary(year, month, budget, ads.map((ad) => ({ metaAdId: ad.metaAdId, actualSpend: Number(ad.actualSpend), currency: ad.currency })), autoAds, autoCurrency)
+    ? combinedSponsoredAdSummary(year, month, budget, ads.map((ad) => ({ metaAdId: ad.metaAdId, actualSpend: Number(ad.actualSpend), currency: ad.currency })), autoAds, autoCurrency, fx.rates)
     : null;
-  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency, autoStatus, budget, summary });
+  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency, autoStatus, budget, summary, bhdRates: fx.rates, fxUpdatedAt: fx.updatedAt });
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {

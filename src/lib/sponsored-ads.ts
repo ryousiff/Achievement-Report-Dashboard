@@ -12,13 +12,14 @@ export function combinedSponsoredAdSummary(
   manual: Array<{ metaAdId: string | null; actualSpend: number; currency: string }>,
   automatic: Array<{ metaAdId: string; spend: number }>,
   autoCurrency: string | null,
+  rates: Record<string, number> = AD_CURRENCY_TO_BHD,
 ) {
   const manualIds = new Set(manual.map((ad) => ad.metaAdId).filter(Boolean));
   const amounts = [
-    ...manual.map((ad) => convertAdSpendToBhd(ad.actualSpend, ad.currency)),
-    ...automatic.filter((ad) => !manualIds.has(ad.metaAdId)).map((ad) => convertAdSpendToBhd(ad.spend, autoCurrency)),
+    ...manual.map((ad) => convertAdSpendToBhd(ad.actualSpend, ad.currency, rates)),
+    ...automatic.filter((ad) => !manualIds.has(ad.metaAdId)).map((ad) => convertAdSpendToBhd(ad.spend, autoCurrency, rates)),
   ];
-  const planned = budget ? convertAdSpendToBhd(budget.plannedBudget, budget.currency) : 0;
+  const planned = budget ? convertAdSpendToBhd(budget.plannedBudget, budget.currency, rates) : 0;
   if (planned === null || amounts.some((amount) => amount === null)) return null;
   return calculateAdBudgetSummary(year, month, planned, "BHD", amounts as number[]);
 }
@@ -32,8 +33,8 @@ export const AD_CURRENCY_TO_BHD: Record<string, number> = {
   QAR: 0.376 / 3.64, OMR: 0.376 / 0.3845,
 };
 
-export function convertAdSpendToBhd(amount: number, currency: string | null | undefined): number | null {
-  const rate = currency ? AD_CURRENCY_TO_BHD[currency.toUpperCase()] : undefined;
+export function convertAdSpendToBhd(amount: number, currency: string | null | undefined, rates: Record<string, number> = AD_CURRENCY_TO_BHD): number | null {
+  const rate = currency ? rates[currency.toUpperCase()] : undefined;
   return Number.isFinite(amount) && rate !== undefined ? amount * rate : null;
 }
 

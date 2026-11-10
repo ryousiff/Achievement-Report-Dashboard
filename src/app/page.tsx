@@ -2494,6 +2494,7 @@ function ReportBuilder({
             <div className="report-readiness-head">
               <b>قبل الاعتماد</b>
             </div>
+            {blocks.some((block) => block.refreshKey === "kpi-paid") && <AdCurrencyAttribution />}
             <p className="report-assistant-text">
               <strong>{t.assistant}</strong> {t.assistantText}
               {syncLabel && <small> · {syncLabel}</small>}
@@ -4579,6 +4580,7 @@ function ReportPreview({
                   ) : (
                     <p>{block.body}</p>
                   )}
+                  {block.refreshKey === "kpi-paid" && <AdCurrencyAttribution />}
                   {block.pageNote && (
                     <div className="print-page-note">
                       <h3>ملاحظات وتوصيات</h3>
@@ -5537,6 +5539,10 @@ function parseMonthKey(key: string) {
   return { year, month };
 }
 
+function AdCurrencyAttribution() {
+  return <small>تحويل BHD تقريبي وقت الالتقاط، وليس سعر تسوية مصرفية أو سعرًا تاريخيًا للشهر. <a href="https://www.exchangerate-api.com" target="_blank" rel="noreferrer">Rates By Exchange Rate API</a></small>;
+}
+
 type AutoSponsoredAd = {
   metaAdId: string;
   name: string | null;
@@ -5554,6 +5560,8 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
   const [ads, setAds] = useState<SponsoredAd[]>([]);
   const [autoAds, setAutoAds] = useState<AutoSponsoredAd[]>([]);
   const [autoCurrency, setAutoCurrency] = useState<string | null>(null);
+  const [bhdRates, setBhdRates] = useState<Record<string, number> | undefined>();
+  const [fxUpdatedAt, setFxUpdatedAt] = useState<string | null>(null);
   const [budget, setBudget] = useState<AdBudget>(null);
   const [summary, setSummary] = useState<AdBudgetSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -5569,10 +5577,12 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
     setLoading(true);
     const adsResponse = await fetch(`/api/clients/${clientId}/sponsored-ads?year=${year}&month=${month}`);
     if (adsResponse.ok) {
-      const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[]; autoAds?: AutoSponsoredAd[]; autoCurrency?: string | null; autoStatus?: string; budget?: AdBudget; summary?: AdBudgetSummary };
+      const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[]; autoAds?: AutoSponsoredAd[]; autoCurrency?: string | null; autoStatus?: string; budget?: AdBudget; summary?: AdBudgetSummary; bhdRates?: Record<string, number>; fxUpdatedAt?: string | null };
       setAds(adsData.ads ?? []);
       setAutoAds(adsData.autoAds ?? []);
       setAutoCurrency(adsData.autoCurrency ?? null);
+      setBhdRates(adsData.bhdRates);
+      setFxUpdatedAt(adsData.fxUpdatedAt ?? null);
       setBudget(adsData.budget ?? null);
       setSummary(adsData.summary ?? null);
       setError(adsData.autoStatus === "ERROR" ? "تعذر جلب إعلانات Meta أو التحقق من ملكيتها. الإدخالات اليدوية متاحة؛ لا تعني القائمة الفارغة عدم وجود إعلانات." : adsData.autoStatus === "UNAVAILABLE" ? "بيانات Meta غير متاحة. تحققي من ربط الحساب الإعلاني ورمز System User." : "");
@@ -5612,7 +5622,7 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
   const formatMoney = (value: number, currency: string) =>
     `${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 3 })} ${currency}`;
   const formatBhdSpend = (amount: number, sourceCurrency: string | null) => {
-    const converted = convertAdSpendToBhd(amount, sourceCurrency);
+    const converted = convertAdSpendToBhd(amount, sourceCurrency, bhdRates);
     return converted === null ? "سعر التحويل غير متاح" : `${sourceCurrency === "BHD" ? "" : "≈"}${formatMoney(converted, "BHD")}`;
   };
   const formatSpend = (ad: SponsoredAd) => formatBhdSpend(ad.actualSpend, ad.currency);
@@ -5643,6 +5653,8 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
         </div>
       </div>
       {error && <small className="client-error">{error}</small>}
+      <AdCurrencyAttribution />
+      {fxUpdatedAt && <small>تحديث أسعار الصرف: {new Date(fxUpdatedAt).toLocaleDateString("ar")}</small>}
       {summary && (
         <div className="ad-budget-summary">
           <div className="ad-budget-cards">

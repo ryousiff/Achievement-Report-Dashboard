@@ -15,6 +15,7 @@ import { completedMonthsWithinLookback } from "@/lib/meta-sync-insights";
 import { getHistoricalBackfillConfig } from "@/lib/env";
 import { splitRangeByMonth } from "@/lib/report-period";
 import { logEvent } from "@/lib/observability";
+import { getAdCurrencyRates } from "@/lib/ad-currency";
 
 export const SYSTEM_USER_PROFILE_NAME = "Meta Business · Kaan Creative (System user)";
 
@@ -25,6 +26,7 @@ export const AD_INSIGHT_METRICS = [
   "ad_saved",
   "ad_shares",
   "ad_spend",
+  "ad_spend_bhd",
   "ad_impressions",
   "ad_reach",
   "ad_clicks",
@@ -109,7 +111,7 @@ type AdInsightsRow = {
  * so the sync re-fetches and overwrites them with correctly scoped values. */
 const AD_SCOPE_VERSION_METRIC = "ad_scope_version";
 const AD_SCOPE_CONTEXT_METRIC = "ad_scope_context";
-const AD_SCOPE_VERSION = 3;
+const AD_SCOPE_VERSION = 4;
 
 /** What "belongs to this client" means at the ad level: ads promoting the client's own
  * Instagram account (creative media id present in the client's synced SocialPost rows, or the
@@ -249,9 +251,9 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
 
 /** One Meta Ads insights call for a date range (inclusive days), restricted to ads promoting
  * this client's own assets. Aggregates the owned per-ad rows from fetchScopedAdRows. */
-async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date): Promise<Partial<Record<AdInsightMetric, number>>> {
+async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope, since: Date, until: Date, currency: string | null): Promise<Partial<Record<AdInsightMetric, number>>> {
   const scopeRows = await fetchScopedAdRows(token, adAccountId, scope, since, until);
-  const values = Object.fromEntries(AD_INSIGHT_METRICS.map((metric) => [metric, 0])) as Record<AdInsightMetric, number>;
+  const values = Object.fromEntries(AD_INSIGHT_METRICS.filter((metric) => metric !== "ad_spend_bhd").map((metric) => [metric, 0])) as Partial<Record<AdInsightMetric, number>>;
   const num = (v: string | number | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
   for (const row of scopeRows) {
     values.ad_spend = (values.ad_spend ?? 0) + row.spend;
@@ -268,6 +270,10 @@ async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope,
     for (const [metric, value] of Object.entries(actionValues) as Array<[AdInsightMetric, number]>) values[metric] = (values[metric] ?? 0) + value;
   }
   values.paid_interactions = (values.ad_likes ?? 0) + (values.ad_comments ?? 0) + (values.ad_saved ?? 0) + (values.ad_shares ?? 0);
+  const fx = await getAdCurrencyRates([currency]);
+  const rate = currency ? fx.rates[currency] : undefined;
+  if (rate === undefined) throw new Error("AD_FX_UNAVAILABLE");
+  values.ad_spend_bhd = (values.ad_spend ?? 0) * rate;
   return values;
 }
 
@@ -312,7 +318,7 @@ export async function periodPaidMetricsForRange(clientId: string, periodStart: D
     const scope = await clientAdScope(clientId);
     const values: PaidMetricsResult["values"] = {};
     for (const chunk of splitRangeByMonth(periodStart, periodEnd)) {
-      const window = await fetchAdWindow(token, client.metaAdAccountId, scope, startOfDayUTC(chunk.start), endOfDayUTC(chunk.end));
+      const window = await fetchAdWindow(token, client.metaAdAccountId, scope, startOfDayUTC(chunk.start), endOfDayUTC(chunk.end), currency);
       for (const [metric, value] of Object.entries(window) as Array<[AdInsightMetric, number]>) {
         values[metric] = (values[metric] ?? 0) + value;
       }
@@ -366,7 +372,7 @@ export async function syncMissingClientAdMonth(clientId: string, now: Date = new
   if (!client?.metaAdAccountId) return false;
   const token = await getSystemUserToken();
   if (!token) return false;
-  await ensureAdAccountCurrency(clientId, client.metaAdAccountId, client.metaAdAccountCurrency, token);
+  const currency = await ensureAdAccountCurrency(clientId, client.metaAdAccountId, client.metaAdAccountCurrency, token);
 
   const config = getHistoricalBackfillConfig();
   const lookbackStart = new Date(Date.now() - config.accountInsightMaxLookbackDays * 24 * 60 * 60 * 1000);
@@ -384,7 +390,7 @@ export async function syncMissingClientAdMonth(clientId: string, now: Date = new
     });
     if (existing.some((row) => row.metric === AD_SCOPE_VERSION_METRIC && row.value === AD_SCOPE_VERSION && row.finalizedAt) && existing.some((row) => row.metric === AD_SCOPE_CONTEXT_METRIC && row.value === marker)) continue;
 
-    const values = await fetchAdWindow(token, client.metaAdAccountId, scope, periodStart, periodEnd);
+    const values = await fetchAdWindow(token, client.metaAdAccountId, scope, periodStart, periodEnd, currency);
     const finalized = isMonthFinalized(periodEnd, now);
     // Rewrite the month from scratch: drop any rows captured under an older scope so account-level
     // leftovers can't linger next to the new per-client values, then insert the fresh rows plus

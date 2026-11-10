@@ -1349,6 +1349,8 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
   const adSpendDisplay = (() => {
     const spend = paidMetric("ad_spend");
     if (spend === undefined) return null;
+    const converted = paidMetric("ad_spend_bhd");
+    if (converted !== undefined) return { value: `${clientAdCurrency === "BHD" ? "" : "≈"}${converted.toLocaleString(undefined, { maximumFractionDigits: 3 })} BHD`, tooltip: "إنفاق محوّل بسعر تقريبي محفوظ وقت التقاط بيانات الفترة؛ ليس مبلغ تسوية مصرفية. أسعار العملات غير الثابتة من ExchangeRate-API." };
     const rate = clientAdCurrency ? AD_CURRENCY_TO_BHD[clientAdCurrency] : undefined;
     if (rate !== undefined && clientAdCurrency !== "BHD") {
       return {

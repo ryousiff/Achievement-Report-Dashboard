@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { listClientAds } from "@/lib/ads-insights";
 import { combinedSponsoredAdSummary } from "@/lib/sponsored-ads";
+import { getAdCurrencyRates } from "@/lib/ad-currency";
 import { requireFeature } from "@/lib/access";
 import {
   DEFAULT_AD_BUDGET_CURRENCY,
@@ -25,7 +26,8 @@ async function loadAdSpends(clientId: string, year: number, month: number) {
 async function combinedSummary(clientId: string, year: number, month: number, budget: { plannedBudget: number; currency: string }, manual: Awaited<ReturnType<typeof loadAdSpends>>) {
   try {
     const automatic = await listClientAds(clientId, new Date(Date.UTC(year, month - 1, 1)), new Date(Date.UTC(year, month, 0)));
-    return combinedSponsoredAdSummary(year, month, budget, manual, automatic?.ads ?? [], automatic?.currency ?? null);
+    const fx = await getAdCurrencyRates([budget.currency, automatic?.currency, ...manual.map((ad) => ad.currency)]);
+    return combinedSponsoredAdSummary(year, month, budget, manual, automatic?.ads ?? [], automatic?.currency ?? null, fx.rates);
   } catch {
     return null;
   }
