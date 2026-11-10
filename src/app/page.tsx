@@ -5567,21 +5567,14 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const load = async () => {
     setLoading(true);
-    const [adsResponse, budgetResponse] = await Promise.all([
-      fetch(`/api/clients/${clientId}/sponsored-ads?year=${year}&month=${month}`),
-      fetch(`/api/clients/${clientId}/ad-budget?year=${year}&month=${month}`),
-    ]);
-    if (adsResponse.ok && budgetResponse.ok) {
-      const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[]; autoAds?: AutoSponsoredAd[]; autoCurrency?: string | null; autoStatus?: string };
-      const budgetData = (await budgetResponse.json()) as {
-        budget?: AdBudget;
-        summary?: AdBudgetSummary;
-      };
+    const adsResponse = await fetch(`/api/clients/${clientId}/sponsored-ads?year=${year}&month=${month}`);
+    if (adsResponse.ok) {
+      const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[]; autoAds?: AutoSponsoredAd[]; autoCurrency?: string | null; autoStatus?: string; budget?: AdBudget; summary?: AdBudgetSummary };
       setAds(adsData.ads ?? []);
       setAutoAds(adsData.autoAds ?? []);
       setAutoCurrency(adsData.autoCurrency ?? null);
-      setBudget(budgetData.budget ?? null);
-      setSummary(budgetData.summary ?? null);
+      setBudget(adsData.budget ?? null);
+      setSummary(adsData.summary ?? null);
       setError(adsData.autoStatus === "ERROR" ? "تعذر جلب إعلانات Meta أو التحقق من ملكيتها. الإدخالات اليدوية متاحة؛ لا تعني القائمة الفارغة عدم وجود إعلانات." : adsData.autoStatus === "UNAVAILABLE" ? "بيانات Meta غير متاحة. تحققي من ربط الحساب الإعلاني ورمز System User." : "");
     } else {
       setError("تعذر تحميل الإعلانات الممولة.");
@@ -5623,7 +5616,7 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
     return converted === null ? "سعر التحويل غير متاح" : `${sourceCurrency === "BHD" ? "" : "≈"}${formatMoney(converted, "BHD")}`;
   };
   const formatSpend = (ad: SponsoredAd) => formatBhdSpend(ad.actualSpend, ad.currency);
-  const currency = budget?.currency ?? summary?.currency ?? DEFAULT_AD_BUDGET_CURRENCY;
+  const currency = summary?.currency ?? DEFAULT_AD_BUDGET_CURRENCY;
   return (
     <section className="card sponsored-ads">
       <div className="card-title">

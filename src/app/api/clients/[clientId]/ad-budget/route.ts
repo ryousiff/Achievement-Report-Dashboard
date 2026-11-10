@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { listClientAds } from "@/lib/ads-insights";
+import { combinedSponsoredAdSummary } from "@/lib/sponsored-ads";
 import { requireFeature } from "@/lib/access";
 import {
   DEFAULT_AD_BUDGET_CURRENCY,
-  calculateAdBudgetSummary,
   isValidBudgetMonth,
   isValidBudgetYear,
   parseClientAdBudgetInput,
@@ -17,8 +18,17 @@ function parseYearMonth(request: NextRequest) {
 }
 
 async function loadAdSpends(clientId: string, year: number, month: number) {
-  const ads = await db.sponsoredAd.findMany({ where: { clientId, budgetYear: year, budgetMonth: month }, select: { actualSpend: true } });
-  return ads.map((ad) => Number(ad.actualSpend.toString()));
+  const ads = await db.sponsoredAd.findMany({ where: { clientId, budgetYear: year, budgetMonth: month }, select: { actualSpend: true, currency: true, metaAdId: true } });
+  return ads.map((ad) => ({ ...ad, actualSpend: Number(ad.actualSpend) }));
+}
+
+async function combinedSummary(clientId: string, year: number, month: number, budget: { plannedBudget: number; currency: string }, manual: Awaited<ReturnType<typeof loadAdSpends>>) {
+  try {
+    const automatic = await listClientAds(clientId, new Date(Date.UTC(year, month - 1, 1)), new Date(Date.UTC(year, month, 0)));
+    return combinedSponsoredAdSummary(year, month, budget, manual, automatic?.ads ?? [], automatic?.currency ?? null);
+  } catch {
+    return null;
+  }
 }
 
 /** Everything shown for a single client/month: the (possibly not-yet-set) planned budget plus the
@@ -37,7 +47,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   ]);
   const plannedBudget = budget ? Number(budget.plannedBudget.toString()) : 0;
   const currency = budget?.currency ?? DEFAULT_AD_BUDGET_CURRENCY;
-  const summary = calculateAdBudgetSummary(year, month, plannedBudget, currency, adSpends);
+  const summary = await combinedSummary(clientId, year, month, { plannedBudget, currency }, adSpends);
   return NextResponse.json({
     budget: budget ? { year, month, plannedBudget, currency } : null,
     summary,
@@ -64,7 +74,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   });
 
   const adSpends = await loadAdSpends(clientId, year, month);
-  const summary = calculateAdBudgetSummary(year, month, Number(budget.plannedBudget.toString()), budget.currency, adSpends);
+  const summary = await combinedSummary(clientId, year, month, { plannedBudget: Number(budget.plannedBudget), currency: budget.currency }, adSpends);
   return NextResponse.json({
     budget: { year, month, plannedBudget: Number(budget.plannedBudget.toString()), currency: budget.currency },
     summary,

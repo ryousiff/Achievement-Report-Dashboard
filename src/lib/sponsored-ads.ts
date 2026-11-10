@@ -4,7 +4,24 @@
  * a row never requires Meta Ads API access. `actualSpend` is real money already spent, not a
  * planned budget. */
 
-import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
+import { calculateAdBudgetSummary, isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
+
+export function combinedSponsoredAdSummary(
+  year: number, month: number,
+  budget: { plannedBudget: number; currency: string } | null,
+  manual: Array<{ metaAdId: string | null; actualSpend: number; currency: string }>,
+  automatic: Array<{ metaAdId: string; spend: number }>,
+  autoCurrency: string | null,
+) {
+  const manualIds = new Set(manual.map((ad) => ad.metaAdId).filter(Boolean));
+  const amounts = [
+    ...manual.map((ad) => convertAdSpendToBhd(ad.actualSpend, ad.currency)),
+    ...automatic.filter((ad) => !manualIds.has(ad.metaAdId)).map((ad) => convertAdSpendToBhd(ad.spend, autoCurrency)),
+  ];
+  const planned = budget ? convertAdSpendToBhd(budget.plannedBudget, budget.currency) : 0;
+  if (planned === null || amounts.some((amount) => amount === null)) return null;
+  return calculateAdBudgetSummary(year, month, planned, "BHD", amounts as number[]);
+}
 
 export type SponsoredAdStatus = "UPCOMING" | "ACTIVE" | "FINISHED";
 

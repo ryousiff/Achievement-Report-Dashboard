@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireFeature } from "@/lib/access";
-import { parseSponsoredAdCreateInput } from "@/lib/sponsored-ads";
+import { combinedSponsoredAdSummary, parseSponsoredAdCreateInput } from "@/lib/sponsored-ads";
 import { serializeSponsoredAd, sponsoredAdPostSelect } from "@/lib/sponsored-ads-serializer";
 import { isValidBudgetMonth, isValidBudgetYear } from "@/lib/ad-budget";
 import { listClientAds } from "@/lib/ads-insights";
@@ -47,7 +47,14 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       autoStatus = "ERROR";
     }
   }
-  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency, autoStatus });
+  const storedBudget = year !== undefined && month !== undefined
+    ? await db.clientAdBudget.findUnique({ where: { clientId_year_month: { clientId, year, month } } })
+    : null;
+  const budget = storedBudget ? { year, month, plannedBudget: Number(storedBudget.plannedBudget), currency: storedBudget.currency } : null;
+  const summary = year !== undefined && month !== undefined && autoStatus !== "ERROR"
+    ? combinedSponsoredAdSummary(year, month, budget, ads.map((ad) => ({ metaAdId: ad.metaAdId, actualSpend: Number(ad.actualSpend), currency: ad.currency })), autoAds, autoCurrency)
+    : null;
+  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency, autoStatus, budget, summary });
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {

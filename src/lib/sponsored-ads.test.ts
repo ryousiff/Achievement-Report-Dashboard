@@ -2,9 +2,24 @@ import { describe, expect, it } from "vitest";
 import {
   computeSponsoredAdStatus,
   convertAdSpendToBhd,
+  combinedSponsoredAdSummary,
   parseSponsoredAdCreateInput,
   parseSponsoredAdUpdateInput,
 } from "@/lib/sponsored-ads";
+
+describe("combined manual and Meta budget", () => {
+  it("converts both sources and counts a linked manual override once", () => {
+    const summary = combinedSponsoredAdSummary(2026, 10, { plannedBudget: 100, currency: "BHD" },
+      [{ metaAdId: "same", actualSpend: 10, currency: "BHD" }],
+      [{ metaAdId: "same", spend: 999 }, { metaAdId: "new", spend: 375 }], "SAR");
+    expect(summary?.totalActualSpend).toBeCloseTo(47.6);
+    expect(summary?.remainingBudget).toBeCloseTo(52.4);
+    expect(summary?.adsCount).toBe(2);
+  });
+  it("does not publish partial totals when a conversion is missing", () => {
+    expect(combinedSponsoredAdSummary(2026, 10, null, [], [{ metaAdId: "new", spend: 100 }], null)).toBeNull();
+  });
+});
 
 describe("BHD spend conversion", () => {
   it("converts SAR and USD using their USD pegs", () => {
