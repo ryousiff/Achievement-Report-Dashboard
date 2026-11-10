@@ -3,7 +3,7 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { completedPeriod, type ReportPeriod, type ComparisonMode } from "@/lib/report-period";
-import { DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
+import { convertAdSpendToBhd, DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
 import { DEFAULT_AD_BUDGET_CURRENCY } from "@/lib/ad-budget";
 import { isEmployeeVisibleSyncError, mapEmployeeSyncErrorPresentation } from "@/lib/meta-error-classification";
 import {
@@ -5618,7 +5618,11 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
     });
   const formatMoney = (value: number, currency: string) =>
     `${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 3 })} ${currency}`;
-  const formatSpend = (ad: SponsoredAd) => formatMoney(ad.actualSpend, ad.currency);
+  const formatBhdSpend = (amount: number, sourceCurrency: string | null) => {
+    const converted = convertAdSpendToBhd(amount, sourceCurrency);
+    return converted === null ? "سعر التحويل غير متاح" : `${sourceCurrency === "BHD" ? "" : "≈"}${formatMoney(converted, "BHD")}`;
+  };
+  const formatSpend = (ad: SponsoredAd) => formatBhdSpend(ad.actualSpend, ad.currency);
   const currency = budget?.currency ?? summary?.currency ?? DEFAULT_AD_BUDGET_CURRENCY;
   return (
     <section className="card sponsored-ads">
@@ -5718,7 +5722,7 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
             <div className="sponsored-ads-head">
               <span>المنشور (من Meta)</span>
               <span>الرابط</span>
-              <span>الإنفاق{autoCurrency ? ` (${autoCurrency})` : ""}</span>
+              <span>الإنفاق (BHD تقريبي)</span>
               <span>الوصول</span>
               <span>المشاهدات</span>
               <span>النقرات</span>
@@ -5748,7 +5752,7 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
                 ) : (
                   <span className="account-empty">لا يوجد رابط</span>
                 )}
-                <span>{formatMoney(ad.spend, autoCurrency ?? "")}</span>
+                <span>{formatBhdSpend(ad.spend, autoCurrency)}</span>
                 <span>{ad.reach.toLocaleString()}</span>
                 <span>{ad.impressions.toLocaleString()}</span>
                 <span>{ad.clicks.toLocaleString()}</span>

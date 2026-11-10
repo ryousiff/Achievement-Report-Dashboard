@@ -1356,16 +1356,18 @@ export async function buildStandardReportBlocks(clientId: string, periodStart: D
         tooltip: `${spend.toLocaleString()} ${clientAdCurrency} — قيمة الإنفاق بعملة الحساب الإعلاني، محوّلة إلى الدينار البحريني بسعر تقريبي.`,
       };
     }
-    return { value: `${spend.toLocaleString()} ${clientAdCurrency ?? "BHD"}`, tooltip: "إجمالي الإنفاق على الإعلانات من حساب الإعلانات خلال الفترة (بعملة الحساب الإعلاني)." };
+    return clientAdCurrency === "BHD"
+      ? { value: `${spend.toLocaleString()} BHD`, tooltip: "إجمالي الإنفاق بالدينار البحريني." }
+      : { value: "غير متاح", tooltip: "عملة الإنفاق أو سعر التحويل إلى الدينار البحريني غير متاح؛ لا تُعرض قيمة بعملة خاطئة." };
   })();
   const paidKpis = [
     adSpendDisplay ? kpi("ad-spend", "المبلغ المدفوع", adSpendDisplay.value, true, { tooltip: adSpendDisplay.tooltip }) : null,
-    paidMetric("ad_reach") !== undefined ? paidKpi("ad-reach", "الوصول المدفوع", "ad_reach") : null,
-    paidMetric("ad_impressions") !== undefined ? paidKpi("ad-impressions", "المشاهدات المدفوعة", "ad_impressions") : null,
+    paidMetric("ad_reach") !== undefined ? paidKpi("ad-reach", "مجموع وصول الإعلانات", "ad_reach", "مجموع وصول كل إعلان؛ قد يُحتسب الشخص نفسه في أكثر من إعلان، وليست قيمة وصول فريد للفترة.") : null,
+    paidMetric("ad_impressions") !== undefined ? paidKpi("ad-impressions", "مرات الظهور المدفوعة", "ad_impressions") : null,
     paidMetric("ad_link_clicks") !== undefined || paidMetric("ad_clicks") !== undefined
       ? kpi("ad-clicks", "النقرات", (paidMetric("ad_link_clicks") ?? paidMetric("ad_clicks")!).toLocaleString(), true, { tooltip: "نقرات الرابط على الإعلانات خلال الفترة." + PAID_SECTION_TOOLTIP })
       : null,
-    paidMetric("ad_messages") !== undefined ? paidKpi("ad-messages", "الرسائل", "ad_messages", "محادثات المراسلة التي بدأت من الإعلانات خلال الفترة (WhatsApp / DM).") : null,
+    paidMetric("ad_messages") !== undefined ? paidKpi("ad-messages", "المحادثات التي بدأت", "ad_messages", "المحادثات المنسوبة للإعلانات ضمن نافذة Meta؛ ليست عدد الرسائل المرسلة.") : null,
     paidMetric("paid_interactions") !== undefined ? paidKpi("ad-interactions", "التفاعل المدفوع", "paid_interactions", "إعجابات وتعليقات وحفظ ومشاركات قادمة من الإعلانات خلال الفترة.") : null,
   ].filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 

@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
   computeSponsoredAdStatus,
+  convertAdSpendToBhd,
   parseSponsoredAdCreateInput,
   parseSponsoredAdUpdateInput,
 } from "@/lib/sponsored-ads";
+
+describe("BHD spend conversion", () => {
+  it("converts SAR and USD using their USD pegs", () => {
+    expect(convertAdSpendToBhd(375, "SAR")).toBeCloseTo(37.6);
+    expect(convertAdSpendToBhd(100, "USD")).toBeCloseTo(37.6);
+    expect(convertAdSpendToBhd(100, "BHD")).toBe(100);
+  });
+  it("never invents a rate or treats unknown currency as BHD", () => {
+    expect(convertAdSpendToBhd(4000, null)).toBeNull();
+    expect(convertAdSpendToBhd(4000, "UNKNOWN")).toBeNull();
+  });
+});
 
 describe("computeSponsoredAdStatus", () => {
   const now = new Date("2026-06-15T12:00:00.000Z");

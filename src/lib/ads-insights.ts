@@ -43,17 +43,7 @@ const unavailable: PaidMetricsResult = { values: {}, method: "UNAVAILABLE" };
 /** Approximate ad-account-currency → BHD rates for displaying spend on reports. Spend stays
  * stored in the ad account's own billing currency; conversion is display-only and labelled
  * approximate (≈) on the card. Unknown currencies render as the raw value + currency code. */
-export const AD_CURRENCY_TO_BHD: Record<string, number> = {
-  BHD: 1,
-  SAR: 0.1003,
-  USD: 0.376,
-  AED: 0.1024,
-  KWD: 1.2269,
-  QAR: 0.1033,
-  OMR: 0.9774,
-  EUR: 0.4358,
-  GBP: 0.495,
-};
+export { AD_CURRENCY_TO_BHD } from "@/lib/sponsored-ads";
 
 /** Meta Ads action types that map to organic content-interaction buckets. Meta does not expose
  * reposts/story replies as separate ad actions; what Meta's app counts as "Content interactions"
@@ -69,7 +59,6 @@ const ACTION_TO_METRIC: Record<string, AdInsightMetric> = {
   link_click: "ad_link_clicks",
   "onsite_conversion.messaging_conversation_started_7d": "ad_messages",
   messaging_conversation_started_7d: "ad_messages",
-  "onsite_conversion.messaging_first_reply": "ad_messages",
 };
 
 function startOfDayUTC(date: Date) {
@@ -251,12 +240,14 @@ async function fetchAdWindow(token: string, adAccountId: string, scope: AdScope,
     values.ad_impressions = (values.ad_impressions ?? 0) + row.impressions;
     values.ad_reach = (values.ad_reach ?? 0) + row.reach;
     values.ad_clicks = (values.ad_clicks ?? 0) + row.clicks;
+    const actionValues: Partial<Record<AdInsightMetric, number>> = {};
     for (const action of row.actions ?? []) {
       if (!action.action_type) continue;
       const metric = ACTION_TO_METRIC[action.action_type];
       const actionValue = num(action.value);
-      if (metric && actionValue !== undefined) values[metric] = (values[metric] ?? 0) + actionValue;
+      if (metric && actionValue !== undefined) actionValues[metric] = Math.max(actionValues[metric] ?? 0, actionValue);
     }
+    for (const [metric, value] of Object.entries(actionValues) as Array<[AdInsightMetric, number]>) values[metric] = (values[metric] ?? 0) + value;
   }
   values.paid_interactions = (values.ad_likes ?? 0) + (values.ad_comments ?? 0) + (values.ad_saved ?? 0) + (values.ad_shares ?? 0);
   return values;
@@ -276,7 +267,8 @@ export async function listClientAds(clientId: string, since: Date, until: Date):
   if (!token) return null;
   const scope = await clientAdScope(clientId);
   const ads = await fetchScopedAdRows(token, client.metaAdAccountId, scope, startOfDayUTC(since), endOfDayUTC(until));
-  return { ads, currency: client.metaAdAccountCurrency };
+  const currency = client.metaAdAccountCurrency ?? await ensureAdAccountCurrency(clientId, client.metaAdAccountId, null, token);
+  return { ads, currency };
 }
 
 /** Billing currency of the ad account — fetched lazily during sync and persisted on the client
@@ -286,6 +278,7 @@ async function ensureAdAccountCurrency(clientId: string, adAccountId: string, cu
   if (account.currency && account.currency !== current) {
     await db.client.update({ where: { id: clientId }, data: { metaAdAccountCurrency: account.currency } });
   }
+  return account.currency ?? null;
 }
 
 /** Live paid metrics for an arbitrary report range — chunked per calendar month so the values match

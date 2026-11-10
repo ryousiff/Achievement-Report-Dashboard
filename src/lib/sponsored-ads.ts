@@ -10,6 +10,16 @@ export type SponsoredAdStatus = "UPCOMING" | "ACTIVE" | "FINISHED";
 
 export const DEFAULT_SPONSORED_AD_CURRENCY = "BHD";
 
+export const AD_CURRENCY_TO_BHD: Record<string, number> = {
+  BHD: 1, USD: 0.376, SAR: 0.376 / 3.75, AED: 0.376 / 3.6725,
+  QAR: 0.376 / 3.64, OMR: 0.376 / 0.3845,
+};
+
+export function convertAdSpendToBhd(amount: number, currency: string | null | undefined): number | null {
+  const rate = currency ? AD_CURRENCY_TO_BHD[currency.toUpperCase()] : undefined;
+  return Number.isFinite(amount) && rate !== undefined ? amount * rate : null;
+}
+
 /** Upcoming/active/finished is always derived from startDate/endDate rather than stored, so it
  * never goes stale. */
 export function computeSponsoredAdStatus(
