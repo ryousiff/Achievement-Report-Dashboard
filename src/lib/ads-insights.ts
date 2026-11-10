@@ -133,7 +133,7 @@ async function clientAdScope(clientId: string): Promise<AdScope> {
 }
 
 type AdCreativeInfo = {
-  instagram_actor_id?: string;
+  instagram_user_id?: string;
   effective_instagram_media_id?: string;
   object_story_id?: string;
 };
@@ -144,19 +144,20 @@ async function batchFetch<T>(token: string, ids: string[], fields: string): Prom
     const chunk = ids.slice(i, i + 50);
     const res = await graph<Record<string, T | { error?: unknown }>>("", token, { ids: chunk.join(","), fields });
     for (const [id, value] of Object.entries(res ?? {})) {
-      if (value && typeof value === "object" && !("error" in value)) result[id] = value as T;
+      if (value && typeof value === "object" && "error" in value) throw new Error("META_AD_OWNERSHIP_LOOKUP_FAILED");
+      if (value && typeof value === "object") result[id] = value as T;
     }
   }
   return result;
 }
 
-function adOwnedByScope(adsetPromoted: { page_id?: string; instagram_actor_id?: string } | undefined, creative: AdCreativeInfo | undefined, scope: AdScope): boolean {
+function adOwnedByScope(adsetPromoted: { page_id?: string; instagram_user_id?: string } | undefined, creative: AdCreativeInfo | undefined, scope: AdScope): boolean {
   if (adsetPromoted) {
-    if (adsetPromoted.instagram_actor_id && scope.igUserIds.has(adsetPromoted.instagram_actor_id)) return true;
+    if (adsetPromoted.instagram_user_id && scope.igUserIds.has(adsetPromoted.instagram_user_id)) return true;
     if (adsetPromoted.page_id && scope.fbPageIds.has(adsetPromoted.page_id)) return true;
   }
   if (creative) {
-    if (creative.instagram_actor_id && scope.igUserIds.has(creative.instagram_actor_id)) return true;
+    if (creative.instagram_user_id && scope.igUserIds.has(creative.instagram_user_id)) return true;
     if (creative.effective_instagram_media_id && scope.postIds.has(creative.effective_instagram_media_id)) return true;
     if (creative.object_story_id) {
       const pageId = creative.object_story_id.split("_")[0];
@@ -198,13 +199,14 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
     });
     rows.push(...(res.data ?? []));
     const next = res.paging?.next ? res.paging.cursors?.after : undefined;
+    if (res.paging?.next && (!next || page === MAX_INSIGHT_PAGES - 1)) throw new Error("META_AD_PAGINATION_INCOMPLETE");
     if (!next) break;
     after = next;
   }
   if (rows.length === 0) return [];
 
   const adsetIds = [...new Set(rows.map((r) => r.adset_id).filter((id): id is string => Boolean(id)))];
-  const adsets = await batchFetch<{ promoted_object?: { page_id?: string; instagram_actor_id?: string } }>(token, adsetIds, "promoted_object");
+  const adsets = await batchFetch<{ promoted_object?: { page_id?: string; instagram_user_id?: string } }>(token, adsetIds, "promoted_object");
   const promotedByAdset = new Map(Object.entries(adsets).map(([id, adset]) => [id, adset.promoted_object]));
 
   const needsCreative = rows.filter((r) => {
@@ -212,7 +214,7 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
     return !adOwnedByScope(promoted, undefined, scope);
   }).map((r) => r.ad_id).filter((id): id is string => Boolean(id));
   const creatives = needsCreative.length > 0
-    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_actor_id,object_story_id,instagram_permalink_url}")
+    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_user_id,object_story_id,instagram_permalink_url}")
     : {};
 
   const num = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);

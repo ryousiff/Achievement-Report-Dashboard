@@ -30,6 +30,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   // manual list — autoAds just comes back empty.
   let autoAds: Array<{ metaAdId: string; name: string | null; permalink: string | null; instagramMediaId: string | null; spend: number; impressions: number; reach: number; clicks: number }> = [];
   let autoCurrency: string | null = null;
+  let autoStatus: "UNAVAILABLE" | "READY" | "ERROR" = "UNAVAILABLE";
   if (year !== undefined && month !== undefined) {
     try {
       const since = new Date(Date.UTC(year, month - 1, 1));
@@ -39,12 +40,14 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         const manualMetaIds = new Set(ads.map((ad) => ad.metaAdId).filter((id): id is string => Boolean(id)));
         autoAds = result.ads.filter((ad) => !manualMetaIds.has(ad.metaAdId));
         autoCurrency = result.currency;
+        autoStatus = "READY";
       }
     } catch {
       autoAds = [];
+      autoStatus = "ERROR";
     }
   }
-  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency });
+  return NextResponse.json({ ads: ads.map(serializeSponsoredAd), autoAds, autoCurrency, autoStatus });
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ clientId: string }> }) {
