@@ -5573,11 +5573,20 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
     null,
   );
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const loadVersion = useRef(0);
+  const loadAbort = useRef<AbortController | null>(null);
   const load = async () => {
+    const version = ++loadVersion.current;
+    loadAbort.current?.abort();
+    const controller = new AbortController();
+    loadAbort.current = controller;
     setLoading(true);
-    const adsResponse = await fetch(`/api/clients/${clientId}/sponsored-ads?year=${year}&month=${month}`);
-    if (adsResponse.ok) {
+    setSummary(null);
+    try {
+      const adsResponse = await fetch(`/api/clients/${clientId}/sponsored-ads?year=${year}&month=${month}`, { signal: controller.signal });
+      if (!adsResponse.ok) throw new Error("ADS_LOAD_FAILED");
       const adsData = (await adsResponse.json()) as { ads?: SponsoredAd[]; autoAds?: AutoSponsoredAd[]; autoCurrency?: string | null; autoStatus?: string; budget?: AdBudget; summary?: AdBudgetSummary; bhdRates?: Record<string, number>; fxUpdatedAt?: string | null };
+      if (version !== loadVersion.current) return;
       setAds(adsData.ads ?? []);
       setAutoAds(adsData.autoAds ?? []);
       setAutoCurrency(adsData.autoCurrency ?? null);
@@ -5585,14 +5594,20 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
       setFxUpdatedAt(adsData.fxUpdatedAt ?? null);
       setBudget(adsData.budget ?? null);
       setSummary(adsData.summary ?? null);
-      setError(adsData.autoStatus === "ERROR" ? "تعذر جلب إعلانات Meta أو التحقق من ملكيتها. الإدخالات اليدوية متاحة؛ لا تعني القائمة الفارغة عدم وجود إعلانات." : adsData.autoStatus === "UNAVAILABLE" ? "بيانات Meta غير متاحة. تحققي من ربط الحساب الإعلاني ورمز System User." : "");
-    } else {
-      setError("تعذر تحميل الإعلانات الممولة.");
+      setError(adsData.autoStatus === "ERROR" ? "تعذر جلب إعلانات Meta أو التحقق من ملكيتها. الإدخالات اليدوية متاحة؛ لا تعني القائمة الفارغة عدم وجود إعلانات." : adsData.autoStatus === "UNAVAILABLE" ? "بيانات Meta غير متاحة. تحققي من ربط الحساب الإعلاني ورمز System User." : !adsData.summary ? "تعذر حساب الإجمالي بالدينار البحريني؛ تحققي من توفر أسعار التحويل." : "");
+    } catch {
+      if (version !== loadVersion.current || controller.signal.aborted) return;
+      setAds([]);
+      setAutoAds([]);
+      setBudget(null);
+      setError("تعذر تحميل الإعلانات الممولة. أعيدي المحاولة؛ لم تُحذف أي بيانات.");
+    } finally {
+      if (version === loadVersion.current) setLoading(false);
     }
-    setLoading(false);
   };
   useEffect(() => {
     void load();
+    return () => { loadVersion.current++; loadAbort.current?.abort(); };
   }, [clientId, year, month]);
   const deleteAd = async (ad: SponsoredAd) => {
     setConfirmDeleteAd(null);
@@ -5716,8 +5731,8 @@ function SponsoredAdsSection({ clientId, clientName }: { clientId: string; clien
         <div className="empty-template">
           <div>
             <Megaphone size={30} />
-            <strong>لا توجد إعلانات ممولة بعد</strong>
-            <span>أضيفي أول إعلان ممول لهذا العميل.</span>
+            <strong>{error ? "بيانات الإعلانات غير مكتملة" : "لا توجد إعلانات ممولة لهذه الفترة"}</strong>
+            <span>{error ? "راجعي التنبيه أعلاه؛ الإضافة اليدوية ما زالت متاحة." : "يمكنك إضافة إعلان يدوي لهذا العميل."}</span>
           </div>
         </div>
       ) : (

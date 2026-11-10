@@ -449,6 +449,8 @@ describe("runDueMonthlyReportPreparation", () => {
   });
 
   it("enqueues a month-end closeout job for the previous finalized month", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-12T12:00:00Z"));
     mockMonthEndCloseout.isMonthEndCloseoutDue.mockResolvedValue(true);
     mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
 
@@ -456,6 +458,15 @@ describe("runDueMonthlyReportPreparation", () => {
     expect(jobs).not.toBeNull();
 
     expect(jobs!.some((job: { type: SyncJobType }) => job.type === SyncJobType.MONTH_END_CLOSEOUT)).toBe(true);
+  });
+
+  it("does not close out the previous month during its finalization grace period", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-02T12:00:00Z"));
+    mockMonthEndCloseout.isMonthEndCloseoutDue.mockResolvedValue(true);
+    mockDb.socialConnection.findMany.mockResolvedValue([{ id: "conn-a" }]);
+    const jobs = await runDueMonthlyReportPreparation();
+    expect(jobs?.some((job: { type: SyncJobType }) => job.type === SyncJobType.MONTH_END_CLOSEOUT)).toBe(false);
   });
 
   it("boosts current-month job priority during the final days of the month", async () => {
