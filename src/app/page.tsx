@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { completedPeriod, type ReportPeriod, type ComparisonMode } from "@/lib/report-period";
 import { convertAdSpendToBhd, DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
@@ -13,25 +13,33 @@ import {
   summarizeCoverageIssues,
 } from "@/lib/report-readiness";
 import {
+  Activity,
   AlertCircle,
   ArrowDown,
   ArrowUp,
   BarChart3,
+  Bookmark,
   CheckCircle2,
+  Clapperboard,
   Eye,
   ExternalLink,
   Facebook,
   FileText,
+  Heart,
   History,
   Image as ImageIcon,
   Instagram,
+  Layers,
   LayoutDashboard,
   Link2,
   LogOut,
+  MessageCircle,
   Megaphone,
+  Play,
   Plus,
   RefreshCw,
   Save,
+  Send,
   Settings,
   ShieldCheck,
   StickyNote,
@@ -4402,6 +4410,171 @@ function ApprovalOverrideDialog({
   );
 }
 
+type SlideOrientation = "landscape" | "portrait";
+const SLIDE_SIZE: Record<SlideOrientation, { width: number; height: number }> = {
+  landscape: { width: 1280, height: 720 },
+  portrait: { width: 720, height: 1280 },
+};
+
+/** Arabic month/day formatting with Latin digits, e.g. "01 سبتمبر". */
+const arabicDay = new Intl.DateTimeFormat("ar-u-nu-latn", { day: "2-digit" });
+const arabicMonth = new Intl.DateTimeFormat("ar-u-nu-latn", { month: "long" });
+const arabicYear = new Intl.DateTimeFormat("ar-u-nu-latn", { year: "numeric" });
+function parseReportDate(value: string) {
+  const date = new Date(value.length === 10 ? `${value}T00:00:00` : value);
+  return Number.isNaN(date.valueOf()) ? null : date;
+}
+/** "مدة التحليل: 01 سبتمبر - 30 سبتمبر 2026" */
+function analysisPeriodLabel(periodStart: string, periodEnd: string) {
+  const start = parseReportDate(periodStart);
+  const end = parseReportDate(periodEnd);
+  if (!start || !end) return null;
+  const sameYear = start.getFullYear() === end.getFullYear();
+  const startText = `${arabicDay.format(start)} ${arabicMonth.format(start)}${sameYear ? "" : ` ${arabicYear.format(start)}`}`;
+  const endText = `${arabicDay.format(end)} ${arabicMonth.format(end)} ${arabicYear.format(end)}`;
+  return { startText, endText };
+}
+/** Splits the report title into the two cover lines used by the template ("تقرير الإنجاز" / "لشهر سبتمبر 2026"). */
+function coverTitleLines(title: string, periodStart: string, periodEnd: string) {
+  const trimmed = title.trim();
+  const match = trimmed.match(/^(.*?)\s+((?:لشهر|لعام|للفترة|لربع|لأسبوع)(?:\s.*)?)$/u);
+  const start = parseReportDate(periodStart);
+  const end = parseReportDate(periodEnd);
+  if (match) {
+    const second = /\d{4}/.test(match[2]) || !start ? match[2] : `${match[2]} ${arabicYear.format(start)}`;
+    return [match[1], second];
+  }
+  if (!start || !end) return [trimmed];
+  const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
+  const period = sameMonth
+    ? `لشهر ${arabicMonth.format(start)} ${arabicYear.format(start)}`
+    : `${arabicDay.format(start)} ${arabicMonth.format(start)} – ${arabicDay.format(end)} ${arabicMonth.format(end)} ${arabicYear.format(end)}`;
+  return trimmed.includes(period) ? [trimmed] : [trimmed, period];
+}
+
+/** Picks the outline icon from /public/icons that matches a KPI (by id first, then label keywords). */
+function kpiIconFor(kpi: Kpi) {
+  const byId: Record<string, string> = {
+    reach: "07", views: "08", "total-views": "08", total_interactions: "01", "engagement-rate": "01",
+    posts: "09", "owned-posts": "09", "collaborative-posts": "09",
+    follows: "10", followers: "10", "net-follower-growth": "10", "media-follows": "10", "followers-lost": "10",
+    likes: "02", comments: "03", saved: "04", shares: "05", reposts: "06",
+  };
+  const id = kpi.id.replace(/^kpi-/, "");
+  if (byId[id]) return `/icons/icons-${byId[id]}.svg`;
+  const label = kpi.label.toLowerCase();
+  const byLabel: Array<[RegExp, string]> = [
+    [/إعادة|repost|إعادة نشر/u, "06"], [/إعجاب|like/u, "02"], [/تعليق|comment/u, "03"], [/حفظ|save/u, "04"],
+    [/مشاركة|share/u, "05"], [/وصول|reach/u, "07"], [/مشاهد|view|impression/u, "08"], [/منشور|post|محتوى/u, "09"],
+    [/متابع|follow/u, "10"], [/تفاعل|interaction|engagement/u, "01"],
+  ];
+  const found = byLabel.find(([pattern]) => pattern.test(label));
+  return found ? `/icons/icons-${found[1]}.svg` : null;
+}
+
+type KpiRowSize = "xl" | "lg" | "md" | "sm" | "xs";
+/**
+ * Distributes number cards over rows the way the template does: up to 3 large cards on the first
+ * row, then a second (and third) row of smaller cards. Adding or removing a card re-flows the page.
+ */
+function layoutKpiRows(count: number, orientation: SlideOrientation): Array<{ size: KpiRowSize; count: number; cols: number }> {
+  if (count <= 0) return [];
+  if (orientation === "portrait") {
+    const perRow = count <= 4 ? 2 : 3;
+    const size: KpiRowSize = count <= 2 ? "xl" : count <= 4 ? "lg" : count <= 6 ? "md" : count <= 9 ? "sm" : "xs";
+    const rows: Array<{ size: KpiRowSize; count: number; cols: number }> = [];
+    for (let left = count; left > 0; left -= perRow) rows.push({ size, count: Math.min(perRow, left), cols: perRow });
+    return rows;
+  }
+  if (count <= 3) return [{ size: "xl", count, cols: 3 }];
+  if (count <= 8) {
+    const rest = count - 3;
+    return [{ size: "lg", count: 3, cols: 3 }, { size: "md", count: rest, cols: Math.max(rest, 3) }];
+  }
+  const rest = count - 3;
+  const second = Math.ceil(rest / 2);
+  const third = rest - second;
+  const smallSize: KpiRowSize = count <= 11 ? "sm" : "xs";
+  return [
+    { size: "lg", count: 3, cols: 3 },
+    { size: smallSize, count: second, cols: Math.max(second, 3) },
+    { size: smallSize, count: third, cols: Math.max(second, 3) },
+  ];
+}
+
+/** Columns per row for top-post cards: a single row up to 5 (template), then wraps into 2–3 rows. */
+function layoutMediaRows(count: number, orientation: SlideOrientation) {
+  if (count <= 0) return { cols: 0, rows: 0 };
+  const maxPerRow = orientation === "portrait" ? 3 : 5;
+  if (count <= maxPerRow) return { cols: count, rows: 1 };
+  const rows = count <= maxPerRow * 2 ? 2 : Math.ceil(count / maxPerRow);
+  return { cols: Math.ceil(count / rows), rows };
+}
+
+/** Scales a fixed-size slide down to the width of its frame (print renders 1:1). */
+function useSlideScale(orientation: SlideOrientation) {
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const [scale, setScale] = useState(1);
+  const { width, height } = SLIDE_SIZE[orientation];
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const update = () => setScale(Math.min(1, frame.clientWidth / width));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(frame);
+    return () => observer.disconnect();
+  }, [width]);
+  return { frameRef, scale, frameHeight: height * scale };
+}
+
+function Slide({
+  orientation,
+  variant,
+  title,
+  period,
+  footerTitle,
+  children,
+}: {
+  orientation: SlideOrientation;
+  variant?: "cover" | "closing";
+  title?: string;
+  period?: { startText: string; endText: string } | null;
+  footerTitle: string;
+  children: React.ReactNode;
+}) {
+  const { frameRef, scale, frameHeight } = useSlideScale(orientation);
+  const { width, height } = SLIDE_SIZE[orientation];
+  return (
+    <div
+      className="slide-frame"
+      ref={frameRef}
+      style={{ height: frameHeight, ["--slide-w" as string]: `${width}px`, ["--slide-h" as string]: `${height}px` }}
+    >
+      <section
+        className={`slide ${orientation}${variant ? ` slide-${variant}` : ""}`}
+        style={{ transform: `scale(${scale})` }}
+      >
+        {!variant && (
+          <header className="slide-head">
+            <h2>{title}</h2>
+            {period && (
+              <p>
+                مدة التحليل: <bdi>{period.startText}</bdi> - <bdi>{period.endText}</bdi>
+              </p>
+            )}
+          </header>
+        )}
+        <div className="slide-body">{children}</div>
+        <footer className="slide-foot">
+          <span className="report-name">{renderWithLatinDigits(footerTitle)}</span>
+          <span className="brand-name">Kaan Creative</span>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function ReportPreview({
   t,
   reportId,
@@ -4423,9 +4596,8 @@ function ReportPreview({
   blocks: Block[];
   onClose: () => void;
 }) {
-  const [orientation, setOrientation] = useState<"landscape" | "portrait">(
-    "landscape",
-  );
+  void clientId;
+  const [orientation, setOrientation] = useState<SlideOrientation>("landscape");
   const printReport = async () => {
     if (reportId)
       await fetch(`/api/reports/${reportId}/export`, {
@@ -4444,6 +4616,12 @@ function ReportPreview({
     );
     window.print();
   };
+  const period = analysisPeriodLabel(periodStart, periodEnd);
+  const titleLines = coverTitleLines(reportTitle, periodStart, periodEnd);
+  const footerTitle = titleLines.join(" ");
+  const pageSize = orientation === "portrait" ? "7.5in 13.333in" : "13.333in 7.5in";
+  const closingBlock = blocks.find((block) => block.page === "closing");
+  const contentBlocks = blocks.filter((block) => block.page !== "cover" && block.page !== "closing");
   const preview = (
     <div
       className="report-preview-backdrop"
@@ -4451,7 +4629,7 @@ function ReportPreview({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <style media="print">{`@page { size: A4 ${orientation}; margin: 0; }`}</style>
+      <style media="print">{`@page { size: ${pageSize}; margin: 0; }`}</style>
       <section className={`report-preview ${orientation}`} dir="rtl">
         <div className="report-preview-actions">
           <button className="btn quiet" onClick={onClose}>
@@ -4477,123 +4655,55 @@ function ReportPreview({
             {t.previewExport}
           </button>
         </div>
-        <article className="print-report">
-          <header className="print-cover">
-            <div className="cover-logos">
-              <div className="print-logo">
-                <img
-                  src="/Kaan-orange-logo.png"
-                  alt="Kaan Creative"
-                  onError={(event) => {
-                    event.currentTarget.style.display = "none";
-                  }}
+        <article className="slide-deck" key={orientation}>
+          <Slide orientation={orientation} variant="cover" footerTitle={footerTitle}>
+            <div className={`cover-logo${clientLogo ? "" : " brand-fallback"}`}>
+              {clientLogo ? <img src={clientLogo} alt="شعار العميل" /> : <span>KAAN CREATIVE</span>}
+            </div>
+            <h1 className="cover-title">
+              {titleLines.map((line, index) => (
+                <span key={index}>{renderWithLatinDigits(line)}</span>
+              ))}
+            </h1>
+          </Slide>
+          {contentBlocks.map((block) => (
+            <Slide key={block.id} orientation={orientation} title={block.title} period={period} footerTitle={footerTitle}>
+              {block.kind === "kpi" && block.kpis ? (
+                <KpiSlideContent kpis={block.kpis} orientation={orientation} t={t} />
+              ) : block.kind === "media" ? (
+                <MediaPrint
+                  items={block.mediaItems ?? []}
+                  display={block.mediaDisplay ?? mediaSectionConfig(block.title).display}
+                  orientation={orientation}
                 />
-                <strong>
-                  KAAN
-                  <br />
-                  CREATIVE
-                </strong>
-              </div>
-              {clientLogo && (
-                <div className="client-cover-logo">
-                  <img src={clientLogo} alt="شعار العميل" />
+              ) : block.chart ? (
+                <ChartPrint chart={block.chart} />
+              ) : block.summary ? (
+                <MonthlySummaryPrint summary={block.summary} t={t} />
+              ) : (
+                <p className="slide-text">{block.body}</p>
+              )}
+              {block.refreshKey === "kpi-paid" && (
+                <div className="slide-attribution">
+                  <AdCurrencyAttribution />
                 </div>
               )}
+              {block.pageNote && (
+                <div className="slide-note">
+                  <h3>ملاحظات وتوصيات</h3>
+                  <p>{block.pageNote}</p>
+                </div>
+              )}
+            </Slide>
+          ))}
+          <Slide orientation={orientation} variant="closing" footerTitle={footerTitle}>
+            <div className="closing-row">
+              <h1>{closingBlock?.title ?? "شكرًا على ثقتكم"}</h1>
+              <div className="closing-logo kaan-logo-crop">
+                <img src="/Kaan-orange-logo.png" alt="Kaan Creative" />
+              </div>
             </div>
-            <div>
-              <h1>{reportTitle}</h1>
-              <p>
-                {new Intl.DateTimeFormat("ar", {
-                  day: "numeric",
-                  month: "long",
-                  year: "numeric",
-                }).format(new Date(periodStart))}
-                {" — "}
-                {new Intl.DateTimeFormat("ar", {
-                  day: "numeric",
-                  month: "long",
-                  year: "numeric",
-                }).format(new Date(periodEnd))}
-              </p>
-            </div>
-          </header>
-          <main className="print-content">
-            {blocks
-              .filter((block) => block.page !== "cover")
-              .map((block) => (
-                <section
-                  className={`print-section${block.page === "closing" ? " print-closing" : ""}`}
-                  key={block.id}
-                >
-                  {block.page !== "closing" && <h2>{block.title}</h2>}
-                  {block.page === "closing" ? (
-                    <div className="print-closing-content">
-                      <h1>{block.title}</h1>
-                      <p>{block.body}</p>
-                    </div>
-                  ) : block.kind === "kpi" && block.kpis ? (
-                    <div className={`print-kpi-grid print-kpi-grid-${Math.min(block.kpis.length, 9)}`}>
-                      {block.kpis.map((kpi, kpiIndex) =>
-                        kpi.display === "line" || kpi.display === "bar" ? (
-                          <PrintMetricTrend key={kpi.id} kpi={kpi} />
-                        ) : (
-                          <div className="print-kpi-item" key={kpi.id}>
-                            <div className="print-kpi">
-                            <small>{t.dashboard === "الرئيسية" ? "الفترة الحالية" : "Current period"}</small>
-                            <strong>{formatKpiValue(kpi.value)}</strong>
-                            <div className="print-kpi-label">
-                              <img
-                                className="print-kpi-icon"
-                                src={`/icons/icons-${String((kpiIndex % 10) + 1).padStart(2, "0")}.svg`}
-                                alt=""
-                              />
-                              <h3>{kpi.label}</h3>
-                            </div>
-                            {(kpi.comparisonMode ?? "none") !== "none" && (
-                              <div className="print-kpi-comparison">
-                                <small>
-                                  {kpi.comparisonMode === "previousMonth"
-                                    ? t.dashboard === "الرئيسية" ? "الشهر الماضي" : "Previous month"
-                                    : t.dashboard === "الرئيسية" ? "الشهر نفسه السنة الماضية" : "Same month last year"}
-                                </small>
-                                <strong>{kpi.comparisonValues?.[kpi.comparisonMode as Exclude<ComparisonMode, "none">] ?? (t.dashboard === "الرئيسية" ? "غير متاح" : "N/A")}</strong>
-                              </div>
-                            )}
-                            {kpi.change && <small>{kpi.change}</small>}
-                            </div>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  ) : block.kind === "media" ? (
-                    <MediaPrint
-                      items={block.mediaItems ?? []}
-                      display={
-                        block.mediaDisplay ??
-                        mediaSectionConfig(block.title).display
-                      }
-                    />
-                  ) : block.chart ? (
-                    <ChartPrint chart={block.chart} />
-                  ) : block.summary ? (
-                    <MonthlySummaryPrint summary={block.summary} t={t} />
-                  ) : (
-                    <p>{block.body}</p>
-                  )}
-                  {block.refreshKey === "kpi-paid" && <AdCurrencyAttribution />}
-                  {block.pageNote && (
-                    <div className="print-page-note">
-                      <h3>ملاحظات وتوصيات</h3>
-                      <p>{block.pageNote}</p>
-                    </div>
-                  )}
-                </section>
-              ))}
-          </main>
-          <footer className="print-footer">
-            <span>KAAN CREATIVE</span>
-            <span>{reportTitle}</span>
-          </footer>
+          </Slide>
         </article>
       </section>
     </div>
@@ -4603,101 +4713,188 @@ function ReportPreview({
     : null;
 }
 
+/** Slide numbers follow the template's compact style from 1,000 upward (3,200 → 3.2K); other values pass through formatKpiValue. */
+function formatSlideValue(value: string) {
+  if (!/^[\d,]+$/.test(value)) return formatKpiValue(value);
+  const num = Number(value.replace(/,/g, ""));
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  return value;
+}
+
+/** Wraps digit runs in <bdi> so they render in the Latin numeral font and keep LTR order inside Arabic text. */
+function renderWithLatinDigits(text: string) {
+  return text.split(/(\d[\d.,%+-]*)/).map((part, index) =>
+    /^\d/.test(part) ? <bdi key={index}>{part}</bdi> : <Fragment key={index}>{part}</Fragment>,
+  );
+}
+
+function KpiSlideContent({ kpis, orientation, t }: { kpis: Kpi[]; orientation: SlideOrientation; t: Dictionary }) {
+  const arabic = t.dashboard === "الرئيسية";
+  const numberKpis = kpis.filter((kpi) => kpi.display !== "line" && kpi.display !== "bar");
+  const trendKpis = kpis.filter((kpi) => kpi.display === "line" || kpi.display === "bar");
+  const rows = layoutKpiRows(numberKpis.length, orientation);
+  let cursor = 0;
+  const trendCols = orientation === "portrait" ? 1 : Math.min(trendKpis.length, 2);
+  return (
+    <div className={`kpi-rows count-${Math.min(numberKpis.length, 3)} rows-${rows.length + (trendKpis.length ? 1 : 0)}`}>
+      {rows.map((row, rowIndex) => {
+        const slice = numberKpis.slice(cursor, cursor + row.count);
+        cursor += row.count;
+        return (
+          <div className={`kpi-row size-${row.size}`} style={{ ["--cols" as string]: row.cols }} key={rowIndex}>
+            {slice.map((kpi) => {
+              const icon = kpiIconFor(kpi);
+              const value = formatSlideValue(kpi.value);
+              const comparisonMode = kpi.comparisonMode ?? "none";
+              return (
+                <div className="kpi" key={kpi.id}>
+                  <strong className={`kpi-value${/^[\d.,]+[KM%+-]*$|^[+-]?[\d.,]+[KM%]?$/.test(value) ? "" : " kpi-value-text"}`}>{value}</strong>
+                  <div className="kpi-label">
+                    <span>{kpi.label}</span>
+                    {icon && <img src={icon} alt="" />}
+                  </div>
+                  {comparisonMode !== "none" && (
+                    <div className="kpi-compare">
+                      {comparisonMode === "previousMonth"
+                        ? arabic ? "الشهر الماضي: " : "Previous month: "
+                        : arabic ? "الشهر نفسه السنة الماضية: " : "Same month last year: "}
+                      <b>{kpi.comparisonValues?.[comparisonMode as Exclude<ComparisonMode, "none">] ?? (arabic ? "غير متاح" : "N/A")}</b>
+                    </div>
+                  )}
+                  {kpi.change && <small className="kpi-change">{kpi.change}</small>}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+      {trendKpis.length > 0 && (
+        <div className="kpi-row kpi-row-trends" style={{ ["--cols" as string]: trendCols }}>
+          {trendKpis.map((kpi) => (
+            <PrintMetricTrend key={kpi.id} kpi={kpi} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PrintMetricTrend({ kpi }: { kpi: Kpi }) {
   const values = chartValues(kpi);
   const max = Math.max(...values, 1);
   const points = values
     .map((value, index) => `${32 + index * 15},${120 - (value / max) * 90}`)
     .join(" ");
-  const color =
-    [...kpi.id].reduce(
-      (total, character) => total + character.charCodeAt(0),
-      0,
-    ) % 2
-      ? "#ff5001"
-      : "#3c0b5e";
   return (
-    <div className="print-metric-trend">
-      <span>{kpi.label}</span>
-      <strong>{formatKpiValue(kpi.value)}</strong>
+    <div className="kpi-trend">
+      <div className="kpi-trend-head">
+        <span>{kpi.label}</span>
+        <strong>{formatKpiValue(kpi.value)}</strong>
+      </div>
       <svg viewBox="0 0 300 150" role="img" aria-label={kpi.label}>
         <g>
           <line x1="32" y1="30" x2="288" y2="30" />
           <line x1="32" y1="75" x2="288" y2="75" />
           <line x1="32" y1="120" x2="288" y2="120" />
         </g>
-        <text x="5" y="34">
-          {max.toLocaleString()}
-        </text>
-        <text x="5" y="79">
-          {Math.round(max / 2).toLocaleString()}
-        </text>
-        <text x="13" y="124">
-          0
-        </text>
+        <text x="5" y="34">{max.toLocaleString()}</text>
+        <text x="5" y="79">{Math.round(max / 2).toLocaleString()}</text>
+        <text x="13" y="124">0</text>
         {kpi.display === "line" ? (
-          <polyline
-            points={points}
-            fill="none"
-            stroke={color}
-            strokeWidth="3"
-          />
+          <polyline points={points} fill="none" stroke="#ff5001" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
         ) : (
           values.map((value, index) => (
-            <rect
-              key={index}
-              x={30 + index * 15}
-              y={120 - (value / max) * 90}
-              width="9"
-              height={(value / max) * 90}
-              fill={color}
-            />
+            <rect key={index} x={30 + index * 15} y={120 - (value / max) * 90} width="9" height={(value / max) * 90} rx="1.5" fill="#ff5001" />
           ))
         )}
-        <text x="32" y="143">
-          1
-        </text>
-        <text x="125" y="143">
-          15
-        </text>
-        <text x="235" y="143">
-          30
-        </text>
+        <text x="32" y="143">1</text>
+        <text x="125" y="143">15</text>
+        <text x="235" y="143">30</text>
       </svg>
       <small>Instagram · {kpi.label}</small>
     </div>
   );
 }
 
+const mediaMetricIcons: Record<string, typeof Heart> = {
+  likes: Heart,
+  comments: MessageCircle,
+  saved: Bookmark,
+  shares: Send,
+  views: Play,
+  reach: Eye,
+  follows: UserPlus,
+  total_interactions: Activity,
+};
+function mediaTypeIcon(mediaType: string) {
+  const type = mediaType.toUpperCase();
+  if (type.includes("VIDEO") || type.includes("REEL")) return Clapperboard;
+  if (type.includes("CAROUSEL") || type.includes("ALBUM")) return Layers;
+  return ImageIcon;
+}
+/** Metric strip under each card: the page's own metric(s) first, then the standard Instagram counters. */
+function mediaCardMetricKeys(display: string[], metrics: Record<string, number>) {
+  const ordered = [...display, "likes", "comments", "views", "reach", "saved", "shares"];
+  const unique = ordered.filter((key, index) => ordered.indexOf(key) === index);
+  return unique.filter((key) => display.includes(key) || (metrics[key] ?? 0) > 0).slice(0, 4);
+}
+
 function MediaPrint({
   items,
   display = ["total_interactions", "views"],
+  orientation,
 }: {
   items: MediaPost[];
   display?: string[];
+  orientation: SlideOrientation;
 }) {
   const keys =
     display.includes("total_interactions") && display.includes("views")
       ? ["total_interactions", "views"]
       : display;
-  return items.length === 0 ? (
-    <p>لم يتم اختيار منشورات لهذه الصفحة.</p>
-  ) : (
-    <div className="print-media-grid">
-      {items.map((item) => (
-        <article key={item.id}>
-          {(item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl) && (
-            <img src={item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl ?? ""} alt="" />
-          )}
-          <div className="print-media-metrics">
-            {keys.map((key) => (
-              <span key={key}>
-                <b>{(item.metrics[key] ?? 0).toLocaleString()}</b>
-                <small>{metricLabels[key] ?? key}</small>
-              </span>
-            ))}
-          </div>
-        </article>
+  const layout = layoutMediaRows(items.length, orientation);
+  if (items.length === 0) return <p className="media-empty">لم يتم اختيار منشورات لهذه الصفحة.</p>;
+  const rows = Array.from({ length: layout.rows }, (_, index) => items.slice(index * layout.cols, (index + 1) * layout.cols));
+  return (
+    <div className="media-rows">
+      {rows.map((row, rowIndex) => (
+        <div
+          className={`media-row cols-${Math.min(layout.cols, 8)}${layout.rows > 1 ? " dense" : ""}`}
+          style={{ ["--cols" as string]: layout.cols }}
+          key={rowIndex}
+        >
+          {row.map((item) => {
+            const TypeIcon = mediaTypeIcon(item.mediaType);
+            const src = item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl;
+            return (
+              <article className="media-card" key={item.id}>
+                <div className="media-card-thumb">
+                  {src && <img src={src} alt="" />}
+                  <span className="media-card-type">
+                    <TypeIcon />
+                  </span>
+                  {item.isCollaborative && (
+                    <span className="media-card-badge">
+                      <Users /> Collab
+                    </span>
+                  )}
+                </div>
+                <div className="media-card-metrics">
+                  {mediaCardMetricKeys(keys, item.metrics).map((key) => {
+                    const Icon = mediaMetricIcons[key] ?? Activity;
+                    return (
+                      <span key={key} title={metricLabels[key] ?? key}>
+                        <Icon />
+                        {formatSlideValue((item.metrics[key] ?? 0).toLocaleString("en-US"))}
+                      </span>
+                    );
+                  })}
+                </div>
+              </article>
+            );
+          })}
+        </div>
       ))}
     </div>
   );
@@ -4705,12 +4902,13 @@ function MediaPrint({
 
 function ChartPrint({ chart }: { chart: ChartConfig }) {
   return (
-    <div className="print-chart">
+    <div className="slide-chart">
       <ChartGraphic chart={chart} />
-      <p>{chart.insight}</p>
+      {chart.insight && <p>{chart.insight}</p>}
     </div>
   );
 }
+
 
 function MonthlySummaryPrint({
   summary,
@@ -4732,7 +4930,7 @@ function MonthlySummaryPrint({
         { key: "challenges", label: "Challenges & opportunities" },
       ];
   return (
-    <div className="print-summary">
+    <div className="slide-summary">
       {fields.map(
         ({ key, label }) =>
           summary[key] && (
