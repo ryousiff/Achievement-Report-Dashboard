@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { completedPeriod, type ReportPeriod, type ComparisonMode } from "@/lib/report-period";
 import { convertAdSpendToBhd, DEFAULT_SPONSORED_AD_CURRENCY } from "@/lib/sponsored-ads";
@@ -4667,34 +4667,7 @@ function ReportPreview({
             </h1>
           </Slide>
           {contentBlocks.map((block) => (
-            <Slide key={block.id} orientation={orientation} title={block.title} period={period} footerTitle={footerTitle}>
-              {block.kind === "kpi" && block.kpis ? (
-                <KpiSlideContent kpis={block.kpis} orientation={orientation} t={t} />
-              ) : block.kind === "media" ? (
-                <MediaPrint
-                  items={block.mediaItems ?? []}
-                  display={block.mediaDisplay ?? mediaSectionConfig(block.title).display}
-                  orientation={orientation}
-                />
-              ) : block.chart ? (
-                <ChartPrint chart={block.chart} />
-              ) : block.summary ? (
-                <MonthlySummaryPrint summary={block.summary} t={t} />
-              ) : (
-                <p className="slide-text">{block.body}</p>
-              )}
-              {block.refreshKey === "kpi-paid" && (
-                <div className="slide-attribution">
-                  <AdCurrencyAttribution />
-                </div>
-              )}
-              {block.pageNote && (
-                <div className="slide-note">
-                  <h3>ملاحظات وتوصيات</h3>
-                  <p>{block.pageNote}</p>
-                </div>
-              )}
-            </Slide>
+            <BlockSlides key={block.id} block={block} orientation={orientation} title={block.title} period={period} footerTitle={footerTitle} t={t} />
           ))}
           <Slide orientation={orientation} variant="closing" footerTitle={footerTitle}>
             <div className="closing-row">
@@ -4729,55 +4702,79 @@ function renderWithLatinDigits(text: string) {
   );
 }
 
-function KpiSlideContent({ kpis, orientation, t }: { kpis: Kpi[]; orientation: SlideOrientation; t: Dictionary }) {
+/** Parses a KPI value like "3,200", "+151" or "21.23%" into a number for delta computation. */
+function parseMetricNumber(value?: string) {
+  if (!value) return null;
+  const match = value.replace(/,/g, "").match(/-?[\d.]+/);
+  return match ? Number(match[0]) : null;
+}
+
+/** Rows for a KPI slide: sized number rows per the template layout, then one row for trend cards. */
+function buildKpiRows(kpis: Kpi[], orientation: SlideOrientation, t: Dictionary): { rows: React.ReactNode[]; container: (n: number) => string } {
   const arabic = t.dashboard === "الرئيسية";
   const numberKpis = kpis.filter((kpi) => kpi.display !== "line" && kpi.display !== "bar");
   const trendKpis = kpis.filter((kpi) => kpi.display === "line" || kpi.display === "bar");
-  const rows = layoutKpiRows(numberKpis.length, orientation);
+  const layout = layoutKpiRows(numberKpis.length, orientation);
+  const rows: React.ReactNode[] = [];
   let cursor = 0;
-  const trendCols = orientation === "portrait" ? 1 : Math.min(trendKpis.length, 2);
-  return (
-    <div className={`kpi-rows count-${Math.min(numberKpis.length, 3)} rows-${rows.length + (trendKpis.length ? 1 : 0)}`}>
-      {rows.map((row, rowIndex) => {
-        const slice = numberKpis.slice(cursor, cursor + row.count);
-        cursor += row.count;
-        return (
-          <div className={`kpi-row size-${row.size}`} style={{ ["--cols" as string]: row.cols }} key={rowIndex}>
-            {slice.map((kpi) => {
-              const icon = kpiIconFor(kpi);
-              const value = formatSlideValue(kpi.value);
-              const comparisonMode = kpi.comparisonMode ?? "none";
-              return (
-                <div className="kpi" key={kpi.id}>
-                  <strong className={`kpi-value${/^[\d.,]+[KM%+-]*$|^[+-]?[\d.,]+[KM%]?$/.test(value) ? "" : " kpi-value-text"}`}>{value}</strong>
-                  <div className="kpi-label">
-                    <span>{kpi.label}</span>
-                    {icon && <img src={icon} alt="" />}
-                  </div>
-                  {comparisonMode !== "none" && (
-                    <div className="kpi-compare">
-                      {comparisonMode === "previousMonth"
-                        ? arabic ? "الشهر الماضي: " : "Previous month: "
-                        : arabic ? "الشهر نفسه السنة الماضية: " : "Same month last year: "}
-                      <b>{kpi.comparisonValues?.[comparisonMode as Exclude<ComparisonMode, "none">] ?? (arabic ? "غير متاح" : "N/A")}</b>
-                    </div>
+  layout.forEach((row, rowIndex) => {
+    const slice = numberKpis.slice(cursor, cursor + row.count);
+    cursor += row.count;
+    rows.push(
+      <div className={`kpi-row size-${row.size}`} style={{ ["--cols" as string]: row.cols }} key={`n${rowIndex}`}>
+        {slice.map((kpi) => {
+          const icon = kpiIconFor(kpi);
+          const value = formatSlideValue(kpi.value);
+          const comparisonMode = kpi.comparisonMode ?? "none";
+          const comparison = comparisonMode !== "none"
+            ? kpi.comparisonValues?.[comparisonMode as Exclude<ComparisonMode, "none">]
+            : undefined;
+          const current = parseMetricNumber(kpi.value);
+          const previous = parseMetricNumber(comparison);
+          const delta = current !== null && previous !== null && previous !== 0
+            ? Math.round(((current - previous) / Math.abs(previous)) * 100)
+            : null;
+          return (
+            <div className="kpi" key={kpi.id}>
+              <strong className={`kpi-value${/^[\d.,]+[KM%+-]*$|^[+-]?[\d.,]+[KM%]?$/.test(value) ? "" : " kpi-value-text"}`}>{value}</strong>
+              <div className="kpi-label">
+                <span>{kpi.label}</span>
+                {icon && <img src={icon} alt="" />}
+              </div>
+              {comparisonMode !== "none" && (
+                <div className="kpi-compare">
+                  {comparisonMode === "previousMonth"
+                    ? arabic ? "الشهر الماضي: " : "Previous month: "
+                    : arabic ? "الشهر نفسه السنة الماضية: " : "Same month last year: "}
+                  <b>{comparison ?? (arabic ? "غير متاح" : "N/A")}</b>
+                  {delta !== null && (
+                    <i className={`kpi-delta${delta < 0 ? " down" : ""}`}>
+                      {delta >= 0 ? "▲" : "▼"}{Math.abs(delta)}%
+                    </i>
                   )}
-                  {kpi.change && <small className="kpi-change">{kpi.change}</small>}
                 </div>
-              );
-            })}
-          </div>
-        );
-      })}
-      {trendKpis.length > 0 && (
-        <div className="kpi-row kpi-row-trends" style={{ ["--cols" as string]: trendCols }}>
-          {trendKpis.map((kpi) => (
-            <PrintMetricTrend key={kpi.id} kpi={kpi} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
+              )}
+              {kpi.change && <small className="kpi-change">{kpi.change}</small>}
+            </div>
+          );
+        })}
+      </div>,
+    );
+  });
+  if (trendKpis.length > 0) {
+    const trendCols = orientation === "portrait" ? 1 : Math.min(trendKpis.length, 2);
+    rows.push(
+      <div className="kpi-row kpi-row-trends" style={{ ["--cols" as string]: trendCols }} key="trends">
+        {trendKpis.map((kpi) => (
+          <PrintMetricTrend key={kpi.id} kpi={kpi} />
+        ))}
+      </div>,
+    );
+  }
+  return {
+    rows,
+    container: (n) => `kpi-rows count-${Math.min(numberKpis.length, 3)} rows-${n >= 3 ? 3 : Math.max(n, 1)}`,
+  };
 }
 
 function PrintMetricTrend({ kpi }: { kpi: Kpi }) {
@@ -4840,63 +4837,166 @@ function mediaCardMetricKeys(display: string[], metrics: Record<string, number>)
   return unique.filter((key) => display.includes(key) || (metrics[key] ?? 0) > 0).slice(0, 4);
 }
 
-function MediaPrint({
-  items,
-  display = ["total_interactions", "views"],
-  orientation,
-}: {
-  items: MediaPost[];
-  display?: string[];
-  orientation: SlideOrientation;
-}) {
+function buildMediaRows(items: MediaPost[], display: string[], orientation: SlideOrientation): React.ReactNode[] {
   const keys =
     display.includes("total_interactions") && display.includes("views")
       ? ["total_interactions", "views"]
       : display;
+  if (items.length === 0) return [<p className="media-empty" key="empty">لم يتم اختيار منشورات لهذه الصفحة.</p>];
   const layout = layoutMediaRows(items.length, orientation);
-  if (items.length === 0) return <p className="media-empty">لم يتم اختيار منشورات لهذه الصفحة.</p>;
-  const rows = Array.from({ length: layout.rows }, (_, index) => items.slice(index * layout.cols, (index + 1) * layout.cols));
-  return (
-    <div className="media-rows">
-      {rows.map((row, rowIndex) => (
-        <div
-          className={`media-row cols-${Math.min(layout.cols, 8)}${layout.rows > 1 ? " dense" : ""}`}
-          style={{ ["--cols" as string]: layout.cols }}
-          key={rowIndex}
-        >
-          {row.map((item) => {
-            const TypeIcon = mediaTypeIcon(item.mediaType);
-            const src = item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl;
-            return (
-              <article className="media-card" key={item.id}>
-                <div className="media-card-thumb">
-                  {src && <img src={src} alt="" />}
-                  <span className="media-card-type">
-                    <TypeIcon />
+  return Array.from({ length: layout.rows }, (_, rowIndex) => {
+    const row = items.slice(rowIndex * layout.cols, (rowIndex + 1) * layout.cols);
+    return (
+      <div
+        className={`media-row cols-${Math.min(layout.cols, 8)}${layout.rows > 1 ? " dense" : ""}`}
+        style={{ ["--cols" as string]: layout.cols }}
+        key={rowIndex}
+      >
+        {row.map((item) => {
+          const TypeIcon = mediaTypeIcon(item.mediaType);
+          const src = item.thumbnailStorageUrl ?? item.thumbnailUrl ?? item.mediaUrl;
+          return (
+            <article className="media-card" key={item.id}>
+              <div className="media-card-thumb">
+                {src && <img src={src} alt="" />}
+                <span className="media-card-type">
+                  <TypeIcon />
+                </span>
+                {item.isCollaborative && (
+                  <span className="media-card-badge">
+                    <Users /> Collab
                   </span>
-                  {item.isCollaborative && (
-                    <span className="media-card-badge">
-                      <Users /> Collab
+                )}
+              </div>
+              <div className="media-card-metrics">
+                {mediaCardMetricKeys(keys, item.metrics).map((key) => {
+                  const Icon = mediaMetricIcons[key] ?? Activity;
+                  return (
+                    <span key={key} title={metricLabels[key] ?? key}>
+                      <Icon />
+                      {formatSlideValue((item.metrics[key] ?? 0).toLocaleString("en-US"))}
                     </span>
-                  )}
-                </div>
-                <div className="media-card-metrics">
-                  {mediaCardMetricKeys(keys, item.metrics).map((key) => {
-                    const Icon = mediaMetricIcons[key] ?? Activity;
-                    return (
-                      <span key={key} title={metricLabels[key] ?? key}>
-                        <Icon />
-                        {formatSlideValue((item.metrics[key] ?? 0).toLocaleString("en-US"))}
-                      </span>
-                    );
-                  })}
-                </div>
-              </article>
-            );
-          })}
+                  );
+                })}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    );
+  });
+}
+
+/** Turns a report block into measurable slide rows plus its trailing note/attribution. */
+function blockSlideRows(block: Block, orientation: SlideOrientation, t: Dictionary) {
+  const extras: React.ReactNode[] = [];
+  if (block.refreshKey === "kpi-paid")
+    extras.push(
+      <div className="slide-attribution" key="attr">
+        <AdCurrencyAttribution />
+      </div>,
+    );
+  if (block.pageNote)
+    extras.push(
+      <div className="slide-note" key="note">
+        <h3>ملاحظات وتوصيات</h3>
+        <p>{block.pageNote}</p>
+      </div>,
+    );
+  if (block.kind === "kpi" && block.kpis) {
+    const { rows, container } = buildKpiRows(block.kpis, orientation, t);
+    return { rows: [...rows, ...extras], container };
+  }
+  if (block.kind === "media") {
+    const display = block.mediaDisplay ?? mediaSectionConfig(block.title).display;
+    return { rows: [...buildMediaRows(block.mediaItems ?? [], display, orientation), ...extras], container: () => "media-rows" };
+  }
+  if (block.chart)
+    return { rows: [<ChartPrint key="chart" chart={block.chart} />, ...extras], container: () => "slide-flow" };
+  if (block.summary)
+    return { rows: [<MonthlySummaryPrint key="sum" summary={block.summary} t={t} />, ...extras], container: () => "slide-flow" };
+  const paragraphs = block.body.split(/\n{2,}/).filter(Boolean);
+  return {
+    rows: [
+      ...paragraphs.map((text, index) => (
+        <p className="slide-text" key={index}>{text}</p>
+      )),
+      ...extras,
+    ],
+    container: () => "slide-flow",
+  };
+}
+
+/**
+ * Renders one block as one or more slides: first pass renders the rows hidden inside a probe slide,
+ * measures each row's height, then packs the rows into as many identical slides as needed so nothing
+ * overflows — adding or removing content just re-flows it into extra pages.
+ */
+function BlockSlides({
+  block,
+  orientation,
+  title,
+  period,
+  footerTitle,
+  t,
+}: {
+  block: Block;
+  orientation: SlideOrientation;
+  title: string;
+  period: { startText: string; endText: string } | null;
+  footerTitle: string;
+  t: Dictionary;
+}) {
+  const { rows, container } = useMemo(() => blockSlideRows(block, orientation, t), [block, orientation, t]);
+  const [chunks, setChunks] = useState<number[] | null>(null);
+  const probeRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const probe = probeRef.current;
+    const body = probe?.parentElement;
+    if (!probe || !body) return;
+    const kids = Array.from(probe.children) as HTMLElement[];
+    const bodyStyle = getComputedStyle(body);
+    const available = body.clientHeight - parseFloat(bodyStyle.paddingTop) - parseFloat(bodyStyle.paddingBottom);
+    if (!available || kids.length === 0) { setChunks([rows.length]); return; }
+    const gap = kids.length > 1 ? Math.max(0, kids[1].offsetTop - (kids[0].offsetTop + kids[0].offsetHeight)) : 0;
+    const packed: number[] = [];
+    let used = 0;
+    let count = 0;
+    kids.forEach((kid, index) => {
+      const need = kid.offsetHeight + (count > 0 ? gap : 0);
+      if (count > 0 && used + need > available + 1) {
+        packed.push(count);
+        used = 0;
+        count = 0;
+      }
+      used += kid.offsetHeight + (count > 0 ? gap : 0);
+      count += 1;
+      void index;
+    });
+    if (count > 0) packed.push(count);
+    setChunks(packed);
+  }, [rows, orientation]);
+  if (chunks === null)
+    return (
+      <Slide orientation={orientation} title={title} period={period} footerTitle={footerTitle}>
+        <div className={container(rows.length)} ref={probeRef} style={{ visibility: "hidden" }}>
+          {rows}
         </div>
-      ))}
-    </div>
+      </Slide>
+    );
+  let start = 0;
+  return (
+    <>
+      {chunks.map((count, chunkIndex) => {
+        const slice = rows.slice(start, start + count);
+        start += count;
+        return (
+          <Slide key={`${block.id}-${chunkIndex}`} orientation={orientation} title={title} period={period} footerTitle={footerTitle}>
+            <div className={container(count)}>{slice}</div>
+          </Slide>
+        );
+      })}
+    </>
   );
 }
 
