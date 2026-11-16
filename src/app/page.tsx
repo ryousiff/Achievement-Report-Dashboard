@@ -1734,6 +1734,11 @@ export default function Home() {
               (client) => client.id === reportMetadata.clientId,
             )?.logoUrl
           }
+          clientName={
+            workspaceClients.find(
+              (client) => client.id === reportMetadata.clientId,
+            )?.name
+          }
           blocks={blocks}
           onClose={() => setPreviewOpen(false)}
         />
@@ -4435,21 +4440,15 @@ function analysisPeriodLabel(periodStart: string, periodEnd: string) {
   return { startText, endText };
 }
 /** Splits the report title into the two cover lines used by the template ("تقرير الإنجاز" / "لشهر سبتمبر 2026"). */
-function coverTitleLines(title: string, periodStart: string, periodEnd: string) {
-  const trimmed = title.trim();
-  const match = trimmed.match(/^(.*?)\s+((?:لشهر|لعام|للفترة|لربع|لأسبوع)(?:\s.*)?)$/u);
+function coverTitleLines(_title: string, periodStart: string, periodEnd: string) {
   const start = parseReportDate(periodStart);
   const end = parseReportDate(periodEnd);
-  if (match) {
-    const second = /\d{4}/.test(match[2]) || !start ? match[2] : `${match[2]} ${arabicYear.format(start)}`;
-    return [match[1], second];
-  }
-  if (!start || !end) return [trimmed];
+  if (!start || !end) return ["تقرير الإنجاز"];
   const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
   const period = sameMonth
     ? `لشهر ${arabicMonth.format(start)} ${arabicYear.format(start)}`
     : `${arabicDay.format(start)} ${arabicMonth.format(start)} – ${arabicDay.format(end)} ${arabicMonth.format(end)} ${arabicYear.format(end)}`;
-  return trimmed.includes(period) ? [trimmed] : [trimmed, period];
+  return ["تقرير الإنجاز", period];
 }
 
 /** Picks the outline icon from /public/icons that matches a KPI (by id first, then label keywords). */
@@ -4583,6 +4582,7 @@ function ReportPreview({
   periodStart,
   periodEnd,
   clientLogo,
+  clientName,
   blocks,
   onClose,
 }: {
@@ -4593,6 +4593,7 @@ function ReportPreview({
   periodStart: string;
   periodEnd: string;
   clientLogo?: string | null;
+  clientName?: string | null;
   blocks: Block[];
   onClose: () => void;
 }) {
@@ -4606,7 +4607,7 @@ function ReportPreview({
         body: JSON.stringify({ orientation }),
       });
     const originalTitle = document.title;
-    document.title = reportTitle;
+    document.title = `${coverTitleLines(reportTitle, periodStart, periodEnd).join(" ")}${clientName ? ` - ${clientName}` : ""}`;
     window.addEventListener(
       "afterprint",
       () => {
@@ -4618,7 +4619,7 @@ function ReportPreview({
   };
   const period = analysisPeriodLabel(periodStart, periodEnd);
   const titleLines = coverTitleLines(reportTitle, periodStart, periodEnd);
-  const footerTitle = titleLines.join(" ");
+  const footerTitle = `${titleLines.join(" ")}${clientName ? ` - ${clientName}` : ""}`;
   const pageSize = orientation === "portrait" ? "7.5in 13.333in" : "13.333in 7.5in";
   const closingBlock = blocks.find((block) => block.page === "closing");
   const contentBlocks = blocks.filter((block) => block.page !== "cover" && block.page !== "closing");
