@@ -43,7 +43,8 @@
 /* Cover ------------------------------------------------------------ */
 .slide-cover .slide-body { align-items: center; justify-content: center; gap: 44px; text-align: center; }
 .cover-logo { display: grid; place-items: center; width: 420px; height: 150px; overflow: hidden; }
-.cover-logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cover-logo img { max-width: 420px; max-height: 150px; width: auto; height: auto; object-fit: contain; display: block; }
+.slide-cover.portrait .cover-logo img { max-width: 360px; }
 .cover-logo.brand-fallback { color: var(--orange); font: 700 26px Georgia, serif; letter-spacing: .06em; }
 .cover-title { color: var(--purple); font-size: 46px; font-weight: 700; line-height: 1.45; margin: 0; }
 .cover-title span { display: block; }
