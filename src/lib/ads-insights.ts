@@ -224,7 +224,7 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
     return !adOwnedByScope(promoted, undefined, scope);
   }).map((r) => r.ad_id).filter((id): id is string => Boolean(id));
   const creatives = needsCreative.length > 0
-    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_user_id,object_story_id,instagram_permalink_url,preview_shareable_link}")
+    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_user_id,object_story_id,instagram_permalink_url}")
     : {};
 
   const num = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
