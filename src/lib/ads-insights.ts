@@ -143,6 +143,7 @@ type AdCreativeInfo = {
   instagram_user_id?: string;
   effective_instagram_media_id?: string;
   object_story_id?: string;
+  preview_shareable_link?: string;
 };
 
 async function batchFetch<T>(token: string, ids: string[], fields: string): Promise<Record<string, T>> {
@@ -182,6 +183,7 @@ export type ScopedAdInsight = {
   name: string | null;
   permalink: string | null;
   instagramMediaId: string | null;
+  previewUrl?: string | null;
   spend: number;
   impressions: number;
   reach: number;
@@ -222,7 +224,7 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
     return !adOwnedByScope(promoted, undefined, scope);
   }).map((r) => r.ad_id).filter((id): id is string => Boolean(id));
   const creatives = needsCreative.length > 0
-    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_user_id,object_story_id,instagram_permalink_url}")
+    ? await batchFetch<{ creative?: AdCreativeInfo & { id?: string; instagram_permalink_url?: string } }>(token, needsCreative, "creative{effective_instagram_media_id,instagram_user_id,object_story_id,instagram_permalink_url,preview_shareable_link}")
     : {};
 
   const num = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined);
@@ -239,6 +241,7 @@ async function fetchScopedAdRows(token: string, adAccountId: string, scope: AdSc
       name: row.ad_name ?? null,
       permalink: creative?.instagram_permalink_url ?? null,
       instagramMediaId: creative?.effective_instagram_media_id ?? null,
+      previewUrl: creative?.preview_shareable_link ?? null,
       spend: num(row.spend) ?? 0,
       impressions: num(row.impressions) ?? 0,
       reach: num(row.reach) ?? 0,

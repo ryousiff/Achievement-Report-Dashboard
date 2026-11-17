@@ -30,7 +30,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   // this client's own posts. Manual entries that already reference a Meta ad (metaAdId) hide
   // the matching auto row so the same boost never shows twice. Failures never break the
   // manual list — autoAds just comes back empty.
-  let autoAds: Array<{ metaAdId: string; name: string | null; permalink: string | null; instagramMediaId: string | null; spend: number; impressions: number; reach: number; clicks: number }> = [];
+  let autoAds: Array<{ metaAdId: string; name: string | null; permalink: string | null; instagramMediaId: string | null; previewUrl?: string | null; spend: number; impressions: number; reach: number; clicks: number }> = [];
   let autoCurrency: string | null = null;
   let autoStatus: "UNAVAILABLE" | "READY" | "ERROR" = "UNAVAILABLE";
   if (year !== undefined && month !== undefined) {
@@ -53,9 +53,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           const permalinkByMediaId = new Map(posts.filter((p) => p.permalink).map((p) => [p.externalPostId, p.permalink as string]));
           autoAds = autoAds.map((ad) => {
             const realPermalink = ad.instagramMediaId ? permalinkByMediaId.get(ad.instagramMediaId) : undefined;
-            // The creative permalink leads to an unpublished ad-copy post that never loads publicly.
-            if (ad.permalink && !realPermalink) return { ...ad, permalink: null };
-            return realPermalink ? { ...ad, permalink: realPermalink } : ad;
+            // The creative permalink leads to an unpublished ad-copy post that never loads
+            // publicly; Meta's shareable ad preview still works for those dark posts.
+            return { ...ad, permalink: realPermalink ?? ad.previewUrl ?? null };
           });
         }
         autoCurrency = result.currency;
