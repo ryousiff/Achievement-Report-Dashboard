@@ -41,6 +41,21 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       if (result) {
         const manualMetaIds = new Set(ads.map((ad) => ad.metaAdId).filter((id): id is string => Boolean(id)));
         autoAds = result.ads.filter((ad) => !manualMetaIds.has(ad.metaAdId));
+        // Meta's creative `instagram_permalink_url` points at the dark ad-copy post, which is not
+        // publicly accessible. Prefer the real published post's permalink when the promoted media
+        // is in this client's synced library.
+        const mediaIds = autoAds.map((ad) => ad.instagramMediaId).filter((id): id is string => Boolean(id));
+        if (mediaIds.length > 0) {
+          const posts = await db.socialPost.findMany({
+            where: { externalPostId: { in: mediaIds }, connection: { clientId } },
+            select: { externalPostId: true, permalink: true },
+          });
+          const permalinkByMediaId = new Map(posts.filter((p) => p.permalink).map((p) => [p.externalPostId, p.permalink as string]));
+          autoAds = autoAds.map((ad) => {
+            const realPermalink = ad.instagramMediaId ? permalinkByMediaId.get(ad.instagramMediaId) : undefined;
+            return realPermalink ? { ...ad, permalink: realPermalink } : ad;
+          });
+        }
         autoCurrency = result.currency;
         autoStatus = "READY";
       }
