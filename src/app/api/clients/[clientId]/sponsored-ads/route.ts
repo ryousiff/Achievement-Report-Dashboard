@@ -53,6 +53,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           const permalinkByMediaId = new Map(posts.filter((p) => p.permalink).map((p) => [p.externalPostId, p.permalink as string]));
           autoAds = autoAds.map((ad) => {
             const realPermalink = ad.instagramMediaId ? permalinkByMediaId.get(ad.instagramMediaId) : undefined;
+            // The creative permalink leads to an unpublished ad-copy post that never loads publicly.
+            if (ad.permalink && !realPermalink) return { ...ad, permalink: null };
             return realPermalink ? { ...ad, permalink: realPermalink } : ad;
           });
         }
